@@ -15,7 +15,7 @@ def test_list_scoped_and_gated(rc):
     assert rc.get("/api/alarms", user=NOBODY).json()["alarms"] == []
     assert rc.get("/api/alarms?dam_id=PHR", user=ENG).status_code == 403
     nd = next(a for a in al if a["rule"] == "no_data")
-    assert nd["value"] is None and nd["display_status"] == "UNVERIFIED_FORMULA"  # no formula -> nothing to show
+    assert nd["value"] is None and nd["display_status"] == "LINEAGE_INCOMPLETE"  # no calib/formula lineage -> nothing to show
     assert all(a["level"] >= 2 for a in rc.get("/api/alarms?min_level=2").json()["alarms"])
     # open first, highest level first
     states = [a["state"] for a in al]

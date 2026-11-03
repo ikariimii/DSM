@@ -33,6 +33,7 @@ class Analytics(Protocol):
     def incl_surveys(self, instrument_id: str) -> list[dict]: ...
     def incl_profile(self, instrument_id: str, survey_id: str) -> list[dict]: ...
     def incl_corrections(self, record_ids: list[str]) -> list[dict]: ...
+    def incl_bias_proposals(self, instrument_id: str, survey_id: str) -> list[dict]: ...
     def alarm_events(self, dam_ids: list[str], since: str | None = None) -> list[dict]: ...
     def pfms(self, dam_id: str) -> list[dict]: ...
 
@@ -50,12 +51,12 @@ class MockAnalytics:
         return [dict(s) for s in self.d["structures"] if s["dam_id"] == dam_id]
 
     def instruments(self, dam_id):
-        return [dict(i) for i in self.d["instruments"] if i["dam_id"] == dam_id]
+        return [ct.instrument(i) for i in self.d["instruments"] if i["dam_id"] == dam_id]
 
     def instrument(self, instrument_id):
         for i in self.d["instruments"]:
             if i["instrument_id"] == instrument_id:
-                return dict(i)
+                return ct.instrument(i)
         return None
 
     # Demo rows go through the same contract adapters as warehouse rows, so both paths share one shape.
@@ -132,6 +133,11 @@ class MockAnalytics:
 
     def incl_corrections(self, record_ids):
         return [ct.incl_correction(c) for c in self.d.get("incl_corrections", []) if c["record_id"] in set(record_ids)]
+
+    def incl_bias_proposals(self, instrument_id, survey_id):
+        return [ct.incl_correction(c) for c in self.d.get("incl_corrections", [])
+                if c.get("instrument_id") == instrument_id and c.get("survey_id") == survey_id
+                and c.get("detection_method") == "between_set_bias_qc" and c.get("applied") is False]
 
     def alarm_events(self, dam_ids, since=None):
         return [dict(e) for e in self.d["alarm_events"] if e["dam_id"] in dam_ids
@@ -272,6 +278,13 @@ class SqlAnalytics:
             f"SELECT * FROM {self.t('ref', 'incl_correction')} "
             "WHERE array_contains(from_json(:ids, 'ARRAY<STRING>'), record_id) ORDER BY timestamp_utc, record_id",
             {"ids": json.dumps(sorted(set(record_ids)))})]
+
+    def incl_bias_proposals(self, instrument_id, survey_id):
+        # QA-020 engine proposals (§5.5 v1.2): unapplied, non-superseded rows only; display-only, never applied
+        return [ct.incl_correction(r) for r in self.q(
+            f"SELECT * FROM {self.t('ref', 'incl_correction')} WHERE instrument_id = :iid AND survey_id = :sid "
+            "AND detection_method = 'between_set_bias_qc' AND applied = false AND superseded_by IS NULL "
+            "ORDER BY timestamp_utc, record_id", {"iid": instrument_id, "sid": survey_id})]
 
     def alarm_events(self, dam_ids, since=None):
         if not dam_ids:

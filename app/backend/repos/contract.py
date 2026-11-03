@@ -228,22 +228,110 @@ INCL_CORRECTION_FIELDS = (
     "input_file_sha256", "superseded_by")
 CORRECTION_UNVERIFIED = "CORRECTION_UNVERIFIED"
 UNCORRECTED_NOTE = ("Uncorrected: no bias, depth, sensitivity or rotation correction is applied (SCHEMA_CONTRACT "
-                    "§5.5; the reduce job is not yet switched to dam_safety.inclinometer.engine).")
+                    "§5.5). The v1.3 reduce_inclinometers writer is not deployed, so the app treats values as "
+                    "uncorrected; any row that references a correction record is withheld.")
+BIAS_PROPOSAL_NOTE = ("QA-020/QA-021 between-set bias QC (engine, SCHEMA_CONTRACT §5.5): the suspect flag and proposed "
+                      "c are UNVERIFIED and NEVER applied. Applying a bias is a separate reviewed ref.incl_correction "
+                      "row; the profile values above stay uncorrected.")
+
+# §3 / §5.5 v1.3 qa_reason codes (comma-joined). (label, severity); severity is what the code implies for qa_flag.
+# A code ending in _A/_B is per axis. Unknown codes are shown verbatim, never dropped.
+QA_REASON_CODES = {
+    "BAD:TEXT": ("reading is not numeric", "BAD"),
+    "BAD:RANGE": ("reading outside the valid range", "BAD"),
+    "MISSING:PASS": ("A0 or A180 pass missing", "MISSING"),
+    "CHECKSUM": ("checksum outside tolerance", "SUSPECT"),
+    "MEAN_CS_GT_100_A": ("survey mean checksum > 100 (A)", "SUSPECT"),
+    "MEAN_CS_GT_100_B": ("survey mean checksum > 100 (B)", "SUSPECT"),
+    "INDIVIDUAL_CS_A": ("individual checksum outside band (A)", "SUSPECT"),
+    "INDIVIDUAL_CS_B": ("individual checksum outside band (B)", "SUSPECT"),
+    "BIAS_CS_SHIFT_A": ("between-set checksum shift vs reference (A): investigate", "SUSPECT"),
+    "BIAS_CS_SHIFT_B": ("between-set checksum shift vs reference (B): investigate", "SUSPECT"),
+    "BIAS_PROPOSED_A": ("bias correction proposed (A), UNVERIFIED, not applied", "SUSPECT"),
+    "BIAS_PROPOSED_B": ("bias correction proposed (B), UNVERIFIED, not applied", "SUSPECT"),
+    "BIAS_CROSSCHECK_A": ("bias cross-check failed (A): review, no proposal", "SUSPECT"),
+    "BIAS_CROSSCHECK_B": ("bias cross-check failed (B): review, no proposal", "SUSPECT"),
+    "BIAS_BAD_RESURVEY_A": ("|c| above limit (A): resurvey", "BAD"),
+    "BIAS_BAD_RESURVEY_B": ("|c| above limit (B): resurvey", "BAD"),
+    "STABLE_ZONE_ASSUMED": ("stable zone not set; bottom intervals assumed", "INFO"),
+    "CORRECTION_RECORD_INVALID": ("stored correction record failed validation and was skipped", "SUSPECT"),
+    "SPIRAL_NOT_APPLIED": ("spiral correction not applied (deferred)", "INFO"),
+}
+CHECKSUM_CODES = {"CHECKSUM", "MEAN_CS_GT_100_A", "MEAN_CS_GT_100_B", "INDIVIDUAL_CS_A", "INDIVIDUAL_CS_B"}
+
+
+def qa_reason_codes(reason) -> list[str]:
+    """Comma-joined qa_reason (§3) -> codes, order kept, blanks dropped."""
+    if not reason:
+        return []
+    return [x.strip() for x in str(reason).split(",") if x.strip()]
+
+
+def qa_reason_detail(reason) -> list[dict]:
+    out = []
+    for code in qa_reason_codes(reason):
+        key = code.upper()
+        if key.startswith("CORRECTION_ERROR:"):
+            label, sev = f"correction {code.split(':', 1)[1]} failed; no values", "BAD"
+        else:
+            label, sev = QA_REASON_CODES.get(key, (None, None))
+        out.append({"code": code, "label": label, "severity": sev, "known": label is not None})
+    return out
 
 
 def incl_row(row: dict) -> dict:
     r = {INCL_COLS.get(k, k): v for k, v in row.items()}
-    reason = (r.get("qa_reason") or "").upper()
-    r["qc_checksum_ok"] = "CHECKSUM" not in {x.strip() for x in reason.split(",")}
+    codes = {x.upper() for x in qa_reason_codes(r.get("qa_reason"))}
+    r["qc_checksum_ok"] = not (codes & CHECKSUM_CODES)
     ids = r.get("correction_record_ids") or []
     r["correction_record_ids"] = list(ids)
     # §5.5: until the reduce job uses the engine, values are uncorrected. A row that claims corrections cannot
     # be presented as uncorrected, and the app cannot verify the corrections, so it is flagged for the gate.
     r["correction_basis"] = "uncorrected" if not ids else "corrected_unverified"
-    # Bias proposals are suppressed until the QA-020 spec exists and the engine provides one (owner decision
-    # 2026-11-02). Drop the field even if a source column appears, so it can never reach the API or UI.
+    # The app's own proposed_bias stays suppressed (owner decision 2026-11-02). Only the engine's QA-020 result is
+    # shown, at profile level (bias_qc), from qa_reason codes and unapplied ref.incl_correction proposal rows.
     r.pop("proposed_bias", None)
     return r
+
+
+def _parse_statistic(s) -> dict:
+    out = {}
+    for part in str(s or "").split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def bias_qc(rows: list[dict], proposals: list[dict]) -> dict:
+    """Per-axis QA-020 summary for one survey, from the engine's qa_reason codes (silver.incl_reduced, §5.5 v1.3)
+    and its unapplied proposal rows (ref.incl_correction, detection_method='between_set_bias_qc', applied=false).
+
+    Everything here is UNVERIFIED and never applied: proposed_c is display-only and is never used to change a value.
+    A proposal row that claims applied=true is not a proposal and is ignored here (applied corrections go through
+    correction_record_ids and are withheld as CORRECTION_UNVERIFIED)."""
+    codes = {c.upper() for r in rows for c in qa_reason_codes(r.get("qa_reason"))}
+    out = {}
+    for ax in ("A", "B"):
+        status = ("BAD_RESURVEY" if f"BIAS_BAD_RESURVEY_{ax}" in codes else
+                  "SUSPECT_CROSSCHECK" if f"BIAS_CROSSCHECK_{ax}" in codes else
+                  "PROPOSED" if f"BIAS_PROPOSED_{ax}" in codes else None)
+        props = [p for p in proposals if (p.get("axis") or "").upper() == ax and p.get("applied") is False
+                 and p.get("detection_method") == "between_set_bias_qc" and not p.get("superseded_by")]
+        props.sort(key=lambda p: (str(p.get("timestamp_utc") or ""), str(p.get("record_id"))))
+        p = props[-1] if props else None
+        c = p.get("auto_value") if p else None
+        out[ax] = {
+            "suspect_flag": f"BIAS_CS_SHIFT_{ax}" in codes,
+            "status": status,                       # None = the engine reported no QA-020 code for this axis
+            "proposed_c": float(c) if c is not None and status == "PROPOSED" else None,
+            "proposed_c_unit": "reading units (ZA/ZB; D' = D + ZA)",
+            "proposal_record_id": p.get("record_id") if p and status == "PROPOSED" else None,
+            "evidence": _parse_statistic(p.get("detection_statistic")) if p and status == "PROPOSED" else {},
+            "display_status": "UNVERIFIED",
+            "applied": False,
+        }
+    return {"axes": out, "stable_zone_assumed": "STABLE_ZONE_ASSUMED" in codes, "note": BIAS_PROPOSAL_NOTE}
 
 
 def incl_api_row(row: dict) -> dict:

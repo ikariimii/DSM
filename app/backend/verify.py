@@ -17,12 +17,15 @@ MISSING = "MISSING"
 CORRECTION_UNVERIFIED = "CORRECTION_UNVERIFIED"
 LINEAGE_INCOMPLETE = "LINEAGE_INCOMPLETE"
 LINEAGE_INCONSISTENT = "LINEAGE_INCONSISTENT"
+NO_ENGINE_FORMULA = "NO_ENGINE_FORMULA"   # §5.4: instrument type with empty engine_formulas is never computed
 COMPUTED_KEYS = ("eng_value", "corrected_value")
 INCL_KEYS = ("a_inc_mm", "b_inc_mm", "a_cum_mm", "b_cum_mm", "resultant_mm")
 
 
 class Gate:
-    def __init__(self, formulas: Iterable[dict], calibrations: Iterable[dict]):
+    def __init__(self, formulas: Iterable[dict], calibrations: Iterable[dict],
+                 not_computable: Iterable[str] = ()):
+        self.not_computable = set(not_computable)
         self.verified = {(f["formula_id"], str(f["formula_version"])) for f in formulas if f.get("verified")}
         # retired calibrations (superseded corrections) and calibrations with data issues (e.g. sign_mult in params,
         # contract.calibration) never count as approved
@@ -30,6 +33,8 @@ class Gate:
                          and not c.get("calibration_issues")}
 
     def status(self, row: dict) -> str:
+        if row.get("instrument_id") in self.not_computable:
+            return NO_ENGINE_FORMULA
         fid, ver = row.get("formula_id"), row.get("formula_version")
         if fid is None or ver is None or (fid, str(ver)) not in self.verified:
             return UNVERIFIED_FORMULA
@@ -60,7 +65,9 @@ class Gate:
     def apply_event(self, ev: dict) -> dict:
         """Alarm events always stay visible (safety first); an unverified triggering value is withheld."""
         fid, ver = ev.get("formula_id"), ev.get("formula_version")
-        if ev.get("lineage_issue"):
+        if ev.get("instrument_id") in self.not_computable:
+            st = NO_ENGINE_FORMULA
+        elif ev.get("lineage_issue"):
             st = LINEAGE_INCONSISTENT
         elif ev.get("calib_id") is None or fid is None or ver is None:
             st = LINEAGE_INCOMPLETE

@@ -6,6 +6,7 @@ from collections import Counter
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .. import formulas as fx
+from ..repos import contract as ct
 from ..common import gate_for, instrument_checked, site_or_404
 from ..deps import Ctx, analytics, ctx, require
 from ..verify import INCL_KEYS
@@ -30,12 +31,17 @@ def registry(dam_id: str, c: Ctx = Depends(ctx), an=Depends(analytics)):
     out = []
     for i in an.instruments(dam_id):
         mine = [x for x in cals if x["instrument_id"] == i["instrument_id"]]
-        cur = next((x for x in mine if x.get("effective_to") is None), mine[-1] if mine else None)
+        # "current" = the open-ended, non-retired calibration (not is_current alone; retired corrections never count)
+        live = [x for x in mine if not x.get("is_retired")]
+        cur = next((x for x in live if x.get("effective_to") is None), live[-1] if live else None)
         out.append({**i, "latest": latest.get(i["instrument_id"]),
                     "formula_verified": (i["formula_id"], str(i["formula_version"])) in verified,
                     "current_calibration": None if cur is None else {
                         "calib_id": cur["calib_id"], "cal_version": cur["cal_version"],
-                        "approved": bool(cur.get("approved_by")), "effective_from": cur.get("effective_from")}})
+                        "approved": bool(cur.get("approved_by")) and not cur.get("calibration_issues"),
+                        "calibration_issues": cur.get("calibration_issues") or [],
+                        "sign_mult": cur.get("sign_mult"), "offset": cur.get("offset"),
+                        "effective_from": cur.get("effective_from")}})
     return {"dam_id": dam_id, "instruments": out}
 
 
@@ -98,15 +104,24 @@ def incl_profile(instrument_id: str, survey_ids: str = Query(..., description="c
             raise HTTPException(404, f"Unknown survey {sid}")
         rows = gate.apply_all(rows, INCL_KEYS)
         st = Counter(r["display_status"] for r in rows)
+        rec_ids = sorted({x for r in rows for x in r.get("correction_record_ids") or []})
+        basis = sorted({r.get("correction_basis") or "uncorrected" for r in rows})
         profiles.append({
             "survey_id": sid, "survey_ts": rows[0].get("survey_ts"), "unit": "mm",
             "calib_id": rows[0].get("calib_id"), "cal_version": rows[0].get("cal_version"),
             "formula_id": rows[0].get("formula_id"), "formula_version": rows[0].get("formula_version"),
             "display_status": dict(st), "qa_flag": dict(Counter(r.get("qa_flag") for r in rows)),
-            # No bias correction is applied, and none is proposed: proposals are suppressed until the QA-020 spec
-            # exists and the engine provides them (owner decision 2026-11-02).
+            # No bias correction is applied. The app's own proposal stays suppressed; the engine's QA-020 suspect
+            # flag / proposed c are shown UNVERIFIED and never applied (§5.5 v1.2, api_contract §3).
             "bias_applied": False,
-            "rows": rows})
+            "bias_qc": ct.bias_qc(rows, an.incl_bias_proposals(instrument_id, sid)),
+            "qa_reasons": ct.qa_reason_detail(",".join(dict.fromkeys(
+                c for r in rows for c in ct.qa_reason_codes(r.get("qa_reason"))))),
+            # §5.5: values are uncorrected; a row that references corrections is withheld (CORRECTION_UNVERIFIED)
+            "correction_basis": basis, "correction_note": ct.UNCORRECTED_NOTE,
+            "corrections": an.incl_corrections(rec_ids) if rec_ids else [],
+            # API uses the contract column names (cum_a, inc_a, resultant, checksum_a, ...)
+            "rows": [ct.incl_api_row(r) for r in rows]})
     return {"instrument": inst, "profiles": profiles}
 
 
