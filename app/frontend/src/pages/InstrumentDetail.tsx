@@ -280,12 +280,13 @@ function BiasQc({ bq, iid, sid, signoffs, onReviewed }: { bq?: any; iid: string;
   );
 }
 
-/** QA-039 sign-offs: each is an append-only row; the hash is re-verified against the current record by the server. */
+/** QA-039 sign-offs: each is an append-only link of the dam's hash chain (verify: GET /api/dams/{dam}/audit/signoffs/verify);
+ *  the content hash is re-verified against the current record by the server. */
 function SignOffs({ rows }: { rows: any[] }) {
   if (!rows.length) return <span className="muted">none</span>;
   return <>{rows.map((r) => (
     <div key={r.review_id} className="small">
-      <span className={r.decision === "approve" ? "badge muted" : "badge warn"}>{r.decision}</span> {r.reviewer_id}{r.reviewer_pe_license ? ` (PE ${r.reviewer_pe_license})` : ""} · {utc(r.signed_ts)}
+      <span className={r.decision === "approve" ? "badge muted" : "badge warn"}>{r.decision}</span> {r.reviewer_id}{r.reviewer_pe_license ? ` (PE ${r.reviewer_pe_license})` : ""} · {utc(r.signed_ts)} · chain {r.chain_id} #{r.chain_seq}
       {" "}<span className={r.signature_verified ? "badge muted" : "badge bad"} title={`sha256 ${r.signature_hash}`}>{r.signature_verified ? "signature verified" : "SIGNATURE MISMATCH — record changed after sign-off"}</span>
       <div className="muted">{r.comment}</div>
     </div>))}</>;

@@ -88,11 +88,12 @@ function AlarmDetail({ id, onChange }: { id: string; onChange: () => void }) {
       <h4>Comments</h4>
       {(data.comments || []).map((c: any) => <div key={c.id}><span className="muted">{utc(c.created_at)} {c.author}:</span> {c.body}</div>)}
       {(data.comments || []).length === 0 && <div className="muted">none</div>}
-      <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="comment / ack note / close reason (≥3 chars)" />
+      <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="comment / ack rationale (required) / close reason (≥3 chars)" />
+      <div className="muted">Acknowledge and Close are reviewer actions: each is appended, with your SSO identity, a server UTC timestamp, your rationale and the alarm's original value, to this dam's hash-chained audit (append-only).</div>
       {err && <div className="error">{err}</div>}
       <div className="row">
         <button disabled={!text.trim()} onClick={() => act("comment", { body: text })}>Comment</button>
-        <button disabled={!data.can_ack} title={data.can_ack ? "" : "engineer role or higher, open alarms only"} onClick={() => act("ack", { comment: text || null })}>Acknowledge</button>
+        <button disabled={!data.can_ack || !text.trim()} title={data.can_ack ? (text.trim() ? "" : "a rationale is required") : "engineer role or higher, open alarms only"} onClick={() => act("ack", { rationale: text })}>Acknowledge</button>
         <button disabled={!data.can_close || text.trim().length < 3} title={data.can_close ? "" : "DSO role or higher, acknowledged alarms only"} onClick={() => act("close", { reason: text })}>Close</button>
       </div>
     </div>

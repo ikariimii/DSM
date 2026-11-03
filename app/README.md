@@ -44,6 +44,17 @@ app/
   - each admin it creates gets its own audit-log entry (`action=bootstrap_admin`, `actor=system`);
   - whenever it is set, the app logs a prominent `SECURITY WARNING` banner at startup, even when it is ignored.
   There is no default admin.
+- **Reviewer actions are a hash-chained, append-only audit (QA-039 v2, SCHEMA_CONTRACT §5a).** Bias-proposal reviews,
+  data-correction reviews (approve/reject), alarm acknowledgements (CDSE ack) and alarm closes each insert one row in
+  Lakebase `review_signoff`: SSO identity (X-Forwarded-User, X-Forwarded-Email, unverified token `sub`; the token is
+  never stored or logged), server UTC timestamp, action type, a **required non-empty rationale**, and the original
+  value next to the corrected value (never overwritten). Rows are chained **per dam** from a 64×`0` genesis
+  (`record_hash` covers the content plus `prev_hash`); appends are serialized (Postgres `SELECT … FOR UPDATE` on
+  `review_chain_head`, sqlite `BEGIN IMMEDIATE`, `UNIQUE (chain_id, chain_seq)`). Verify with
+  `GET /api/audit/signoffs/verify` (admin) or `GET /api/dams/{dam_id}/audit/signoffs/verify` (engineer+ on the dam):
+  `ok`, or the first broken `chain_seq` and the reason. No key-based signature in-app (lead/FERC decision); nullable
+  `signature`/`sig_alg`/`key_id` and a no-op `Signer` hook are kept. PDF/certificate signing of the DSSMR and
+  PE-sealed exports is in [docs/BACKLOG.md](docs/BACKLOG.md).
 - **Accuracy rule:** a computed value is shown only if its formula version is verified, its calibration
   is approved (inclinometer rows with `calib_id` NULL instead need `(INCL_PROBE_2PASS, 1.0.0)` verified in `ref.formula`
   and `installation_version` matching a `ref.incl_installation.effective_from`, v1.4 §5.5) and its QC flag is not

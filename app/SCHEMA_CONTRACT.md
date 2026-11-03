@@ -91,22 +91,61 @@ failover. Identity is keyed on `X-Forwarded-User`; the user token is never logge
 load cells, thermistor). SG-01..03 are asserted not displayed (`strain_gauge` has no engine formula). Restricted cases are
 read by path from `$DAM_QA_PRIVATE` and never copied.
 
-## 5a. Bias-proposal review sign-off (QA-039)
-`POST /api/instruments/{iid}/incl/surveys/{sid}/bias-proposals/{record_id}/review` (engineer or higher on the dam), body
-`{decision: approve|reject, rationale (required), reviewer_pe_license?}`. It only ever **inserts** one row into Lakebase
-`review_signoff` (lakebase/001 table, column-compatible with UC `audit.review_record`): `review_id`, `dam_id`,
-`subject_type='incl_correction'`, `subject_id=record_id`, `review_level='engineer'`, `decision`, `comment=rationale`,
-`reviewer_id` = X-Forwarded-User (demo personas: `demo:<email>`), `reviewer_pe_license`, `signed_ts` (UTC),
-`signature_hash` = sha256 of canonical JSON `{"signoff": those fields, "subject": every ref.incl_correction column of
-the record as reviewed (23 audit fields + reviewed_by, reviewed_utc, supersedes, review_id)}`, values normalised by
-`canonical_value` (UTC ISO-8601 timestamps with microseconds, NaN → null), sort_keys, `(',', ':')`, UTF-8. This is
-byte-identical to the engine's v1.5 `corrections.review_signature`, checked by an app test against the engine module
-when it is importable. It is a content hash, not a key-based signature. UPDATE/DELETE are refused by triggers (sqlite and Postgres;
-app-owned names `t_noupd*_review_signoff` / `app_forbid_mutation`). Refused: reviewer = record `user` (403, compared
-against both X-Forwarded-User and email), record not an open `proposed` PROPOSED/SUSPECT_CROSSCHECK proposal or with an
-integrity error (409), unknown record (404). The app never updates ref.incl_correction or applies anything. The
-profile returns `bias_signoffs` with `signature_verified` re-computed against the current record, so a record changed
-after sign-off shows a mismatch. DA follow-ups: §7 item 8.
+## 5a. Reviewer actions: hash-chained, append-only audit (QA-039 v2)
+Every reviewer action is ONE inserted row in Lakebase `review_signoff` (lakebase/001 table, column-compatible with UC
+`audit.review_record` plus chain columns). Nothing is updated or deleted (triggers in sqlite and Postgres, app-owned
+names `t_no{update,delete}_review_signoff` / `t_app_noupd_review_signoff` / `app_forbid_mutation`), and the app never
+updates ref.incl_correction, never applies a correction and never changes a measured value.
+
+| action_type | endpoint (role) | subject_type / decision | original_value → corrected_value |
+|---|---|---|---|
+| `bias_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/bias-proposals/{record_id}/review` (engineer+) | `incl_correction` / `approve\|reject` | `{parameter_name, before_value}` → `{parameter_name, auto_value, override_value, after_value, applied_by_app:false}` (units as stored in ref.incl_correction) |
+| `data_correction_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/corrections/{record_id}/review` (engineer+; any proposed ref.incl_correction record; a bias record is typed `bias_review`) | `incl_correction` / `approve\|reject` | as above |
+| `alarm_ack` (CDSE acknowledgement) | `POST /api/alarms/{event_id}/ack` (engineer+) | `alarm_event` / `acknowledge` | `{event_id, dam_id, instrument_id, level, value, unit, event_ts, state:"open"}` → `{state:"acknowledged", measured_value_changed:false}` |
+| `alarm_close` | `POST /api/alarms/{event_id}/close` (dso+) | `alarm_event` / `close` | same alarm snapshot with `state:"acknowledged"` → `{state:"closed", measured_value_changed:false}` |
+
+Review bodies: `{decision, rationale, reviewer_pe_license?}`; ack: `{rationale}` (`comment` accepted as the older name);
+close: `{reason}`. **The rationale is required and must be non-empty after trimming** (422 otherwise; DB CHECK
+`length(trim(comment)) > 0` as backstop); it is stored in `comment`. original_value / corrected_value are canonical
+JSON text; the original is stored next to the corrected value and never overwritten (Ch.14 §14.4.1).
+
+**Columns.** `review_id` (`RS-<uuid>`), `dam_id`, `subject_type`, `subject_id`, `review_level` (app role → level:
+engineer → `engineer`; dso, dam_admin, platform admin → `CDSE`; proposal, §7 item 9), `decision`, `comment`,
+`reviewer_id` = X-Forwarded-User (demo personas: `demo:<email>`), `reviewer_email` = X-Forwarded-Email,
+`reviewer_sub` = `sub` claim of `x-forwarded-access-token` base64url-decoded **without verification, identity only**
+(NULL if absent or malformed; the token itself is never stored, logged or returned, test-enforced), `reviewer_pe_license`,
+`signed_ts` (server UTC, ISO-8601 with microseconds), `signature_hash`, `action_type`, `original_value`,
+`corrected_value`, `chain_id`, `chain_seq`, `prev_hash`, `record_hash`, and nullable `signature`, `sig_alg`, `key_id`.
+
+**Engine-compatible content hash (kept).** `signature_hash` = sha256 of canonical JSON `{"signoff": review_id, dam_id,
+subject_type, subject_id, review_level, decision, comment, reviewer_id, reviewer_pe_license, signed_ts, "subject": the
+reviewed content}`, values normalised by `canonical_value` (UTC ISO-8601 with microseconds, NaN → null), sort_keys,
+`(',', ':')`, UTF-8, ensure_ascii=False. For `incl_correction` the subject is every ref.incl_correction column (23 audit
+fields + reviewed_by, reviewed_utc, supersedes, review_id), byte-identical to the engine's v1.5
+`corrections.review_signature` (app test against the engine module). For `alarm_event` the subject is the
+original_value object. The profile returns `bias_signoffs` with `signature_verified` re-computed against the current record.
+
+**Hash chain.**
+- Scope: **one chain per dam** (`chain_id = dam_id`), so a dam's chain verifies on its own and the per-dam endpoint is
+  scoped by the dam ACL. Genesis: `prev_hash` of `chain_seq = 1` is `GENESIS = "0" × 64`.
+- `record_hash` = sha256 of canonical JSON (same rules) of every column above **except** `record_hash`, `signature`,
+  `sig_alg`, `key_id` (`chain_seq` as an integer). It covers content, identity, timestamp, rationale, original and
+  corrected values, `signature_hash`, `chain_id`, `chain_seq` and `prev_hash`.
+- `review_chain_head(chain_id PK, chain_seq, head_hash, updated_ts)` is the append lock and the tail anchor (it makes
+  deletion of the last record detectable).
+- Append (`StateStore.append_chained`), one transaction on one connection: `INSERT … review_chain_head … ON CONFLICT
+  DO NOTHING` (genesis), `SELECT chain_seq, head_hash … FOR UPDATE` (Postgres row lock; sqlite: `BEGIN IMMEDIATE` write
+  lock), INSERT the record with seq + 1 / prev = head_hash, UPDATE the head, then the action's state change (alarm
+  ack/close, re-checked inside the transaction). Commit together or roll back together. `UNIQUE (chain_id, chain_seq)`
+  is the backstop, so two app instances cannot fork a chain (tested with two stores on one database file, 4 threads).
+- Verify: `GET /api/audit/signoffs/verify` (platform admin, every chain) and `GET /api/dams/{dam_id}/audit/signoffs/verify`
+  (engineer+ on that dam). They recompute the whole chain and return `ok`, or `first_broken_seq` with `reason`: `gap`
+  (missing or duplicate seq), `prev_mismatch` (link or genesis), `hash_mismatch` (content changed), `signature_invalid`,
+  `head_missing`, `head_mismatch` (tail deleted or head altered). Tampering, deleting (middle or tail) and reordering
+  are all detected (tests).
+- Future key-based signature: `backend/audit_chain.Signer` (`alg`, `key_id`, `sign(record_hash)`, `verify(...)`),
+  `NoopSigner` by default (`create_app(signer=...)`). FERC confirmed no in-app crypto signature is needed; PDF /
+  certificate signing of exports is backlog (`docs/BACKLOG.md`).
 
 ## 6. Questions from v1.0
 All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4, 5, 6, 7 (partly), 9 are resolved by v1.4;
@@ -140,5 +179,71 @@ All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4,
    f. v1.5 `supersedes`/`review_id`: the app passes both through. `approval_status` still follows api_contract §4.1
       v1.4 (superseded = `superseded_by`; approved = reviewed_by/reviewed_utc). When §4.1 is updated (superseded
       derived from a later row's `supersedes`; approved requiring `review_id`), the app will follow.
-   e. A key-based signature (for example a KMS/HSM-held key) is not in place: `signature_hash` gives tamper evidence
-      only. Lead decision needed if REQ-22/23 requires a cryptographic signature.
+   e. **Resolved:** no KMS / in-app crypto signature (lead decision; FERC confirmed). Tamper evidence is the per-dam hash
+      chain (§5a); nullable `signature`/`sig_alg`/`key_id` and the Signer hook remain for later. Document signing of
+      exports is backlog (`docs/BACKLOG.md`).
+9. **QA-039 v2 hash chain: exact DDL for the DA (proposal; the app creates the same in its own state.py, so either
+   order works).**
+   a. `lakebase/001_app_schema.sql`, after the existing `review_signoff` CREATE. The SET NOT NULL steps fail if v1 rows
+      (pre-chain, possibly with NULL comment) already exist; in that case move them out or back-fill them as a
+      verified genesis chain first (the app cannot check which applies to a deployed database):
+```sql
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS action_type     TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS reviewer_email  TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS reviewer_sub    TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS original_value  TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS corrected_value TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS chain_id        TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS chain_seq       BIGINT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS prev_hash       TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS record_hash     TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS signature       TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS sig_alg         TEXT;
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS key_id          TEXT;
+ALTER TABLE review_signoff ALTER COLUMN comment         SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN action_type     SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN original_value  SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN corrected_value SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN chain_id        SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN chain_seq       SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN prev_hash       SET NOT NULL;
+ALTER TABLE review_signoff ALTER COLUMN record_hash     SET NOT NULL;
+ALTER TABLE review_signoff DROP CONSTRAINT IF EXISTS ck_review_signoff_rationale;
+ALTER TABLE review_signoff ADD CONSTRAINT ck_review_signoff_rationale CHECK (length(trim(comment)) > 0);
+ALTER TABLE review_signoff DROP CONSTRAINT IF EXISTS ck_review_signoff_action;
+ALTER TABLE review_signoff ADD CONSTRAINT ck_review_signoff_action CHECK (action_type IN
+  ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close'));
+CREATE UNIQUE INDEX IF NOT EXISTS review_signoff_chain_seq ON review_signoff (chain_id, chain_seq);
+CREATE TABLE IF NOT EXISTS review_chain_head (
+  chain_id TEXT PRIMARY KEY, chain_seq INTEGER NOT NULL, head_hash TEXT NOT NULL, updated_ts TEXT NOT NULL);
+-- review_chain_head is UPDATEd by the append transaction: do NOT add forbid_mutation to it.
+```
+   b. `sql/ddl/08_audit.sql` (`audit.review_record`, Delta, appendOnly already):
+```sql
+ALTER TABLE audit.review_record ADD COLUMNS (
+  action_type     STRING COMMENT 'bias_review | data_correction_review | alarm_ack | alarm_close',
+  reviewer_email  STRING COMMENT 'X-Forwarded-Email at signing',
+  reviewer_sub    STRING COMMENT 'unverified sub claim of the user token (identity label only)',
+  original_value  STRING COMMENT 'canonical JSON; the value before the action, never overwritten',
+  corrected_value STRING COMMENT 'canonical JSON; the proposed / resulting value',
+  chain_id        STRING COMMENT 'per-dam chain (= dam_id)',
+  chain_seq       BIGINT,
+  prev_hash       STRING COMMENT 'record_hash of chain_seq-1; GENESIS = 64 x 0',
+  record_hash     STRING COMMENT 'sha256 canonical JSON of all columns except record_hash, signature, sig_alg, key_id',
+  signature       STRING COMMENT 'reserved (future key-based signature), NULL',
+  sig_alg         STRING,
+  key_id          STRING);
+ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
+ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
+  subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction',
+                   'alarm_event')
+  AND (subject_type <> 'incl_correction'
+       OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
+  AND (subject_type <> 'alarm_event'
+       OR (decision IN ('acknowledge', 'close') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
+```
+   c. `src/jobs/lakebase_extract.py`: copy the new columns (item 8a) and preserve `chain_seq` order; the UC copy can be
+      re-verified with the same `record_hash` rule. The `review_chain_head` table does not need extracting.
+   d. The role → `review_level` mapping (engineer → `engineer`; dso / dam_admin / platform admin → `CDSE`) is a proposal:
+      please confirm against the Ch.14 role definitions or give the right mapping.
+   e. `audit.event_log` `ALARM_ACK` (extract of `alarm_ack`) is unchanged; the chained record is the reviewer evidence.
