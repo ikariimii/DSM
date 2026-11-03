@@ -1,6 +1,8 @@
 # API contract: data layer ⇄ app ⇄ QA
 
-Version: **1.1 (2026-11-02, PROPOSED)**. Source of truth for UC objects: `../SCHEMA_CONTRACT.md` v1.1.
+Version: **1.5 (2026-11-02, PROPOSED)**. Source of truth for UC objects: `../SCHEMA_CONTRACT.md` v1.5 (changelog there).
+v1.5: approval status adds unreviewed_applied (defensive, §4.1), correction fields `supersedes`/`review_id`, approval via
+`audit.review_record` (SCHEMA_CONTRACT §5.5.1), lowercase `za`, alarm `erroneous_*` fields, `metric_value` required.
 This page lists the **interfaces** each side may rely on: what UC objects the app reads, what it writes to Lakebase,
 how those writes reach UC, and the HTTP surface the app exposes (owned by the App Developer, listed here for QA).
 Nothing here has been exercised against a live workspace (see `VERIFICATION.md` BUNDLE-1).
@@ -47,7 +49,7 @@ Ownership rules: SCHEMA_CONTRACT §7.2. Lakebase is never the system of record f
 | `dam_safety.qc` | `qa_flag` vocabulary + comma-joined `qa_reason` |
 | `dam_safety.alarms` | state machine of SCHEMA_CONTRACT §4 |
 | `dam_safety.inclinometer.*` | REPORT §6 module map; `corrections.AUDIT_FIELDS` == `ref.incl_correction` columns |
-| `dam_safety.inclinometer.qc.between_set_bias_qc` (QA-020, rule QA-021) | `(installation, axis, suspect_survey_id, suspect, reference, reference_survey_id=None, params=BiasQCParams())` → `BiasQC` with `suspect_flag`, `za_proposed_c` (None unless `status='PROPOSED'`), ZA = −ΔD (Δ = suspect − reference), evidence `n`, `mean_dD`, `sd`, `se`, `spread`, `mean_cs_change`, `crosscheck_diff`, `crosscheck_tol`, `sign_agree`, `reference_survey_id`, `rule`, plus `stable_zone_assumed`, `params_unverified`, `status` (`NO_PROPOSAL | PROPOSED | SUSPECT_CROSSCHECK | BAD_RESURVEY`), `gates`, `qa_flag`. `equal_opposite` removed. Proposes only; `bias_proposal_record` → `applied=false` correction row. Fields per SCHEMA_CONTRACT §5.5 |
+| `dam_safety.inclinometer.qc.between_set_bias_qc` (QA-020, rule QA-021) | `(installation, axis, suspect_survey_id, suspect, reference, reference_survey_id=None, params=BiasQCParams())` → `BiasQC` (rule `QA021-v2`) with `suspect_flag`, `za_proposed_c` (ZA = −ΔD, applied to A0; set for `PROPOSED` and `SUSPECT_CROSSCHECK`, None otherwise; Δ = suspect − reference), evidence `n`, `mean_dD`, `sd`, `se`, `spread`, `mean_cs_change`, `abs_dD`, `abs_bs`, `crosscheck_diff`, `crosscheck_tol` (UNVERIFIED, ranks only), `crosscheck_verdict` (`AGREE`/`SUSPECT`), `requires_review` (always true), `reference_survey_id`, `rule`, plus `stable_zone_assumed`, `params_unverified`, `status` (`NO_PROPOSAL | PROPOSED | SUSPECT_CROSSCHECK | BAD_RESURVEY`), `gates`, `qa_flag`. `sign_agree` and `equal_opposite` removed (no sign gate). Proposes only; `bias_proposal_record` → `applied=false` correction row; an applied bias needs reviewer approval. Fields per SCHEMA_CONTRACT §5.5 |
 | `dam_safety.inclinometer.batch.reduce_instrument` (job core) | `(inst_row, survey_rows, correction_rows, batch_id, reduced_ts, target_surveys=None, bias_rule=DEFAULT_BIAS_RULE, label_unit_m=1.0)` → `(rows with REDUCED_COLUMNS == silver.incl_reduced, [BiasQC proposals])`; writer job `src/jobs/reduce_inclinometers.py` (SCHEMA_CONTRACT §5.5 v1.3) |
 | `common.toa5` (App Dev, canonical) + `dam_safety.toa5_landing` | TOA5 → bronze `READING_SCHEMA` rows; the `dam_safety.toa5` shim was deleted 2026-11-02 (no callers) |
 
@@ -60,6 +62,18 @@ Ownership rules: SCHEMA_CONTRACT §7.2. Lakebase is never the system of record f
 `GET|POST /api/dams/{dam_id}/reports`, `GET /api/dams/{dam_id}/reports/{report_id}`,
 `/api/onboarding/*` (steps, drafts, parse-csv, formulas/check, validate, golive), `/api/admin/*` (users, roles, audit).
 (Extracted from `app/backend/routers/*.py` by route decorator; request/response schemas are the app's.)
+
+### 4.1 Response fields the data layer provides (v1.5; App Developer to expose)
+| Endpoint | Field | Source |
+|---|---|---|
+| `/api/instruments/{id}/incl/surveys`, `/incl/profile` (bias proposals per survey × axis) | `za` (lowercase; = −ΔD, reading units, added to A0: D′ = D + za; mapped from the engine/storage key by `qc.bias_qc_api` / `qc.parse_detection_statistic`), `abs_dD` (\|ΔD\|), `abs_bs` (\|Δ0+Δ180\|), `crosscheck_verdict` (`AGREE`/`SUSPECT`), `crosscheck_diff`, `crosscheck_tol`, `status`, `rule` | `BiasQC` / `ref.incl_correction` (`correction_type='bias'`, `detection_method='between_set_bias_qc'`, `auto_value`, `detection_statistic`) |
+| same | `approval_status`: `proposed` (applied=false), `approved` (applied=true with a matching signed `audit.review_record` approval, SCHEMA_CONTRACT §5.5.1), `superseded` (a later version row supersedes it), `unreviewed_applied` (defensive app-only: applied=true without a valid review; impossible under the DB CHECK, never shown as approved) | `gold.incl_correction_status` (v1.5) |
+| same | `record_id`, `supersedes` (v1.5: record_id of the version this row replaces; NULL for a first proposal), `review_id` (v1.5: the `audit.review_record` approval; NULL unless applied), `superseded_by` (derived), `approved_by`, `approved_utc`, `review_rationale`, `review_signature_hash` | `gold.incl_correction_status` |
+| same | `formula_verified`, `installation_version` (the `ref.incl_installation` row valid at survey time), `probe_constants`, `qc_rule_version`, `correction_record_ids` | `silver.incl_reduced` + `ref.formula.verified` (SCHEMA_CONTRACT §5.5 "Approval when `calib_id` is NULL") |
+| `GET /api/alarms`, `/api/alarms/{event_id}` | `formula_id`, `formula_version`, `qa_flag` (no join needed), `value` (never NULL), `erroneous_mark`, `erroneous_reason`, `erroneous_marked_by`, `erroneous_marked_ts` (v1.5; do not read `ops.reading`) | `ops.alarm_episode` (SCHEMA_CONTRACT §4, §5) |
+| `POST` review sign-off (app route) | writes Lakebase `dam_app.review_signoff` (`subject_type='incl_correction'`, `subject_id`=record_id, `decision` `approve`/`reject`, `comment`=rationale, required; `signature_hash` per SCHEMA_CONTRACT §5.5.1); reviewer ≠ author | extracted to `audit.review_record` (SCHEMA_CONTRACT §7) |
+App-originated or manual non-ACK alarm transitions (if the app ever writes one) must fill `value`, `metric_value` and `reading_id` (CHECK `ck_alarm_transition_value`, SCHEMA_CONTRACT §4 v1.5).
+SUSPECT is a review ranking, not a rejection: show both PROPOSED and SUSPECT_CROSSCHECK proposals, ranked AGREE first.
 
 ## 5. Change rule
 Renames/removals → new contract version + App Developer and QA sign-off. Additive nullable columns → allowed,

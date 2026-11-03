@@ -6,8 +6,10 @@ is separate (diagnostics.py) and never auto-applies: a SUSPECT checksum shift on
 [MIKKELSEN-2003 PDF p4-5; DGSI-BIAS PDF p1], so no record is ever created from the checksum alone.
 
 Arithmetic, all on D = R0 - R180 in reading units, per depth interval (top-keyed):
-  bias        D' = D + c              c = FULL value added to A0 (GTILT ZA form) [procedure §5.1]; never c/2
-                                      on both faces (REPORT E1: that cancels)
+  bias        D' = D + c              ZA = −ΔD (ΔD = mean(ΔA0 − ΔA180) over the stable zone), added to A0;
+                                      proposed only, never auto-applied (reviewer approval required). Equals
+                                      −bs only for an A0-only shift. (GTILT ZA form) [procedure §5.1]; never
+                                      c/2 on both faces (REPORT E1: that cancels)
   rotation    D_X' = D_X + k * v * D_Y  X = record axis, Y = the other axis, same survey; k fixed by the record's
                                       sign_convention (ROTATION_CONVENTIONS, required on EVERY rotation record):
                 MIKKELSEN2003_EQ9     A' - A = -B'*sin(a_A)  ->  A = A' + sin(a_A)*B'  (k=+1, v=sin a_A)
@@ -26,7 +28,10 @@ Arithmetic, all on D = R0 - R180 in reading units, per depth interval (top-keyed
   baseline    not a D correction: selects the reduction baseline survey (REPORT D9), recorded for audit"""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field, fields, replace
+from datetime import date, datetime, timezone
 
 CORRECTION_TYPES = ("bias", "rotation", "depth", "sensitivity", "spiral", "baseline")
 APPLY_ORDER = ("depth", "bias", "sensitivity", "rotation")      # depth re-keys first; rotation uses corrected B
@@ -63,7 +68,9 @@ class CorrectionRecord:
     input_file_sha256: str = ""
     superseded_by: str | None = None
     reviewed_by: str | None = None    # independent reviewer; required to apply a rotation record (TRB-EC129 p44)
-    reviewed_utc: str | None = None
+    reviewed_utc: str | None = None   # reviewed_by/reviewed_utc: DENORMALIZED copy of the approving review (v1.5)
+    supersedes: str | None = None     # v1.5 append-only versioning: record_id of the version this row replaces
+    review_id: str | None = None      # v1.5 (QA-039): audit.review_record row approving this version (applied=True)
 
     @property
     def reviewed(self) -> bool:
@@ -109,6 +116,102 @@ def active(records, instrument_id, survey_id):
     return [r for r in records if r.instrument_id == instrument_id and r.survey_id == survey_id
             and r.applied and r.superseded_by is None
             and (r.correction_type not in ("rotation", "bias") or r.reviewed) and r.correction_type != "spiral"]
+
+
+# ---- v1.5 / QA-039: approval = an insert-only audit.review_record row ------------------------------------------
+REVIEW_SUBJECT_TYPE = "incl_correction"
+REVIEW_APPROVE = "approve"                     # audit.review_record.decision ('approve' | 'reject'), lowercase
+REVIEW_SIGNED_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+                        "reviewer_id", "reviewer_pe_license", "signed_ts")
+_VALUE_FIELDS = ("instrument_id", "survey_id", "axis", "correction_type", "parameter_name", "auto_value",
+                 "override_value", "sign_convention", "depth_range")
+
+
+def canonical_value(v):
+    """SCHEMA_CONTRACT §5.5 canonical form for the signature: timestamps -> UTC ISO-8601 with microseconds and
+    '+00:00' (naive = UTC; strings are parsed, 'Z' allowed); NaN/None -> null; everything else unchanged."""
+    if v is None or (isinstance(v, float) and v != v):
+        return None
+    if isinstance(v, str) and len(v) >= 19 and v[4] == "-" and v[10] in "T " and v[13] == ":":
+        try:
+            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return v
+    if isinstance(v, datetime):
+        v = v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v.astimezone(timezone.utc)
+        return v.isoformat(timespec="microseconds")
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, tuple):
+        return f"{v[0]}..{v[1]}"
+    return v
+
+
+def review_signature(review: dict, subject_row: dict) -> str:
+    """sha256 hex over canonical JSON {"signoff": REVIEW_SIGNED_FIELDS of the review row, "subject": every
+    ref.incl_correction column (AUDIT_FIELDS, DDL order) of the reviewed record as stored}, sort_keys, separators
+    (',', ':'), UTF-8, ensure_ascii=False. Same structure as the app's backend/signoff.py; the canonical_value rule
+    must be applied on both sides (interop vector: tests/fixtures/review_signature_vector.json). A content hash
+    (tamper evidence), not a key-based signature."""
+    payload = {"signoff": {k: canonical_value(review.get(k)) for k in REVIEW_SIGNED_FIELDS},
+               "subject": {k: canonical_value(subject_row.get(k)) for k in AUDIT_FIELDS}}
+    txt = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+
+def _same(a, b) -> bool:
+    return bool(a) and bool(b) and str(a).strip().lower() == str(b).strip().lower()
+
+
+def approval_problem(row: dict, rows_by_id: dict, reviews_by_id: dict) -> str | None:
+    """None when the applied stored record `row` is approved per SCHEMA_CONTRACT §5.5 v1.5, else the reason.
+    Approved = an audit.review_record row R with R.review_id = row.review_id, subject_type 'incl_correction',
+    decision 'approve', R.subject_id = row.record_id or row.supersedes (the proposal it was approved from),
+    R.reviewer_id = row.reviewed_by (denormalized copy) and not the author of row or of the reviewed subject,
+    R.signature_hash = review_signature(R, subject as stored), and - when the subject is the proposal - the applied
+    row carries exactly the reviewed values (_VALUE_FIELDS). reviewed_by/reviewed_utc alone never approve."""
+    rv = reviews_by_id.get(row.get("review_id")) if row.get("review_id") else None
+    if rv is None:
+        return "no audit.review_record approval"
+    if rv.get("subject_type") != REVIEW_SUBJECT_TYPE or str(rv.get("decision") or "").lower() != REVIEW_APPROVE:
+        return "review is not an incl_correction approval"
+    sid = rv.get("subject_id")
+    if sid not in (row.get("record_id"), row.get("supersedes")):
+        return "review subject is neither this record nor the version it supersedes"
+    subject = row if sid == row.get("record_id") else rows_by_id.get(sid)
+    if subject is None:
+        return "reviewed record not found"
+    rid = rv.get("reviewer_id")
+    if not rid or not _same(rid, row.get("reviewed_by")):
+        return "reviewed_by does not match the review row"
+    if _same(rid, row.get("user")) or _same(rid, subject.get("user")):
+        return "self-review"
+    if rv.get("signature_hash") != review_signature(rv, subject):
+        return "signature_hash does not match the reviewed record"
+    if subject is not row and any(canonical_value(row.get(k)) != canonical_value(subject.get(k)) for k in _VALUE_FIELDS):
+        return "applied values differ from the reviewed proposal"
+    return None
+
+
+def effective_records(rows, review_rows):
+    """Stored rows -> (CorrectionRecords with v1.5 rules applied, {survey_id: [problem]}).
+    - superseded: a later row names it in `supersedes` (append-only versioning) or legacy superseded_by is set;
+    - an applied row without a valid approval (approval_problem) is kept as applied=False (never applied) and its
+      survey is reported. Rows that fail CorrectionRecord validation raise to the caller as before."""
+    rows = list(rows)
+    by_id = {r.get("record_id"): r for r in rows}
+    reviews = {r.get("review_id"): r for r in (review_rows or ())}
+    newer = {r["supersedes"]: r["record_id"] for r in rows if r.get("supersedes")}
+    out, problems = [], {}
+    for r in rows:
+        rec = r
+        if r.get("applied"):
+            why = approval_problem(r, by_id, reviews)
+            if why:
+                problems.setdefault(r.get("survey_id"), []).append(f"{r.get('record_id')}: {why}")
+                rec = dict(r, applied=False)
+        out.append(dict(rec, superseded_by=r.get("superseded_by") or newer.get(r.get("record_id"))))
+    return out, problems
 
 
 def info_flags(installation, records=()) -> tuple[str, ...]:

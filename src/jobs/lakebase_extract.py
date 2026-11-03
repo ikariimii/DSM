@@ -3,8 +3,11 @@
 * manual_reading -> CSV file in the landing volume (/Volumes/<cat>/raw/landing/<dam>/readings/),
   so manual readings take exactly the same Auto Loader -> LDP -> reduce path as ADAS data
   (one validation path; KB rec 'single ingestion path').
-* Immutable app tables (review_signoff, exceedance_status, audit_log, alarm_comment, pfm_review,
-  inspection_note) -> audit.app_extract (generic insert-only envelope: table_name, pk, payload JSON).
+* review_signoff (insert-only, column-compatible) -> audit.review_record (v1.5, QA-039): one UC row per sign-off,
+  deduplicated on review_id, signature_hash copied unchanged (the reduction job re-verifies it), source
+  'APP:lakebase:review_signoff'. This is the approval the reduction job requires for an applied correction.
+* Other immutable app tables (exceedance_status, audit_log, alarm_comment, pfm_review, inspection_note)
+  -> audit.app_extract (generic insert-only envelope: table_name, pk, payload JSON).
 * alarm_ack (app lifecycle open -> acknowledged -> closed, mutable, PK event_id) -> audit.event_log
   event_type='ALARM_ACK' (subject_id = RAISE transition_id = ops.alarm_event.event_id). The alarm
   evaluator turns each into exactly one ACK transition (dedup tag lakebase_ack:<event_id>).
@@ -32,7 +35,7 @@ except ImportError:        # executed as a script by spark_python_task
 MANUAL_COLUMNS = ["dam_id", "logger_id", "sensor_id", "ts_utc", "raw_value", "raw_unit", "temp_raw", "temp_c",
                   "baro_kpa", "reading_type", "source", "reservoir_el_m", "datum_id"]
 # (table, id column, ordering column) - id column must be monotonically increasing or a sortable ts
-IMMUTABLE = [("review_signoff", "review_id", "signed_ts"), ("exceedance_status", "id", "id"),
+IMMUTABLE = [("exceedance_status", "id", "id"),
              ("audit_log", "id", "id"), ("alarm_comment", "id", "id"), ("pfm_review", "id", "id"),
              ("inspection_note", "id", "id")]
 
@@ -51,6 +54,37 @@ def manual_rows_to_csv(rows):
                     "source": f"lakebase:manual_reading:{r['id']}:{r['entered_by']}",
                     "reservoir_el_m": r.get("reservoir_el_m"), "datum_id": r.get("datum_id")})
     return {k: v.getvalue() for k, v in out.items()}
+
+
+REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+                      "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "source")
+REVIEW_SOURCE = "APP:lakebase:review_signoff"
+
+
+def _utc(ts):
+    t = dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    return t.replace(tzinfo=dt.timezone.utc) if t.tzinfo is None else t.astimezone(dt.timezone.utc)
+
+
+def review_rows_to_records(rows, known_ids=()):
+    """Lakebase review_signoff rows -> audit.review_record rows (v1.5, QA-039). Skips review_ids already in UC
+    (at-least-once re-extract) and duplicates within the batch. signed_ts text -> UTC TIMESTAMP: the signature's
+    canonical form normalises timestamps, so the hash still verifies (tests/test_review_signature.py). A row missing
+    a NOT NULL column raises instead of being dropped silently."""
+    seen, out = set(known_ids), []
+    for r in rows:
+        missing = [c for c in REVIEW_RECORD_COLS if c not in ("comment", "reviewer_pe_license", "source")
+                   and r.get(c) in (None, "")]
+        if missing:
+            raise ValueError(f"review_signoff {r.get('review_id')}: missing {missing}")
+        if r["review_id"] in seen:
+            continue
+        seen.add(r["review_id"])
+        rec = {c: r.get(c) for c in REVIEW_RECORD_COLS}
+        rec["signed_ts"] = _utc(r["signed_ts"])
+        rec["source"] = REVIEW_SOURCE
+        out.append(rec)
+    return out
 
 
 def envelope(table, pk_col, rows, extract_ts):
@@ -142,6 +176,21 @@ def main():
                 f.write(text)
         # watermark only after the files are written (at-least-once; bronze dedups on sensor/ts/file)
         save("manual_reading", last_id=next_watermark(rows, "id", w0["last_id"]))
+
+        # review_signoff -> audit.review_record (>= watermark: app timestamps are second precision; dedup on review_id)
+        wr = wm("review_signoff")
+        cur.execute("SELECT * FROM review_signoff WHERE signed_ts >= %s ORDER BY signed_ts, review_id",
+                    (wr["last_ts"] or "",))
+        rs = cur.fetchall()
+        if rs:
+            rr = spark.table(f"{a.catalog}.audit.review_record")
+            known = {x.review_id for x in rr.where(rr.review_id.isin([r["review_id"] for r in rs]))
+                     .select("review_id").collect()}
+            recs = review_rows_to_records(rs, known)
+            if recs:
+                spark.createDataFrame([tuple(r[f.name] for f in rr.schema.fields) for r in recs], rr.schema) \
+                    .write.mode("append").saveAsTable(f"{a.catalog}.audit.review_record")
+        save("review_signoff", last_ts=next_watermark(rs, "signed_ts", wr["last_ts"]))
 
         out = []
         for table, pk, order in IMMUTABLE:

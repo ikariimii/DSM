@@ -45,8 +45,14 @@ CREATE TABLE IF NOT EXISTS ops.alarm_transition (
   cal_version       INT    COMMENT 'calibration version used for the reading',
   formula_id        STRING,
   formula_version   STRING,
-  recompute_batch_id STRING COMMENT 'reduction batch of the reading row (silver.reading_reduced)'
+  recompute_batch_id STRING COMMENT 'reduction batch of the reading row (silver.reading_reduced)',
+  qa_flag           STRING COMMENT 'v1.4: QC flag of the reading that caused the transition (NULL for ACK)'
 ) TBLPROPERTIES (delta.appendOnly = true, delta.enableChangeDataFeed = true);
+-- v1.4 (App Developer): a reading-driven transition never carries a NULL value/reading (only ACK rows may).
+-- Enforced here and by the evaluator's pre-write guard (tests/test_alarm_lineage_contract.py).
+ALTER TABLE ops.alarm_transition DROP CONSTRAINT IF EXISTS ck_alarm_transition_value;
+ALTER TABLE ops.alarm_transition ADD CONSTRAINT ck_alarm_transition_value
+  CHECK (event = 'ACK' OR (value IS NOT NULL AND reading_id IS NOT NULL AND metric_value IS NOT NULL));
 
 -- FERC canvas ops.exceedance (§14.4.1(3); §12.3(b)(4)(viii)). One row per RAISE/ESCALATE;
 -- verification workflow progresses by APPENDING status rows (exceedance_status_log) and the

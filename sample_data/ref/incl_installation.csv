@@ -1,0 +1,5 @@
+instrument_id,dam_id,system,probe_L_m,probe_K,raw_unit,casing_depth_m,depth_reference,a0_azimuth_deg,sign_mult_A,sign_mult_B,baseline_survey_id,spiral_survey_id,stable_zone_top_m,effective_from,effective_to
+SYN-DAM-01-IN-01,SYN-DAM-01,probe,0.5000,25000.0000,digits,20.0000,top_of_casing,90.0000,1,1,e2c4a3ad904d0545fd6f0258e1c3c612b008d3c0d49401355ea79328ddd4d4d4,,15.0000,2026-01-01T00:00:00Z,2026-03-17T00:00:00Z
+SYN-DAM-01-IN-01,SYN-DAM-01,probe,0.5000,25000.0000,digits,20.0000,top_of_casing,92.0000,1,1,e2c4a3ad904d0545fd6f0258e1c3c612b008d3c0d49401355ea79328ddd4d4d4,,15.0000,2026-03-17T00:00:00Z,
+SYN-DAM-02-IN-01,SYN-DAM-02,probe,0.5000,25000.0000,digits,20.0000,top_of_casing,90.0000,1,1,915dcc9ffbb2948ac72049993ed039acd76528c08e2692fd506ccae3601ff52e,,15.0000,2026-01-01T00:00:00Z,2026-03-17T00:00:00Z
+SYN-DAM-02-IN-01,SYN-DAM-02,probe,0.5000,25000.0000,digits,20.0000,top_of_casing,92.0000,1,1,915dcc9ffbb2948ac72049993ed039acd76528c08e2692fd506ccae3601ff52e,,15.0000,2026-03-17T00:00:00Z,

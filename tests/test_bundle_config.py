@@ -165,3 +165,96 @@ def test_lakebase_ha_group_min_equals_max_and_prod_no_scale_to_zero():
 def test_uc_setup_env_6():
     job = _load(os.path.join(ROOT, "resources", "uc_setup.yml"))["resources"]["jobs"]["dam_uc_setup"]
     assert [e["spec"]["environment_version"] for e in job["environments"]] == ["6"]
+
+
+def test_app_can_use_is_per_dam_groups_and_lakebase_refs_use_id():
+    # v1.4 (App Developer access rec): CAN_USE only to dam-<dam_id>-members, never dam-portfolio-all.
+    app = yaml.safe_load(open(os.path.join(ROOT, "resources", "app.yml")))["resources"]["apps"]["dam_safety_app"]
+    use = [p["group_name"] for p in app["permissions"] if p["level"] == "CAN_USE"]
+    assert use and all(re.fullmatch(r"dam-[A-Za-z0-9_-]+-members", g) for g in use)
+    assert "dam-portfolio-all" not in [p.get("group_name") for p in app["permissions"]]
+    for f in ("app.yml", "lakebase.yml"):
+        txt = open(os.path.join(ROOT, "resources", f)).read()
+        assert not re.search(r"\$\{resources\.postgres_[a-z]+\.[a-z_]+\.name\}", txt), f   # docs use .id
+
+
+
+# ---- v1.5: QA-037 resolved permissions + generated per-dam app grants ----------------------------------------------
+_APP_LEVEL = {"CAN_MANAGE": "CAN_MANAGE", "CAN_VIEW": "CAN_USE"}     # apply_bundle_permissions.go (QA, 2026-11-02)
+
+
+def _resolved(target):
+    """Approximate the CLI's resolved config for `target`: top-level resources from include files, then target
+    resource overrides (permissions appended), then target/top-level `permissions` appended to every resource whose
+    principal has no entry yet (apps: CAN_VIEW -> CAN_USE). An approximation of databricks/cli, NOT bundle validate."""
+    dbx = _load(os.path.join(ROOT, "databricks.yml"))
+    res = {}
+    for f in _resource_files():
+        for kind, items in ((_load(f) or {}).get("resources") or {}).items():
+            for k, v in (items or {}).items():
+                res.setdefault(kind, {})[k] = dict(v or {}, permissions=list((v or {}).get("permissions") or []))
+    tgt = (dbx.get("targets") or {}).get(target) or {}
+    overrides = [tgt.get("resources") or {}]
+    for f in _resource_files():
+        overrides.append((((_load(f) or {}).get("targets") or {}).get(target) or {}).get("resources") or {})
+    for ov in overrides:
+        for kind, items in ov.items():
+            for k, v in (items or {}).items():
+                r = res.setdefault(kind, {}).setdefault(k, {"permissions": []})
+                r["permissions"] = r["permissions"] + list((v or {}).get("permissions") or [])
+    top = tgt.get("permissions") or dbx.get("permissions") or []
+    for kind, items in res.items():
+        for r in items.values():
+            have = {p.get("group_name") or p.get("user_name") or p.get("service_principal_name") for p in r["permissions"]}
+            for p in top:
+                who = p.get("group_name") or p.get("user_name") or p.get("service_principal_name")
+                if who in have:
+                    continue
+                lvl = _APP_LEVEL.get(p["level"]) if kind == "apps" else p["level"]
+                if lvl:
+                    r["permissions"].append(dict(p, level=lvl))
+    return res
+
+
+@pytest.mark.parametrize("target", ["dev", "test", "prod"])
+def test_v15_dam_portfolio_all_never_reaches_the_app(target):
+    app = _resolved(target)["apps"]["dam_safety_app"]["permissions"]
+    assert "dam-portfolio-all" not in [p.get("group_name") for p in app]
+    use = [p["group_name"] for p in app if p["level"] == "CAN_USE"]
+    assert use and all(re.fullmatch(r"dam-[A-Za-z0-9_-]+-members", g) for g in use)
+
+
+def test_v15_prod_portfolio_view_only_on_jobs_and_pipelines():
+    dbx = _load(os.path.join(ROOT, "databricks.yml"))
+    assert all(p.get("group_name") != "dam-portfolio-all" for p in dbx.get("permissions") or [])
+    for t in (dbx.get("targets") or {}).values():
+        assert all(p.get("group_name") != "dam-portfolio-all" for p in (t or {}).get("permissions") or [])
+    res = _resolved("prod")
+    for kind, items in res.items():
+        for k, r in items.items():
+            got = [p["level"] for p in r["permissions"] if p.get("group_name") == "dam-portfolio-all"]
+            if kind in ("jobs", "pipelines"):
+                assert got == ["CAN_VIEW"], (kind, k)
+            else:
+                assert got == [], (kind, k)
+
+
+def test_v15_app_permissions_block_is_generated_and_in_sync(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("rap", os.path.join(ROOT, "tools", "render_app_permissions.py"))
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    assert m.main(["--check"]) == 0                                       # CI step (.github/workflows/bundle.yml)
+    assert "render_app_permissions.py --check" in open(os.path.join(ROOT, ".github", "workflows", "bundle.yml")).read()
+    ids = m.dam_ids_from_csv(m.DEFAULT_CSV)
+    app = _load(os.path.join(ROOT, "resources", "app.yml"))["resources"]["apps"]["dam_safety_app"]
+    assert [p["group_name"] for p in app["permissions"] if p["level"] == "CAN_USE"] == [f"dam-{d}-members" for d in sorted(ids)]
+    # onboarding a dam: re-render -> exactly one new CAN_USE entry; --check fails until it is committed
+    y = tmp_path / "app.yml"
+    y.write_text(open(os.path.join(ROOT, "resources", "app.yml")).read())
+    assert m.main(["--app-yml", str(y), "--dam-ids", ",".join(ids + ["NEW-DAM-9"]), "--check"]) == 1
+    m.main(["--app-yml", str(y), "--dam-ids", ",".join(ids + ["NEW-DAM-9"])])
+    assert y.read_text().count("dam-NEW-DAM-9-members") == 1
+    with pytest.raises(ValueError):
+        m.render(["bad id; drop"])
+    with pytest.raises(ValueError):
+        m.render([])

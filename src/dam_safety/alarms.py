@@ -115,18 +115,30 @@ def evaluate(st: AlarmState, ts: datetime, value: Optional[float], qa_flag: str,
             st.level_names[s.level] = s.level_name
 
     raise_level, hold_level, raise_spec, raise_metric = 0, 0, None, None
+    metrics = {}                                  # level -> evaluated metric (None = not evaluable, e.g. 1st rate)
     for s in specs:
         m = _metric(s, value, st, ts)
         if m is None:
             continue
+        metrics[s.level] = m if s.level not in metrics else metrics[s.level]
         if _exceeds(m, s) and s.level > raise_level:
             raise_level, raise_spec, raise_metric = s.level, s, m
         if _exceeds(m, s, margin=s.deadband) and s.level > hold_level:
             hold_level = s.level
     out: List[Transition] = []
-    before = st.state
+    if not metrics:
+        # QA-035: nothing evaluable on this reading (e.g. first rate reading after a datum re-baseline). It must not
+        # clear or de-escalate (a transition without its metric would be untraceable): only remember the reading.
+        st.last_value, st.last_ts = value, ts
+        return out
+    before, before_level = st.state, st.level
 
     def tr(event, spec=None, metric=None):
+        # QA-035 / SCHEMA_CONTRACT §4: every reading-driven transition carries value AND the evaluated metric. For
+        # CLEAR / RTN_UNACK / DEESCALATE that is the metric of the level being left (the one that stopped holding),
+        # else the highest-level metric evaluated on this reading.
+        if metric is None:
+            metric = metrics.get(before_level, metrics[max(metrics)])
         out.append(Transition(st.key, ts, event, before, st.state, value, metric,
                               spec.threshold_id if spec else st.active_threshold_id,
                               spec.version if spec else st.active_threshold_version))

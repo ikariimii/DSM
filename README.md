@@ -66,6 +66,8 @@ Tests needing `/workspace/dam-refs` skip when it is absent (CI).
 deterministic). Fully synthetic: 60 days × 6-hourly; headwater, two VW piezometers, standpipe, weir per dam;
 inclinometer surveys for SYN-DAM-01/02 (02 has a 7.5–8.5 m shear zone). Planted defects: NaN, ×3 spike, bad
 timestamp, blank sensor_id, rising PZ-02 on SYN-DAM-03. Upload to `/Volumes/dam_dev/raw/landing/` to exercise the pipeline.
+v1.5 also writes `sample_data/ref/incl_installation.csv` (SCD2) and `sample_data/demo/` (inclinometer survey rows with
+`calib_id` NULL + `installation_version`; alarm transitions that point at real sample readings), SCHEMA_CONTRACT §5.5.
 
 ## Licensing / restricted data
 Enguri (CC BY-NC), ICOLD BW2022 Themes A/C, USBR RISE, the user's inclinometer workbook and vendor-manual data are
@@ -91,6 +93,21 @@ Enguri (CC BY-NC), ICOLD BW2022 Themes A/C, USBR RISE, the user's inclinometer w
 `ref.incl_installation` (SCD2 probe constants, depth_reference, sign multipliers, baseline);
 `ref.incl_correction` expanded to the REPORT §6.3 audit fields; row filters on both; `ref.instrument_type`
 vocabulary; `silver.incl_reduced` + `depth_reference`, `baseline_survey_id`, `correction_record_ids`.
+
+## Onboarding a dam (app access, v1.5)
+1. Add the dam to `ref.dam` (the sample/demo list is `sample_data/ref/dam.csv`) and create its UC group
+   `dam-<dam_id>-members` (the row filter and the app CAN_USE key on it).
+2. Regenerate the app permission block (bundles cannot loop over dams):
+   `python tools/render_app_permissions.py` (default source `sample_data/ref/dam.csv`; for a real
+   portfolio pass `--dams-csv <ref.dam export with a dam_id column>` or `--dam-ids SYN-DAM-01,...`).
+3. Commit `resources/app.yml`. CI (`.github/workflows/bundle.yml`) runs `render_app_permissions.py --check` and fails
+   when the block is out of sync. Never grant `dam-portfolio-all` on the app or as bundle-level `permissions`
+   (SCHEMA_CONTRACT §6, QA-037).
+4. `databricks bundle validate -t <target>` then deploy (below). Still pending: validate has never run here.
+
+## Upgrading an existing deployment to contract v1.5
+Run the pre-check queries in `sql/migrations/v1_5_001_contract.sql`, then the migration (idempotent; SQL warehouse with
+SQL scripting, `catalog` parameter) **before** `dam_uc_setup`. Fresh installs skip it. UNVERIFIED (VERIFICATION MIGRATION-1).
 
 ## Deploy (NOT RUN — needs user approval)
 ```

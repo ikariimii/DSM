@@ -8,6 +8,14 @@ Output layout (mirrors the landing volume /Volumes/<cat>/raw/landing/<dam>/..., 
   sample_data/ref/{portfolio,dam,structure,asset,instrument,sensor}.csv   (ref hierarchy subset)
   sample_data/landing/<dam_id>/readings/<dam_id>_readings.csv   columns == bronze READING_SCHEMA
   sample_data/landing/<dam_id>/inclinometer/<instrument_id>.csv columns == bronze INCL_SCHEMA
+  sample_data/ref/incl_installation.csv     SCD2 rows of ref.incl_installation (v1.5; a re-survey of the A0
+                                            azimuth on 2026-03-17 closes the first row, constants unchanged)
+  sample_data/demo/incl_surveys.csv          v1.5 demo inclinometer rows: calib_id EMPTY (NULL), installation_version
+                                            = effective_from of the ref.incl_installation row valid at survey time
+  sample_data/demo/alarm_examples.csv        v1.5 demo alarm transitions whose reading refs are REAL sample readings
+                                            (sensor_id + ts_utc + source_file of a row in the readings CSV)
+The demo/ and incl_installation outputs are pure functions of the generated rows (they draw nothing from the RNG),
+so adding them left every existing file byte-identical.
 
 Deliberate defects (so QC/quarantine paths are exercised):
   * one unparsable timestamp per dam             -> bronze reading_quarantine (parsable_ts)
@@ -167,8 +175,99 @@ def build(seed: int = 20261102):
     return ref, readings, incl
 
 
+INSTALL_COLS = ["instrument_id", "dam_id", "system", "probe_L_m", "probe_K", "raw_unit", "casing_depth_m",
+                "depth_reference", "a0_azimuth_deg", "sign_mult_A", "sign_mult_B", "baseline_survey_id",
+                "spiral_survey_id", "stable_zone_top_m", "effective_from", "effective_to"]
+INSTALL_CHANGE = START + timedelta(days=75)          # between the 3rd (day 60) and 4th (day 90) survey
+DEMO_INCL_COLS = ["dam_id", "instrument_id", "survey_id", "survey_ts", "n_depths", "calib_id", "installation_version",
+                  "probe_constants", "formula_id", "formula_version"]
+DEMO_ALARM_COLS = ["transition_seq", "dam_id", "sensor_id", "event", "from_state", "to_state", "ts_utc", "value",
+                   "metric_value", "reading_ts_utc", "reading_source_file", "reading_id"]
+LANDING_ROOT = "/Volumes/dam_dev/raw/landing"         # dev catalog; reading_id depends on the landing file path
+
+
+def _ts(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def _spark_ts(s):
+    """CAST(timestamp AS STRING) in a UTC session: 'YYYY-MM-DD HH:MM:SS' (UNVERIFIED vs session time zone)."""
+    return _ts(s).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def silver_reading_id(sensor_id, ts_utc, source_file):
+    """Mirror of src/pipelines/silver.py: sha2(concat_ws('|', sensor_id, CAST(ts_utc AS STRING), source_file), 256)."""
+    import hashlib
+    return hashlib.sha256("|".join((sensor_id, _spark_ts(ts_utc), source_file)).encode("utf-8")).hexdigest()
+
+
+def silver_survey_id(instrument_id, survey_ts):
+    """Mirror of src/pipelines/silver.py: sha2(concat_ws('|', instrument_id, CAST(survey_ts AS STRING)), 256)."""
+    import hashlib
+    return hashlib.sha256("|".join((instrument_id, _spark_ts(survey_ts))).encode("utf-8")).hexdigest()
+
+
+def incl_installations(incl):
+    out = []
+    for iid, (dam, rows) in sorted(incl.items()):
+        base = {"instrument_id": iid, "dam_id": dam, "system": "probe", "probe_L_m": PROBE_L_M, "probe_K": PROBE_K,
+                "raw_unit": "digits", "casing_depth_m": CASING_M, "depth_reference": "top_of_casing",
+                "sign_mult_A": 1, "sign_mult_B": 1, "baseline_survey_id": silver_survey_id(iid, rows[0]["survey_ts"]),
+                "spiral_survey_id": None, "stable_zone_top_m": 15.0}
+        iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        out.append({**base, "a0_azimuth_deg": 90.0, "effective_from": iso(START), "effective_to": iso(INSTALL_CHANGE)})
+        out.append({**base, "a0_azimuth_deg": 92.0, "effective_from": iso(INSTALL_CHANGE), "effective_to": None})
+    return out
+
+
+def _valid_row(inst_rows, iid, ts):
+    t = _ts(ts)
+    hit = [r for r in inst_rows if r["instrument_id"] == iid and _ts(r["effective_from"]) <= t
+           and (r["effective_to"] is None or t < _ts(r["effective_to"]))]
+    assert len(hit) == 1, (iid, ts)
+    return hit[0]
+
+
+def demo_incl_surveys(incl, inst_rows):
+    out = []
+    for iid, (dam, rows) in sorted(incl.items()):
+        for ts in sorted({r["survey_ts"] for r in rows}):
+            v = _valid_row(inst_rows, iid, ts)
+            out.append({"dam_id": dam, "instrument_id": iid, "survey_id": silver_survey_id(iid, ts), "survey_ts": ts,
+                        "n_depths": sum(1 for r in rows if r["survey_ts"] == ts), "calib_id": None,
+                        "installation_version": v["effective_from"],
+                        "probe_constants": f"L_m={PROBE_L_M};K={PROBE_K};raw_unit=digits;system=probe;"
+                                           f"sign_mult_A={v['sign_mult_A']};sign_mult_B={v['sign_mult_B']}",
+                        "formula_id": "INCL_PROBE_2PASS", "formula_version": "1.0.0"})
+    return out
+
+
+def demo_alarm_examples(readings):
+    """RAISE -> ESCALATE -> RTN_UNACK on the rising SYN-DAM-03 PZ-02 piezometer, each pointing at a real sample
+    reading (the first valid reading at or after days 40, 50, 59). Values are the raw digits; metric_value is the
+    raw value too (demo: no calibration applied). States follow the alarm contract (SCHEMA_CONTRACT §4)."""
+    dam, sensor = "SYN-DAM-03", "SYN-DAM-03-PZ-02-VW"
+    src = f"{LANDING_ROOT}/{dam}/readings/{dam}_readings.csv"
+    ok = [r for r in readings[dam] if r.get("sensor_id") == sensor and isinstance(r.get("raw_value"), float)
+          and not math.isnan(r["raw_value"]) and len(r["ts_utc"]) == 20]
+    steps = [(40, "RAISE", "NORMAL", "ALERT_UNACK"), (50, "ESCALATE", "ALERT_UNACK", "ACTION_UNACK"),
+             (59, "RTN_UNACK", "ACTION_UNACK", "RTN_UNACK")]
+    out = []
+    for seq, (day, ev, frm, to) in enumerate(steps, 1):
+        r = next(x for x in ok if _ts(x["ts_utc"]) >= START + timedelta(days=day))
+        out.append({"transition_seq": seq, "dam_id": dam, "sensor_id": sensor, "event": ev, "from_state": frm,
+                    "to_state": to, "ts_utc": r["ts_utc"], "value": r["raw_value"], "metric_value": r["raw_value"],
+                    "reading_ts_utc": r["ts_utc"], "reading_source_file": src,
+                    "reading_id": silver_reading_id(sensor, r["ts_utc"], src)})
+    return out
+
+
 def write_all(out: str, seed: int = 20261102):
     ref, readings, incl = build(seed)
+    inst_rows = incl_installations(incl)
+    _write(os.path.join(out, "ref", "incl_installation.csv"), INSTALL_COLS, inst_rows)
+    _write(os.path.join(out, "demo", "incl_surveys.csv"), DEMO_INCL_COLS, demo_incl_surveys(incl, inst_rows))
+    _write(os.path.join(out, "demo", "alarm_examples.csv"), DEMO_ALARM_COLS, demo_alarm_examples(readings))
     for name, rows in ref.items():
         cols = list(dict.fromkeys(k for r in rows for k in r))
         _write(os.path.join(out, "ref", f"{name}.csv"), cols, rows)

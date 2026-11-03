@@ -117,8 +117,12 @@ CREATE TABLE IF NOT EXISTS ref.incl_installation (
   effective_to       TIMESTAMP
 );
 
--- Inclinometer correction records: REPORT §6.3 audit fields, one row per decision, append-only. A change is a
--- NEW row; the old row gets superseded_by (written only by the corrections job). Raw readings are never edited.
+-- Inclinometer correction records: REPORT §6.3 audit fields, one row per decision. v1.5 (QA-039): the table is
+-- APPEND-ONLY (delta.appendOnly; UPDATE/DELETE/MODIFY granted to nobody). A change is a NEW version row naming the
+-- row it replaces in `supersedes`; nothing is updated in place, so superseded_by is a legacy column (NULL in new
+-- rows) and "superseded" is derived (gold.incl_correction_status). Approval is an insert-only audit.review_record
+-- row (subject_type 'incl_correction'), referenced by review_id; reviewed_by/reviewed_utc are a denormalized copy.
+-- Raw readings are never edited.
 CREATE TABLE IF NOT EXISTS ref.incl_correction (
   record_id           STRING NOT NULL,
   dam_id              STRING NOT NULL,
@@ -142,7 +146,20 @@ CREATE TABLE IF NOT EXISTS ref.incl_correction (
   after_value         DOUBLE COMMENT 'top cumulative change with it, mm',
   software_version    STRING,
   input_file_sha256   STRING,
-  superseded_by       STRING,
-  reviewed_by         STRING COMMENT 'independent reviewer, must differ from user; rotation applies only when reviewed, TRB-EC129 p44',
-  reviewed_utc        TIMESTAMP
+  superseded_by       STRING COMMENT 'legacy, pre-v1.5: append-only table, never updated. Supersession = a later row.supersedes',
+  reviewed_by         STRING COMMENT 'denormalized copy of audit.review_record.reviewer_id; must differ from user, TRB-EC129 p44',
+  reviewed_utc        TIMESTAMP COMMENT 'denormalized copy of audit.review_record.signed_ts',
+  supersedes          STRING COMMENT 'v1.5: record_id of the version this row replaces (e.g. the approved proposal)',
+  review_id           STRING COMMENT 'v1.5 QA-039: audit.review_record approving this version; required when applied'
 );
+-- v1.5 (QA-039): append-only, also for a table created before v1.5 (idempotent).
+ALTER TABLE ref.incl_correction SET TBLPROPERTIES ('delta.appendOnly' = 'true');
+
+-- v1.5 (App Developer mismatch 1, QA-039): an applied record without an independent review cannot be stored, for
+-- EVERY correction_type: applied = true => reviewed_by NOT NULL, reviewed_by <> user (the author), reviewed_utc NOT
+-- NULL and review_id NOT NULL. A CHECK cannot see audit.review_record, so the reduction job additionally requires
+-- the matching, signature-verified review row (dam_safety.inclinometer.corrections.approval_problem).
+-- Delta CHECK: ADD fails if existing rows violate it (fix them first); writers get DELTA_VIOLATE_CONSTRAINT_WITH_VALUES.
+ALTER TABLE ref.incl_correction DROP CONSTRAINT IF EXISTS ck_incl_correction_applied_reviewed;
+ALTER TABLE ref.incl_correction ADD CONSTRAINT ck_incl_correction_applied_reviewed
+  CHECK (NOT applied OR (reviewed_by IS NOT NULL AND reviewed_by <> `user` AND reviewed_utc IS NOT NULL AND review_id IS NOT NULL));
