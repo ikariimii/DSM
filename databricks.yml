@@ -51,6 +51,7 @@ variables:
 sync:
   exclude:
     - qa/**
+    - QA.md                        # QA-034 (Genie 2026-11-02): QA ledger is never shipped to the workspace
     - .venv/**
     - .pytest_cache/**
     - "**/__pycache__/**"
