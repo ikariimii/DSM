@@ -151,19 +151,28 @@ original_value object. The profile returns `bias_signoffs` with `signature_verif
 All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4, 5, 6, 7 (partly), 9 are resolved by v1.4;
 3 (§7.3 text) is resolved.
 
-## 7. Mismatches / follow-ups for the Data Architect (v1.4; proposals, the app does not edit DA files)
-1. **Resolved (QA-036):** the app no longer returns `unreviewed_applied`; an applied-without-review record is a
-   data-integrity error (above), matching the v1.5 CHECK `ck_incl_correction_applied_reviewed`.
-2. **`ops.reading` join kept for `is_erroneous` only.** The engineer's erroneous mark is not an episode column; the app
-   forces `qa_flag` BAD (`ERRONEOUS_MARK`) when it is set. Proposal: either fold it into episode `qa_flag` or confirm the
-   join is intended.
-3. **`ENDPOINT_NAME` via `.id` is UNVERIFIED until `databricks bundle validate`/deploy.** The app accepts only the full
+## 7. Mismatches / follow-ups for the Data Architect (v1.4 → v1.5; proposals, the app does not edit DA files)
+1. **Resolved (QA-036, v1.5):** `unreviewed_applied` stays the contract's defensive status. The app never serves it:
+   a gold `unreviewed_applied` row, or any applied row without reviewed_by (≠ user) / reviewed_utc / review_id, raises
+   `DataIntegrityError` and its values are withheld (matches CHECK `ck_incl_correction_applied_reviewed`).
+2. **Resolved (v1.5):** `erroneous_mark` / `erroneous_reason` / `erroneous_marked_by` / `erroneous_marked_ts` are read from
+   `ops.alarm_episode`; the alarm query no longer joins `ops.reading`. `erroneous_mark = true` forces `qa_flag` BAD
+   (`ERRONEOUS_MARK,<reason>`), so the value is withheld.
+3. **`ENDPOINT_NAME` via `.id` remains UNVERIFIED (v1.5 unchanged) until `databricks bundle validate`/deploy.** The app accepts only the full
    `projects/…/endpoints/…` name (test-enforced); if `.id` resolves to a short id the app fails at startup with a clear
    `ValueError` instead of connecting wrongly. Please confirm the resolved value on the first deploy.
-4. **Field-name casing:** api_contract uses `za`; the engine statistic key is `ZA`. The app returns `za` (with `za_unit`).
-5. `installation_version` matches any SCD2 `ref.incl_installation` row for the instrument (the contract says "a row for
-   that instrument"), not only the current one. Please confirm, or say if it must be the row valid at `survey_ts`.
-6. Demo inclinometer alarm `reading_id` is synthetic (demo only); demo inclinometer rows carry a `calib_id`.
+4. **Resolved (v1.5, QA-040):** stored statistic keys map through `API_FIELD_MAP = {"ZA": "za", "ZB": "zb"}` (== engine
+   `qc.API_FIELD_MAP`, test-enforced) everywhere: `bias_proposal`, `bias_qc` evidence and `proposed_c`. Unit text is
+   `ZA_UNIT = "reading units (za/zb; D' = D + za)"`. No API payload carries `ZA`.
+5. **Resolved (v1.5):** `installation_version` must equal the `effective_from` of the single `ref.incl_installation` row
+   with `effective_from <= survey_ts < effective_to` (NULL = open; `event_ts` for alarm episodes). No covering row or
+   overlapping rows → `UNAPPROVED_INSTALLATION` (engine `batch.installation_row_at`: no row, no reduction).
+6. **Resolved (v1.5):** demo data matches the fixed demo CSVs: inclinometer rows and episodes have `calib_id` NULL +
+   `installation_version` (two SCD2 rows per inclinometer, boundary on day 180, half-open), episode `reading_id` is the
+   real survey id (no `-PEAK-A`), and `metric_value` is filled on every reading-driven episode. The demo `no_data`
+   watchdog episode has no reading (value / metric_value / reading_id NULL); it is an episode, not a transition, and is
+   withheld (`LINEAGE_INCOMPLETE`). QA-035: `contract.check_transition` rejects any non-ACK transition (manual or
+   app-originated) without value, metric_value and reading_id; the app writes no transitions today.
 7. Grants: v1.4 §6 implemented in `resources/app.yml` (per-dam `dam-<dam_id>-members` CAN_USE, `dam-platform-admins`
    CAN_MANAGE); app README updated. Each newly onboarded dam needs its group added to `resources/app.yml`.
 8. **QA-039 DA follow-ups (proposals; the app edits no DA file):**
@@ -176,9 +185,11 @@ All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4,
    d. Engine approval rule (§5.5): in progress in the DA's uncommitted v1.5 work (`corrections.approval_problem` /
       `review_signature`, matching the app's hash). Please publish the canonical-JSON spec in SCHEMA_CONTRACT and
       api_contract, including the test vector the DA's docstring names (`tests/fixtures/review_signature_vector.json`).
-   f. v1.5 `supersedes`/`review_id`: the app passes both through. `approval_status` still follows api_contract §4.1
-      v1.4 (superseded = `superseded_by`; approved = reviewed_by/reviewed_utc). When §4.1 is updated (superseded
-      derived from a later row's `supersedes`; approved requiring `review_id`), the app will follow.
+   f. **Resolved (v1.5):** approvals are insert-only `audit.review_record` rows; `ref.incl_correction` is append-only
+      (`supersedes`, `review_id`). The app reads approval state from `gold.incl_correction_status` (approval_status,
+      approved_by, approved_utc, review_rationale, review_signature_hash); demo derives `superseded_by` from a later
+      row's `supersedes` (`contract.derive_superseded`). `signoff.signature` reproduces
+      `tests/fixtures/review_signature_vector.json` (`c58d8c1a…3d9e`, test-enforced).
    e. **Resolved:** no KMS / in-app crypto signature (lead decision; FERC confirmed). Tamper evidence is the per-dam hash
       chain (§5a); nullable `signature`/`sig_alg`/`key_id` and the Signer hook remain for later. Document signing of
       exports is backlog (`docs/BACKLOG.md`).
@@ -247,3 +258,32 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
    d. The role → `review_level` mapping (engineer → `engineer`; dso / dam_admin / platform admin → `CDSE`) is a proposal:
       please confirm against the Ch.14 role definitions or give the right mapping.
    e. `audit.event_log` `ALARM_ACK` (extract of `alarm_ack`) is unchanged; the chained record is the reviewer evidence.
+10. **v1.5 conflicts with the chained audit record (e01e1ab) and what the DA needs to change (proposal):**
+   a. **Conflict 1:** `audit.review_record` `ck_review_record_subject_decision` (v1.5 migration + `08_audit.sql`) allows
+      no `alarm_event` subject. The app's `alarm_ack` / `alarm_close` chain rows (`subject_type = 'alarm_event'`,
+      decision `acknowledge` / `close`) would be rejected on extract. Fix: the CHECK in item 9b (adds `alarm_event`).
+   b. **Conflict 2:** `lakebase_extract.REVIEW_RECORD_COLS` has 12 columns, but a chain row has 24. Copying only 12
+      drops `chain_seq`/`prev_hash`/`record_hash`/rationale/original value, so the UC copy cannot be re-verified. Fix:
+      the `ADD COLUMNS` in item 9b, plus this extract change in `src/jobs/lakebase_extract.py`:
+```python
+CHAIN_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id",
+              "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
+REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+                      "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "source", *CHAIN_COLS)
+# in review_rows_to_records: NOT NULL check also for action_type, original_value, corrected_value, chain_id,
+# chain_seq, prev_hash, record_hash (signature/sig_alg/key_id/reviewer_email/reviewer_sub stay nullable);
+# extract ORDER BY chain_id, chain_seq. signature_hash is the engine content hash only for incl_correction rows;
+# for alarm_event rows it is the same construction over the alarm as raised (signed fields + original alarm
+# fields), so corrections.approval_problem must not be applied to them.
+```
+   c. **Conflict 3:** the role → `review_level` mapping in the extract (item 9d) is still a proposal.
+   d. **`ops.alarm_episode` + `installation_version` (proposal):** inclinometer episodes have `calib_id` NULL. Without
+      `installation_version` on the episode, the app cannot approve them and withholds the value (`LINEAGE_INCOMPLETE`).
+      DDL: `ALTER TABLE ops.alarm_episode ADD COLUMNS (installation_version TIMESTAMP COMMENT 'ref.incl_installation
+      effective_from valid at event_ts (inclinometer episodes; NULL otherwise)')`, written by `alarm_evaluator`.
+   e. **`docs/api_contract.md` (proposal):** add `POST /api/instruments/{id}/incl/corrections/{record_id}/review`,
+      `GET /api/audit/signoffs/verify` (admin) and `GET /api/dams/{dam_id}/audit/signoffs/verify` (ACL). Response:
+      `{ok, chain_id, n, first_broken_seq, reason}` per chain, with reason one of gap | prev_mismatch | hash_mismatch |
+      head_missing | head_mismatch | signature_invalid.
+   f. **Rebase:** this branch (`app/v1.5-audit-chain`) is built on e01e1ab → a9e7d56. a9e7d56 + e01e1ab must be rebased onto
+      QA's fe4ed7b before any push (the DA reports a `docs/VERIFICATION.md` conflict). The app did not rebase.

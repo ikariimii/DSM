@@ -257,7 +257,7 @@ function BiasQc({ bq, iid, sid, signoffs, onReviewed }: { bq?: any; iid: string;
       {Object.entries(bq.axes || {}).map(([ax, a]: any) => (a.proposals || []).length > 0 && (
         <table key={`p-${ax}`} className="small">
           <caption>Axis {ax} proposals (AGREE first) — UNVERIFIED, not applied by the app</caption>
-          <thead><tr><th>record</th><th>ZA ({a.proposals[0].za_unit})</th><th>|ΔD| (mm)</th><th>|bs| (mm)</th><th>cross-check</th><th>status</th><th>approval</th><th>rule</th><th>sign-offs (append-only)</th></tr></thead>
+          <thead><tr><th>record</th><th>za ({a.proposals[0].za_unit})</th><th>|ΔD| (reading units)</th><th>|bs| (reading units)</th><th>cross-check</th><th>status</th><th>approval</th><th>rule</th><th>sign-offs (append-only)</th></tr></thead>
           <tbody>{a.proposals.map((q: any) => (
             <tr key={q.record_id}>
               <td>{q.record_id}</td><td>{fmt(q.za, 2)}</td><td>{fmt(q.abs_dD, 2)}</td><td>{fmt(q.abs_bs, 2)}</td>

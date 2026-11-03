@@ -55,9 +55,16 @@ app/
   `ok`, or the first broken `chain_seq` and the reason. No key-based signature in-app (lead/FERC decision); nullable
   `signature`/`sig_alg`/`key_id` and a no-op `Signer` hook are kept. PDF/certificate signing of the DSSMR and
   PE-sealed exports is in [docs/BACKLOG.md](docs/BACKLOG.md).
+- **DA contract v1.5 (SCHEMA_CONTRACT §7 items 1–6, 8f, 10):** approval state is read from
+  `gold.incl_correction_status` (approvals are insert-only `audit.review_record` rows; `ref.incl_correction` is
+  append-only); `unreviewed_applied` and applied-without-review rows raise a data-integrity error and are never
+  served; erroneous marks come from `ops.alarm_episode`; API fields are lowercase `za`/`zb` (`API_FIELD_MAP`);
+  non-ACK alarm transitions need value, metric_value and reading_id (QA-035). The chained rows do not fit the v1.5
+  `audit.review_record` CHECK/extract yet; the DDL the DA needs is in SCHEMA_CONTRACT §7 items 9–10.
 - **Accuracy rule:** a computed value is shown only if its formula version is verified, its calibration
   is approved (inclinometer rows with `calib_id` NULL instead need `(INCL_PROBE_2PASS, 1.0.0)` verified in `ref.formula`
-  and `installation_version` matching a `ref.incl_installation.effective_from`, v1.4 §5.5) and its QC flag is not
+  and `installation_version` equal to the `effective_from` of the `ref.incl_installation` row valid at survey time,
+  `effective_from <= survey_ts < effective_to`, v1.5 §5.5) and its QC flag is not
   BAD/MISSING. Everything else is shown as *unverified/hidden*.
   Units, calibration version and QC flags are shown on every value and plot.
 
