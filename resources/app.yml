@@ -6,7 +6,8 @@
 # Restricted (internal-test-only) datasets stay excluded by the root licensing excludes; the leak test
 # (tests/test_license_leak.py) scans app/ as a shipped path.
 # Latest values: served from gold.instrument_latest via the SQL warehouse ON BEHALF OF the user (UC row
-# filters apply). The optional synced table below stays commented out (SCHEMA_CONTRACT v1.1 §7.3).
+# filters apply). No synced tables: the app never reads gold through Lakebase (a service-principal read would skip
+# the row filters), so the earlier commented synced-table block was removed (SME/steering 2026-11-02).
 # Keys checked against docs.databricks.com/aws/en/dev-tools/bundles/resources (2026-11-02).
 # UNVERIFIED: `databricks bundle validate` has NOT been run (no CLI/workspace on the build box).
 resources:
@@ -18,17 +19,23 @@ resources:
       compute_size: MEDIUM              # KB: Medium (2 vCPU / 6 GB)
       compute_min_instances: 1          # min/max must be set together (CLI >= 1.2.0)
       compute_max_instances: 1
-      # On-behalf-of-user scopes only (KB). Add `dashboards.genie` ONLY if a Genie space is attached;
-      # the app does not call Genie today.
+      # On-behalf-of-user scopes (Databricks SME 2026-11-02): the user token arrives in x-forwarded-access-token
+      # and is used only for SQL warehouse reads, so `sql` is the only scope. Lakebase is reached as the app
+      # service principal (PG* env + generate_database_credential), never with the user token, so no `postgres`
+      # scope. Add `genie` ONLY if a Genie space is attached; the app does not call Genie today.
       user_api_scopes:
         - sql
-        - postgres
       config:
         env:
           - name: DAM_CATALOG
             value: ${var.catalog}
           - name: DEMO_MODE
             value: "false"
+          # Lakebase endpoint for w.postgres.generate_database_credential(endpoint=...): projects/<p>/branches/<b>/
+          # endpoints/<e>. UNVERIFIED that `.name` resolves to that full path (it does for the branch reference
+          # below) and that bundle config.env overrides the app.yaml value; not validated against a workspace.
+          - name: ENDPOINT_NAME
+            value: ${resources.postgres_endpoints.dam_lakebase_primary.name}
       resources:
         - name: sql-warehouse
           description: Analytics reads (OBO, UC row filters apply)
@@ -46,24 +53,6 @@ resources:
           level: CAN_USE
         - group_name: dam-platform-admins
           level: CAN_MANAGE
-
-  # OPTIONAL / UNVERIFIED - Triggered synced table for the gold latest-value lookup (KB). Keys are
-  # from the docs, but (a) it needs a postgres_catalog registered on the branch, (b) TRIGGERED needs
-  # change data feed on the source, and gold.instrument_latest is a materialized view (SME to
-  # confirm), and (c) the app still reads gold through the warehouse with OBO, so UC row filters
-  # apply. Reading the synced copy through the service principal would skip them. Not wired.
-  # postgres_synced_tables:
-  #   instrument_latest:
-  #     synced_table_id: <postgres_catalog>.dam_gold.instrument_latest
-  #     source_table_full_name: ${var.catalog}.gold.instrument_latest
-  #     primary_key_columns: [sensor_id]
-  #     scheduling_policy: TRIGGERED
-  #     postgres_database: databricks_postgres
-  #     branch: ${resources.postgres_branches.dam_lakebase_production.name}
-  #     create_database_objects_if_missing: true
-  #     new_pipeline_spec:
-  #       storage_catalog: ${var.catalog}
-  #       storage_schema: ops
 
 targets:
   prod:

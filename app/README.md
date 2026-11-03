@@ -7,8 +7,8 @@ a 10-step instrument onboarding wizard; per-dam ACL; and user/role admin.
 ```
 app/
   app.yaml                 Databricks Apps runtime (command, env, valueFrom resources)
+                           the bundle app resource lives at ../resources/app.yml (root bundle)
   requirements.txt         runtime deps (installed by Apps); requirements-dev.txt for tests
-  resources/dam_safety_app.yml   PROPOSED bundle app resource (see Deploy)
   SCHEMA_CONTRACT.md       app-side mapping to ../SCHEMA_CONTRACT.md
   backend/                 FastAPI (factory backend.main:create_app)
     config.py deps.py main.py formulas.py verify.py onboarding.py seed.py common.py
@@ -18,11 +18,14 @@ app/
 ```
 
 ## Security model
-- **Identity** comes from `X-Forwarded-Email`, set by the Databricks Apps proxy. If the header is missing,
-  the app returns **401**. It falls back to `DEMO_USER` only when `DEMO_MODE=true` (QA-002).
+- **Identity** is keyed on `X-Forwarded-User` (stable), set by the Databricks Apps proxy; `X-Forwarded-Email`
+  is used to bind an admin-granted email on first sign-in. If `X-Forwarded-User` is missing, the app returns
+  **401**. The user token is never logged. It falls back to `DEMO_USER` only when `DEMO_MODE=true` (QA-002).
 - **Analytics** go to the SQL warehouse **on behalf of the user** (`x-forwarded-access-token`, `SQL_OBO=true`),
-  so UC row filters apply. User API scopes are `sql` and `postgres` only (plus `dashboards.genie` if a Genie space is added).
-- **Shared writes** (acks, drafts, users/ACL, audit) go to Lakebase Autoscaling as the app **service principal**.
+  so UC row filters apply. The only user API scope is `sql` (plus `genie` if a Genie space is added).
+- **Shared writes** (acks, drafts, users/ACL, audit) go to Lakebase Autoscaling as the app **service principal**
+  (injected PG* env, `ENDPOINT_NAME`, `generate_database_credential` per new pooled connection). Acks are also
+  written to `audit.event_log` as `ALARM_ACK`; DSSMR drafts go to `rpt.dssmr_draft`. No synced tables.
 - **Per-dam roles** are viewer < engineer < dso < dam_admin, plus a global admin, and are stored in
   `dam_app.dam_role`. They are a UX layer on top of the UC filters, not a replacement for them.
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
@@ -58,9 +61,10 @@ absent. Restricted data must never be copied into this repo; check with `python 
 
 ## Deploy (Declarative Automation Bundle, the root `../databricks.yml`)
 Prerequisites, all decided by the Data Architect (see SCHEMA_CONTRACT.md section 6):
-1. Move `app/resources/dam_safety_app.yml` to `resources/app.yml` at the root. It refers to
-   `${var.warehouse_id}`, `${var.catalog}` and `resources.postgres_branches.dam_lakebase_production`.
-2. Remove `app/**` from `sync.exclude` in `databricks.yml`; otherwise the app source is not uploaded.
+1. The app resource is `resources/app.yml` at the root (done). It refers to `${var.warehouse_id}`,
+   `${var.catalog}`, `resources.postgres_branches.dam_lakebase_production` and
+   `resources.postgres_endpoints.dam_lakebase_primary`.
+2. The root `databricks.yml` syncs `app/` minus `.venv`, `node_modules`, caches, `.coverage` and `app/tests` (done).
 3. Build the frontend first. Apps does not build `frontend/`, because `package.json` is not at the app
    root, so `frontend/dist` is deployed as built.
 

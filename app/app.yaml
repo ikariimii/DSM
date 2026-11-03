@@ -1,7 +1,8 @@
 # Databricks Apps runtime config for the dam safety app.
-# Resources referenced by valueFrom are declared on the app in resources/dam_safety_app.yml
-# (bundle) - never hard-code IDs here. The `postgres` resource injects PGHOST/PGPORT/PGDATABASE/
-# PGUSER/PGSSLMODE automatically. Values set in the bundle's app.config.env override these.
+# Resources referenced by valueFrom are declared on the app in ../resources/app.yml (root bundle) -
+# never hard-code IDs here. The `postgres` resource injects PGHOST/PGPORT/PGDATABASE/PGUSER/PGSSLMODE/
+# PGAPPNAME automatically; the app connects as its service principal with those plus ENDPOINT_NAME.
+# Values set in the bundle's app.config.env override these (UNVERIFIED precedence; not workspace-tested).
 command:
   - uvicorn
   - --factory
@@ -21,3 +22,5 @@ env:
     value: dam_dev
   - name: STATE_SCHEMA           # Lakebase schema owned by backend/repos/state.py
     value: dam_app
+  - name: ENDPOINT_NAME          # Lakebase endpoint for generate_database_credential; dev default, bundle overrides
+    value: projects/dam-safety-dev/branches/production/endpoints/primary
