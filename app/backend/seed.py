@@ -50,8 +50,12 @@ def installation_at(rows: list[dict], instrument_id: str, at: str) -> dict | Non
     batch.installation_row_at: None when no row covers it; ValueError when rows overlap."""
     from .verify import ts_key
     t = ts_key(at)
-    hit = [r for r in rows if r["instrument_id"] == instrument_id and ts_key(r["effective_from"]) <= t
-           and (r.get("effective_to") in (None, "") or t < ts_key(r["effective_to"]))]
+    if t is None:
+        return None
+    hit = [r for r in rows if r.get("instrument_id") == instrument_id and r.get("effective_from") is not None
+           and ts_key(r["effective_from"]) is not None and ts_key(r["effective_from"]) <= t
+           and (r.get("effective_to") in (None, "")
+                or (ts_key(r["effective_to"]) is not None and t < ts_key(r["effective_to"])))]   # bad end: no cover
     if len(hit) > 1:
         raise ValueError(f"overlapping ref.incl_installation rows for {instrument_id} at {at}")
     return hit[0] if hit else None
@@ -221,7 +225,9 @@ def build() -> dict:
                                                depth_reference="top_of_casing", a0_azimuth_deg=az, sign_mult_A=1,
                                                sign_mult_B=1, baseline_survey_id=f"{iid}-S00", spiral_survey_id=None,
                                                stable_zone_top_m=24.0, effective_from=_iso(f), effective_to=_iso(to)))
-            depths = [round(0.5 * k, 1) for k in range(1, 61)]   # 0.5..30.0 m
+            # interval TOPS 0, L, ..., casing - L (procedure §4.0; as the DA demo CSVs). QA-043: 0.5..30.0 put the
+            # deepest interval below the 30 m casing and left top 0.0 without a reading.
+            depths = [round(0.5 * k, 1) for k in range(0, 60)]   # 0.0..29.5 m
             prof_a = {z: rnd.gauss(0, 300) for z in depths}       # casing as-built inclination, reading units
             prof_b = {z: rnd.gauss(0, 300) for z in depths}
             for s in range(13):                                   # monthly surveys, s=0 is baseline

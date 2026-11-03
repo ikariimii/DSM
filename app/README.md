@@ -15,7 +15,12 @@ app/
     routers/{core,instruments,alarms,dssmp,reports,onboarding,admin}.py  repos/{analytics,contract,state}.py
   frontend/                Vite + React + TS (built to frontend/dist, served by FastAPI)
   tests/                   pytest (incl. test_qa_oracle.py against ../qa/reference_examples.py)
+  docs/proposals/          patches proposed to DA-owned files (not applied), e.g. QA-043_engine_depth_grid.patch
 ```
+
+Inclinometer depth-grid QC (QA-043): `backend/incl_depth.py` checks every served profile against the
+installation grid. MISSING, DUPLICATE, OFF_GRID and BELOW_CASING depths are flagged and never reduced, and no
+cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
 
 ## Security model
 - **Identity** is keyed on `X-Forwarded-User` (stable), set by the Databricks Apps proxy; `X-Forwarded-Email`

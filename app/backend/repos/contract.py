@@ -259,6 +259,15 @@ QA_REASON_CODES = {
     "STABLE_ZONE_ASSUMED": ("stable zone not set; bottom intervals assumed", "INFO"),
     "CORRECTION_RECORD_INVALID": ("stored correction record failed validation and was skipped", "SUSPECT"),
     "SPIRAL_NOT_APPLIED": ("spiral correction not applied (deferred)", "INFO"),
+    # QA-043 depth-grid QC (backend/incl_depth.py): rows are flagged, never reduced silently
+    "DEPTH_MISSING": ("expected interval top has no reading in this survey", "MISSING"),
+    "DEPTH_DUPLICATE": ("more than one reading for this interval top in one survey; none used", "BAD"),
+    "DEPTH_OFF_GRID": ("depth label not on the installation's L grid; not reduced", "BAD"),
+    "DEPTH_BELOW_CASING": ("interval would extend below casing depth; not reduced", "BAD"),
+    "DEPTH_GRID_UNKNOWN": ("casing depth / probe L unknown or not whole intervals; grid cannot be checked", "BAD"),
+    "BASELINE_DEPTH_MISSING": ("interval top absent from the baseline survey; change cannot be computed", "MISSING"),
+    "DEPTH_LABEL_INVALID": ("a depth label in the survey is not a number; whole survey withheld", "BAD"),
+    "CUM_GAP_BELOW": ("cumulative withheld: a missing or flagged interval below breaks the bottom-up sum", "MISSING"),
 }
 CHECKSUM_CODES = {"CHECKSUM", "MEAN_CS_GT_100_A", "MEAN_CS_GT_100_B", "INDIVIDUAL_CS_A", "INDIVIDUAL_CS_B"}
 

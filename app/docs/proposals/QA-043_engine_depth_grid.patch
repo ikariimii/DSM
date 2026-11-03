@@ -1,0 +1,233 @@
+diff --git a/src/dam_safety/inclinometer/batch.py b/src/dam_safety/inclinometer/batch.py
+index c16bc4b..cff2694 100644
+--- a/src/dam_safety/inclinometer/batch.py
++++ b/src/dam_safety/inclinometer/batch.py
+@@ -40,6 +40,7 @@ REDUCED_COLUMNS = ("dam_id", "instrument_id", "survey_id", "survey_ts", "initial
+                    "correction_record_ids", "raw_depth_label", "qc_rule_version", "installation_version",
+                    "probe_constants")
+ _SEV = {"OK": 0, "SUSPECT": 1, "MISSING": 2, "BAD": 3}
++GRID_TOL_M = 1e-6                                 # QA-043: label must sit on an interval top within this
+ _PROFILE = {"from_bottom_label": "workbook", "top_of_casing": "gtilt"}   # gtilt == digipro: native from-top depths
+ 
+ 
+@@ -87,16 +88,55 @@ def correction_from_row(r: dict) -> C.CorrectionRecord:
+     return C.CorrectionRecord(**vals)
+ 
+ 
++def _expected_tops(inst):
++    """QA-043: the installation's interval-top grid, or None when casing depth / L give no whole-interval grid."""
++    try:
++        return inst.interval_tops_m()
++    except (ValueError, TypeError, ZeroDivisionError):
++        return None
++
++
+ def _readings(ir: InstallationRow, rows, label_unit_m: float = 1.0):
+-    """silver.incl_survey rows -> {survey_id: (survey_ts, [RawReading], {depth_top: raw label})}.
++    """silver.incl_survey rows -> {survey_id: (survey_ts, [RawReading], {depth_top: raw label}, {depth: [reason]})}.
+     label_unit_m: metres per unit of silver.incl_survey.depth_m. The column is named metres, so 1.0; UNVERIFIED for
+-    workbook files (labels are feet from bottom, REPORT D2) until the workbook landing path is confirmed to convert."""
++    workbook files (labels are feet from bottom, REPORT D2) until the workbook landing path is confirmed to convert.
++    QA-043 b/c: every label is checked against the installation grid (interval_tops_m). Off-grid or negative labels
++    (DEPTH_OFF_GRID), labels at/below the casing bottom (DEPTH_BELOW_CASING), every copy of a depth that occurs more
++    than once in a survey (DEPTH_DUPLICATE, no last-wins) and every label when the grid is unknown
++    (DEPTH_GRID_UNKNOWN) produce NO reading: they are reported in the 4th element and never reduced."""
+     inst, out = ir.installation, {}
+     prof = _PROFILE[ir.depth_reference]
++    tops = _expected_tops(inst)
++    L = inst.probe.L_m
++    seen = {}                                               # (survey_id, top) -> count
++    staged = []
+     for r in rows:
+-        top, _ = interval_top_from_label(prof, r["depth_m"], label_unit_m, inst.casing_depth_m, inst.probe.L_m)
+-        ts, rd, labels = out.setdefault(r["survey_id"], (r["survey_ts"], [], {}))
+-        labels[top] = str(r["depth_m"])                     # label exactly as received (DDL 06 raw_depth_label)
++        ts, rd, labels, rejects = out.setdefault(r["survey_id"], (r["survey_ts"], [], {}, {}))
++        try:
++            top, _ = interval_top_from_label(prof, r["depth_m"], label_unit_m, inst.casing_depth_m, L)
++        except (ValueError, TypeError):
++            top = None
++        if top is None or tops is None:
++            key = top if top is not None else _float_or_none(r["depth_m"], label_unit_m)
++            rejects.setdefault(key, []).append("DEPTH_OFF_GRID" if tops is not None else "DEPTH_GRID_UNKNOWN")
++            labels.setdefault(key, str(r["depth_m"]))
++            continue
++        i = int(round(top / L))
++        if abs(i * L - top) > GRID_TOL_M:
++            rejects.setdefault(top, []).append("DEPTH_OFF_GRID")
++        elif i >= len(tops):
++            rejects.setdefault(top, []).append("DEPTH_BELOW_CASING")
++        else:
++            top = tops[i]
++            seen[(r["survey_id"], top)] = seen.get((r["survey_id"], top), 0) + 1
++            staged.append((r, top))
++        labels.setdefault(top, str(r["depth_m"]))           # label exactly as received (DDL 06 raw_depth_label)
++    for r, top in staged:
++        ts, rd, labels, rejects = out[r["survey_id"]]
++        if seen[(r["survey_id"], top)] > 1:
++            if "DEPTH_DUPLICATE" not in rejects.get(top, []):
++                rejects.setdefault(top, []).append("DEPTH_DUPLICATE")
++            continue
+         for ax, a, b in (("A", "a0", "a180"), ("B", "b0", "b180")):
+             if r.get(a) is None and r.get(b) is None:
+                 continue
+@@ -105,6 +145,13 @@ def _readings(ir: InstallationRow, rows, label_unit_m: float = 1.0):
+     return out
+ 
+ 
++def _float_or_none(v, unit):
++    try:
++        return round(float(v) * unit, 9)
++    except (TypeError, ValueError):
++        return None
++
++
+ def _pairs(readings, axis):
+     return {r.depth_top_m: (r.r0, r.r180) for r in readings
+             if r.axis == axis and r.qa_flag in ("OK", "SUSPECT")}
+@@ -189,14 +236,16 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+             bad_recs.add(r.get("survey_id"))                       # invalid stored record: skipped, flagged
+     order = sorted(surveys, key=lambda s: (str(surveys[s][0]), s))
+     base_id = inst.baseline_survey_id if inst.baseline_survey_id in surveys else order[0]   # None = earliest
+-    base_ts, base_rd, _ = surveys[base_id]
++    base_ts, base_rd, _, base_rej = surveys[base_id]
++    tops = _expected_tops(inst) or []
++    base_have = {r.depth_top_m for r in base_rd}
+     base_recs = C.active(recs, inst.instrument_id, base_id)
+     info = C.info_flags(inst, recs)
+     out_rows, proposals = [], []
+     for sid in order:
+         if target_surveys is not None and sid not in target_surveys:
+             continue
+-        ts, rd, labels = surveys[sid]
++        ts, rd, labels, rejects = surveys[sid]
+         reasons, sev = [], 0
+         try:
+             rows, _audit = reduce_with_corrections(rd, base_rd, inst.probe, recs, inst.instrument_id, sid,
+@@ -210,6 +259,10 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+             rows, applied_ids = {}, []
+             reasons.append(f"CORRECTION_ERROR:{type(e).__name__}")
+             sev = 3
++        if None in rejects:                                    # QA-043: a label that is not a number at all
++            reasons.append("DEPTH_LABEL_INVALID")
++            sev = 3
++            rejects = {k: v for k, v in rejects.items() if k is not None}
+         if sid in bad_recs:
+             reasons.append("CORRECTION_RECORD_INVALID")
+             sev = max(sev, 1)
+@@ -242,7 +295,13 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+         survey_reason = C.merge_qa_reason(",".join(dict.fromkeys(reasons)), info)
+         by = {(r.depth_top_m, r.axis): r for ax_rows in rows.values() for r in ax_rows}
+         rd_by = {(r.depth_top_m, r.axis): r for r in rd}
+-        for d in sorted({d for (d, _a) in rd_by}):
++        # QA-043a: every expected top is emitted; an absent one is a MISSING row, and a slot that is absent, rejected
++        # or missing in the baseline breaks the bottom-up cumulative for every depth above it (CUM_GAP_BELOW).
++        have = {d for (d, _a) in rd_by}
++        gap_tops = [t for t in tops if t not in have or t in rejects or (sid != base_id and t not in base_have)]
++        cut = max(gap_tops) if gap_tops else (None if tops else math.inf)
++        depths = sorted(have | set(tops) | {d for d in rejects if d is not None})
++        for d in depths:
+             A, B = by.get((d, "A")), by.get((d, "B"))
+             ra, rb = rd_by.get((d, "A")), rd_by.get((d, "B"))
+             rsev = sev
+@@ -250,7 +309,20 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+             for r in (ra, rb):
+                 if r is not None and r.qa_flag != "OK":
+                     rsev = max(rsev, _SEV[r.qa_flag])
++            if d in rejects:
++                row_reasons += rejects[d]
++                rsev = _SEV["BAD"]
++            elif d not in have:
++                row_reasons.append("DEPTH_MISSING")
++                rsev = max(rsev, _SEV["MISSING"])
++            elif sid != base_id and d not in base_have:
++                row_reasons.append("BASELINE_DEPTH_MISSING")
++                rsev = max(rsev, _SEV["MISSING"])
+             ca, cb = (A.cum_change_mm if A else None), (B.cum_change_mm if B else None)
++            if cut is not None and d <= cut + GRID_TOL_M:
++                if d in have and d not in rejects and (ca is not None or cb is not None):
++                    row_reasons.append("CUM_GAP_BELOW")      # increment kept; cumulative not summed across the gap
++                ca = cb = None
+             out_rows.append({
+                 "dam_id": inst.dam_id, "instrument_id": inst.instrument_id, "survey_id": sid, "survey_ts": ts,
+                 "initial_survey_ts": base_ts, "depth_m": d,
+diff --git a/tests/test_inclinometer_depth_grid.py b/tests/test_inclinometer_depth_grid.py
+new file mode 100644
+index 0000000..689586a
+--- /dev/null
++++ b/tests/test_inclinometer_depth_grid.py
+@@ -0,0 +1,74 @@
++"""QA-043 a/b/c (proposed with the batch.py patch): depth-grid QC in the silver.incl_reduced core. SYNTHETIC rows."""
++import pytest
++
++from dam_safety.inclinometer import batch
++
++L = 0.5
++INST = dict(instrument_id="I1", dam_id="D1", probe_L_m=L, probe_K=25000.0, raw_unit="sin*25000", casing_depth_m=5.0,
++            a0_azimuth_deg=0.0, baseline_survey_id="S0", system="probe", spiral_survey_id=None,
++            stable_zone_top_m=3.0, depth_reference="top_of_casing")
++
++
++def _run(cur, base=None, inst=INST):
++    base = base if base is not None else [i * L for i in range(10)]
++    rows = [dict(survey_id="S0", survey_ts="2026-01-01", depth_m=d, a0=100.0, a180=-90.0, b0=None, b180=None)
++            for d in base]
++    rows += [dict(survey_id="S1", survey_ts="2026-02-01", depth_m=d, a0=a, a180=-90.0, b0=None, b180=None)
++             for d, a in cur]
++    out, _ = batch.reduce_instrument(inst, rows, [], "B1", "2026-11-02T00:00:00")
++    return [r for r in out if r["survey_id"] == "S1"]
++
++
++def _by(rows):
++    return {r["depth_m"]: r for r in rows}
++
++
++def test_clean_survey_has_no_depth_flags_and_full_cumulative():
++    rows = _by(_run([(i * L, 101.0) for i in range(10)]))
++    assert sorted(rows) == [i * L for i in range(10)]
++    assert all("DEPTH_" not in (r["qa_reason"] or "") and "CUM_GAP" not in (r["qa_reason"] or "") for r in rows.values())
++    assert rows[0.0]["cum_a"] is not None and rows[0.0]["cum_a"] == pytest.approx(10 * rows[4.5]["inc_a"])
++
++
++def test_missing_row_is_emitted_missing_and_cumulative_is_cut_above():
++    rows = _by(_run([(i * L, 101.0) for i in range(10) if i != 7]))
++    assert rows[3.5]["qa_flag"] == "MISSING" and "DEPTH_MISSING" in rows[3.5]["qa_reason"] and rows[3.5]["inc_a"] is None
++    for d, r in rows.items():
++        if d < 3.5:
++            assert r["cum_a"] is None and r["resultant"] is None and "CUM_GAP_BELOW" in r["qa_reason"]
++            assert r["inc_a"] is not None
++        elif d > 3.5:
++            assert r["cum_a"] is not None
++
++
++def test_duplicate_rows_are_both_bad_and_not_reduced():
++    out = _run([(i * L, 101.0) for i in range(10)] + [(2.0, 130.0)])
++    r2 = [r for r in out if r["depth_m"] == 2.0]
++    assert len(r2) == 1 and r2[0]["qa_flag"] == "BAD" and "DEPTH_DUPLICATE" in r2[0]["qa_reason"]
++    assert r2[0]["inc_a"] is None and all(r["cum_a"] is None for r in out if r["depth_m"] <= 2.0)
++
++
++def test_off_grid_and_below_casing_labels_are_bad():
++    rows = _by(_run([(i * L, 101.0) for i in range(10)] + [(1.2, 101.0), (5.0, 101.0)]))
++    assert rows[1.2]["qa_flag"] == "BAD" and "DEPTH_OFF_GRID" in rows[1.2]["qa_reason"] and rows[1.2]["inc_a"] is None
++    assert rows[5.0]["qa_flag"] == "BAD" and "DEPTH_BELOW_CASING" in rows[5.0]["qa_reason"]
++    assert rows[0.0]["cum_a"] is not None                       # rejected rows were never summed: grid itself intact
++    rows = _by(_run([(-0.5, 101.0)] + [(i * L, 101.0) for i in range(10)]))
++    assert rows[-0.5]["qa_flag"] == "BAD" and "DEPTH_OFF_GRID" in rows[-0.5]["qa_reason"]
++
++
++def test_baseline_gap_cuts_cumulative_of_later_surveys():
++    rows = _by(_run([(i * L, 101.0) for i in range(10)], base=[i * L for i in range(10) if i != 6]))
++    assert "BASELINE_DEPTH_MISSING" in rows[3.0]["qa_reason"] and rows[3.0]["qa_flag"] != "OK"
++    assert all(rows[d]["cum_a"] is None for d in rows if d <= 3.0)
++
++
++def test_unknown_grid_rejects_every_row():
++    rows = _run([(i * L, 101.0) for i in range(10)], inst=dict(INST, casing_depth_m=5.2))
++    assert rows and all(r["qa_flag"] == "BAD" and "DEPTH_GRID_UNKNOWN" in r["qa_reason"] and r["cum_a"] is None
++                        for r in rows)
++
++
++def test_non_numeric_label_flags_the_survey():
++    rows = _run([(i * L, 101.0) for i in range(10)] + [("n/a", 101.0)])
++    assert rows and all("DEPTH_LABEL_INVALID" in r["qa_reason"] and r["qa_flag"] == "BAD" for r in rows)

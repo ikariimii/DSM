@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from .. import formulas as fx
 from ..config import Settings
 from . import contract as ct
+from ..incl_depth import check_profile
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +139,9 @@ class MockAnalytics:
                      qa_flag="OK" if r.get("qc_checksum_ok", True) else "SUSPECT",
                      qa_reason=None if r.get("qc_checksum_ok", True) else "CHECKSUM",
                      correction_record_ids=[], correction_basis="uncorrected")
+        # QA-043: depth grid from the installation row valid at survey time (MISSING / DUPLICATE / OFF_GRID flagged,
+        # cumulative withheld above any gap)
+        prof = check_profile(prof, irow.get("casing_depth_m"), irow.get("probe_L_m"))
         self._incl_cache[key] = prof
         return copy.deepcopy(prof)
 
@@ -277,11 +281,22 @@ class SqlAnalytics:
                       {"iid": instrument_id})
 
     def incl_profile(self, instrument_id, survey_id):
-        return [ct.incl_row(r) for r in self.q(
+        rows = [ct.incl_row(r) for r in self.q(
             f"SELECT r.*, c.cal_version FROM {self.t('silver', 'incl_reduced')} r "
             f"LEFT JOIN {self.t('ref', 'calibration')} c ON c.calib_id = r.calib_id "
             "WHERE r.instrument_id = :iid AND r.survey_id = :sid ORDER BY r.depth_m",
             {"iid": instrument_id, "sid": survey_id})]
+        if not rows:
+            return rows
+        # QA-043: the app re-checks the engine's rows against the installation grid (the engine fix is a DA patch
+        # proposal, SCHEMA_CONTRACT §7 item 11). No valid installation row -> DEPTH_GRID_UNKNOWN (all BAD).
+        from ..seed import installation_at
+        try:
+            irow = installation_at(self.incl_installations(instrument_id), instrument_id, rows[0].get("survey_ts"))
+        except (ValueError, TypeError):
+            irow = None
+        irow = irow or {}
+        return check_profile(rows, irow.get("casing_depth_m"), irow.get("probe_L_m"))
 
     def incl_corrections(self, record_ids):
         if not record_ids:
@@ -303,7 +318,8 @@ class SqlAnalytics:
     def incl_installations(self, instrument_id):
         # §5.5 v1.5: SCD2 versions; installation_version on silver.incl_reduced must equal the effective_from of the
         # row valid at survey time (effective_from <= survey_ts < effective_to; verify.Gate.installation_approved)
-        return self.q(f"SELECT instrument_id, effective_from, effective_to FROM {self.t('ref', 'incl_installation')} "
+        return self.q(f"SELECT instrument_id, effective_from, effective_to, casing_depth_m, probe_L_m "
+                      f"FROM {self.t('ref', 'incl_installation')} "
                       "WHERE instrument_id = :iid ORDER BY effective_from", {"iid": instrument_id})
 
     def alarm_events(self, dam_ids, since=None):

@@ -117,7 +117,7 @@ def test_other_formulas():
 
 
 def test_incl_reduction_checksum_and_stability():
-    base = {0.5: (0.0, 0.0), 1.0: (0.0, 0.0)}
+    base = {0.5: (0.0, 0.0), 1.0: (0.0, 0.0), 1.5: (0.0, 0.0)}
     rows = [{"depth_m": 0.5, "a0": 110, "a180": -90, "b0": 0, "b180": 0},
             {"depth_m": 1.0, "a0": 10, "a180": -10, "b0": 0, "b180": 0},
             {"depth_m": 1.5, "a0": 50, "a180": -30, "b0": 0, "b180": 0}]

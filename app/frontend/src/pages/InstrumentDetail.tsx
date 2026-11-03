@@ -213,6 +213,7 @@ function InclinometerView({ id }: { id: string }) {
             <span key={q.code} className={q.severity === "BAD" ? "badge bad" : q.severity === "SUSPECT" || q.severity === "MISSING" ? "badge warn" : "badge muted"}
                   title={q.label || "code not in app vocabulary (shown verbatim)"}>{q.code}</span>
           ))}
+          <DepthGridQc rows={p.rows} />
           <BiasQc bq={p.bias_qc} iid={id} sid={p.survey_id} signoffs={p.bias_signoffs || []} onReviewed={reload} />
         </div>
       ))}
@@ -231,7 +232,7 @@ function InclinometerView({ id }: { id: string }) {
         </LineChart>
       </ResponsiveContainer>
       {data?.profiles?.[0]?.correction_note && <div className="notice">{data.profiles[0].correction_note}</div>}
-      <div className="muted">Withheld depths (unverified/unapproved/QC BAD/unverified correction) are gaps. Values are uncorrected: no bias correction is applied. Engine QA-020 bias proposals are shown UNVERIFIED and are never applied.</div>
+      <div className="muted">Withheld depths (unverified/unapproved/QC BAD/unverified correction) are gaps. Depth-grid QC (QA-043): every row is checked against the installation grid (tops 0, L, … below casing top); a MISSING, DUPLICATE, OFF_GRID or BELOW_CASING depth is never reduced, and the cumulative above it is withheld (CUM_GAP_BELOW) rather than summed across the gap. Values are uncorrected: no bias correction is applied. Engine QA-020 bias proposals are shown UNVERIFIED and are never applied.</div>
     </Card>
   );
 }
@@ -310,6 +311,33 @@ function ReviewForm({ iid, sid, rid, onDone }: { iid: string; sid: string; rid: 
       <button disabled={!rationale.trim()} onClick={() => send("approve")}>Sign approve</button>
       <button disabled={!rationale.trim()} onClick={() => send("reject")}>Sign reject</button>
       {err && <span className="badge bad">{err}</span>}
+    </div>
+  );
+}
+
+const DEPTH_CODES = ["DEPTH_MISSING", "DEPTH_DUPLICATE", "DEPTH_OFF_GRID", "DEPTH_BELOW_CASING", "DEPTH_GRID_UNKNOWN"];
+
+function rowCodes(r: any): string[] {
+  return String(r.qa_reason || "").split(/[,;|]/).map((c) => c.trim().toUpperCase()).filter(Boolean);
+}
+
+/** QA-043: per-row depth-grid flags; the chart never bridges the withheld cumulative above a gap. */
+function DepthGridQc({ rows }: { rows: any[] }) {
+  const flagged = (rows || []).filter((r) => rowCodes(r).some((c) => DEPTH_CODES.includes(c)));
+  const cutAbove = (rows || []).filter((r) => rowCodes(r).includes("CUM_GAP_BELOW"));
+  if (!flagged.length && !cutAbove.length) return null;
+  return (
+    <div className="notice">
+      <b>Depth-grid QC</b>{" "}
+      {flagged.map((r: any, n: number) => (
+        <span key={`${r.depth_m}-${n}`} className={r.qa_flag === "BAD" ? "badge bad" : "badge warn"}
+              title={r.depth_placeholder ? "expected interval top absent from the survey (placeholder row)" : "row not reduced"}>
+          {fmt(Number(r.depth_m), 2)} m {rowCodes(r).filter((c) => DEPTH_CODES.includes(c)).map((c) => c.replace("DEPTH_", "")).join("+")} · {r.qa_flag}
+        </span>
+      ))}
+      {cutAbove.length > 0 && (
+        <span className="badge warn">cumulative withheld above gap: {cutAbove.length} depth(s), {fmt(Math.min(...cutAbove.map((r: any) => Number(r.depth_m))), 2)}–{fmt(Math.max(...cutAbove.map((r: any) => Number(r.depth_m))), 2)} m</span>
+      )}
     </div>
   );
 }

@@ -157,22 +157,24 @@ def reduce_inclinometer_profile(
     for r in rows:
         a_dev = inc_deviation(L_mm, r["a0"], r["a180"], K)
         b_dev = inc_deviation(L_mm, r["b0"], r["b180"], K)
-        a0dev, b0dev = baseline.get(r["depth_m"], (a_dev, b_dev))
+        # empty baseline = this IS the baseline survey (change 0). A depth missing from a non-empty baseline has no
+        # change (None), never an implicit zero (QA-043a); the cumulative above it is withheld below.
+        a0dev, b0dev = (a_dev, b_dev) if not baseline else baseline.get(r["depth_m"], (None, None))
         out.append({
             "depth_m": r["depth_m"],
             "a_chk": inc_checksum(r["a0"], r["a180"]),
             "b_chk": inc_checksum(r["b0"], r["b180"]),
-            "a_inc_mm": a_dev - a0dev,
-            "b_inc_mm": b_dev - b0dev,
+            "a_inc_mm": None if a0dev is None else a_dev - a0dev,
+            "b_inc_mm": None if b0dev is None else b_dev - b0dev,
         })
     out.sort(key=lambda x: x["depth_m"], reverse=True)  # bottom first
     ca = cb = 0.0
     for r in out:
-        ca += r["a_inc_mm"]
-        cb += r["b_inc_mm"]
+        ca = None if ca is None or r["a_inc_mm"] is None else ca + r["a_inc_mm"]
+        cb = None if cb is None or r["b_inc_mm"] is None else cb + r["b_inc_mm"]
         r["a_cum_mm"] = ca
         r["b_cum_mm"] = cb
-        r["resultant_mm"] = math.hypot(ca, cb)
+        r["resultant_mm"] = None if ca is None or cb is None else math.hypot(ca, cb)
     if out:
         ma = _median([r["a_chk"] for r in out])
         mb = _median([r["b_chk"] for r in out])
@@ -184,7 +186,8 @@ def reduce_inclinometer_profile(
             )
     bias = None
     if stable_from_m is not None:
-        st = [r for r in out if r["depth_m"] >= stable_from_m]
+        st = [r for r in out if r["depth_m"] >= stable_from_m and r["a_inc_mm"] is not None
+              and r["b_inc_mm"] is not None]
         if st:
             bias = {
                 "a_bias_mm_per_interval": sum(r["a_inc_mm"] for r in st) / len(st),
