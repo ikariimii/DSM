@@ -1,13 +1,29 @@
 # SCHEMA_CONTRACT — Dam Safety App (data layer ⇄ app ⇄ QA)
 
-Status: **PROPOSED v1.5 (2026-11-02)**. v1.0 was agreed by the App Developer with 12 open questions (app/SCHEMA_CONTRACT.md §6);
+Status: **PROPOSED v1.6 (2026-11-02)** (v1.6 = App Developer requests app/SCHEMA_CONTRACT.md §7 items 9–10, on top of
+v1.5). v1.0 was agreed by the App Developer with 12 open questions (app/SCHEMA_CONTRACT.md §6);
 v1.1 answers them (§10) and adds the inclinometer tables (steering 9). The App Developer signed v1.4 off conditional on 7
 mismatches (app/SCHEMA_CONTRACT.md §7) and QA did not sign v1.4 off (QA.md, QA-035..QA-039); v1.5 resolves both.
-App Developer and QA sign-off of **v1.5** pending (§9).
+App Developer and QA sign-off of **v1.5 / v1.6** pending (§9).
 It resolves **QA-003**.
 
 **Changelog**
-- **v1.5** (2026-11-02, this version):
+- **v1.6** (2026-11-02, this version; additive, nullable, plus a widened CHECK domain):
+  - `audit.review_record` `ck_review_record_subject_decision` also allows **`subject_type='alarm_event'`** with `decision`
+    `acknowledge` / `close` (lowercase, non-blank `comment`); `incl_correction` keeps `approve` / `reject` (§5.5.2).
+  - `audit.review_record` **+12 nullable chain columns** (`action_type`, `reviewer_email`, `reviewer_sub`,
+    `original_value`, `corrected_value`, `chain_id`, `chain_seq BIGINT`, `prev_hash`, `record_hash`, `signature`,
+    `sig_alg`, `key_id`) and CHECK `ck_review_record_chain` (§5.5.2). `dam_lakebase_extract` copies all **24** columns,
+    raises on a missing required chain field and reads/writes in `chain_id, chain_seq` order (§7). Engine-side
+    re-verification `dam_safety.audit_chain` (interop vector from the app's code). `approval_problem` never sees
+    `alarm_event` rows.
+  - `ops.alarm_transition` + nullable **`installation_version TIMESTAMP`** (last column), passed through
+    `ops.alarm_event` and `ops.alarm_episode`; written by `alarm_evaluator` for inclinometer sensors (§4).
+  - Role → `review_level` mapping proposed by the App Developer (app §7 item 9): **NOT adopted, conflicts with the ref
+    RBAC model** (§5.5.2 "review_level").
+  - Idempotent migration `sql/migrations/v1_6_001_audit_chain.sql` (§8). App HTTP endpoints listed in
+    `docs/api_contract.md` §4.2.
+- **v1.5** (2026-11-02):
   - **QA-039 approval = an insert-only `audit.review_record` row** (`subject_type='incl_correction'`, `decision`
     `approve`/`reject`, `comment` = rationale, `signature_hash` per §5.5.1). It is the source of truth; `reviewed_by` /
     `reviewed_utc` stay as a denormalized copy. `ref.incl_correction` is **append-only** (`delta.appendOnly`; UPDATE /
@@ -170,6 +186,14 @@ Tables named in the plan canvas or the app that are not in the FERC canvas:
 - **v1.5 erroneous mark:** `ops.alarm_episode` carries `erroneous_mark` (BOOLEAN, false when unmarked),
   `erroneous_reason`, `erroneous_marked_by`, `erroneous_marked_ts`: the latest `ops.reading_erroneous_mark` row for the
   episode's `reading_id`. The app reads these instead of `ops.reading`.
+- **v1.6 installation lineage (app §7 10d):** `ops.alarm_transition.installation_version TIMESTAMP` (nullable, last
+  column) = `ref.incl_installation.effective_from` of the row valid at the transition's reading time
+  (`batch.installation_version_at`, same half-open rule as §5.5). `alarm_evaluator` sets it for sensors whose
+  `ref.sensor.instrument_id` has `ref.incl_installation` rows, NULL for other instruments and for ACK; no covering
+  row or overlapping rows → NULL plus a logged issue (evaluation never halts). `ops.alarm_episode.installation_version`
+  = that of the latest reading-driven transition. **UNVERIFIED / no feed yet:** the evaluator reads
+  `silver.v_reading_current`; inclinometer results live in `silver.incl_reduced`, so until an inclinometer metric is
+  fed to the evaluator no inclinometer alarm (and no non-NULL value) exists.
 
 ## 5. Columns the app reads (agreed subset)
 | Object | Columns |
@@ -327,6 +351,36 @@ effective_from, effective_to`; bridge `ref.pfm_instrument`.
 - The user's own workbook and vendor-manual values are **internal-test-only**: tests live in gitignored,
   sync-excluded `testonly_restricted/` and read `/workspace/dam-refs/...` in place.
 
+#### 5.5.2 Reviewer-action hash chain and alarm_event records (v1.6, QA-039 v2; app SCHEMA_CONTRACT §5a, §7 9–10)
+- **Rows.** Every app reviewer action is one insert-only Lakebase `review_signoff` row, extracted unchanged to
+  `audit.review_record`. `action_type` → (`subject_type`, `decision`): `bias_review` / `data_correction_review` →
+  `incl_correction` / `approve|reject`; `alarm_ack` → `alarm_event` / `acknowledge`; `alarm_close` → `alarm_event` /
+  `close`. `original_value` / `corrected_value` are canonical JSON text (before / after), never overwritten.
+- **Chain.** One chain per dam: `chain_id = dam_id`, `chain_seq` 1, 2, 3 …, `prev_hash` of seq 1 = GENESIS (64 × `0`),
+  else the previous `record_hash`. `record_hash` = SHA-256 hex of the canonical JSON (§5.5.1 steps 2–4) of every column
+  except `record_hash`, `signature`, `sig_alg`, `key_id` (and the UC-only `source`), with `chain_seq` as an integer.
+  `signature` / `sig_alg` / `key_id` are reserved for a future key-based signature (NULL today). The chain head lives
+  only in Lakebase (`review_chain_head`, not extracted): a deleted tail is detectable by the app verify endpoint, not
+  from the UC copy alone. `dam_safety.audit_chain.verify_records` recomputes a chain from UC rows (gap /
+  prev_mismatch / hash_mismatch). Interop vector `tests/fixtures/review_chain_vector.json` (SYNTHETIC), generated
+  with the App Developer's `app/backend/audit_chain.py` (branch `app/v1.5-audit-chain`, read only); the engine
+  reproduces it, also after extract (`signed_ts` text → TIMESTAMP). `tests/test_audit_chain.py`.
+- **CHECKs.** `ck_review_record_subject_decision` (domain above). `ck_review_record_chain`: an `alarm_event` row must be a
+  chained action; when `action_type` is set it must be one of the four, `original_value`, `corrected_value`,
+  `chain_id`, `chain_seq ≥ 1`, `prev_hash`, `record_hash` are NOT NULL, `chain_id = dam_id`, and the action matches
+  its subject/decision. Rows with `action_type` NULL (pre-v1.6 `incl_correction` extracts, other subjects) are
+  unaffected. Delta CHECKs cannot test chain continuity: that is the verifier's job.
+- **Approval rule.** `corrections.approval_problem` applies to `incl_correction` approvals only;
+  `corrections.effective_records`, `reduce_inclinometers` and `gold.incl_correction_status` ignore `alarm_event` rows.
+- **`review_level` (app §7 item 9 proposal: `engineer`→`engineer`, `dso`/`dam_admin`/`admin`→`CDSE`): NOT adopted, it
+  conflicts with our model.** `ref.project_membership.role` is `VIEWER | ENGINEER | CDSE | ADMIN` (CDSE and ADMIN
+  are different roles), `ref.dam.cdse_id` names the dam's Chief Dam Safety Engineer as one principal, and FERC
+  Ch.14 (App K, 14-K-4) treats the CDSE / Dam Safety Coordinator / Owner as a named person. An administrative role
+  (`admin`, `dam_admin`) is not a CDSE qualification, and `dso` → CDSE is UNVERIFIED (no DSO role in our model or in
+  Ch.14). Proposed instead (lead decision pending): `review_level='CDSE'` only when the reviewer is `ref.dam.cdse_id`
+  or holds `CDSE` in `ref.project_membership` for that dam; `engineer`→`engineer`; `dso` pending; admins get no
+  elevation. Note: the app calls `alarm_ack` a "CDSE acknowledgement" but allows it for engineer+.
+
 **App changes requested** (the app seed differs):
 - `ref.instrument.tip_elev_m`/`top_elev_m` become `tip_el_m`/`top_el_m`.
 - The calibration `certificate` column becomes `certificate_uri`.
@@ -366,6 +420,12 @@ effective_from, effective_to`; bridge `ref.pfm_instrument`.
   - `exceedance_status` → `ops.exceedance_status_log`
   - `review_signoff` → `audit.review_record` (v1.5: appended directly, deduplicated on `review_id`, `signed_ts` text →
     UTC TIMESTAMP, `source='APP:lakebase:review_signoff'`; it is **not** copied to `audit.app_extract`)
+    (v1.6: all 24 columns, `REVIEW_RECORD_COLS` = 12 + `CHAIN_COLS`; a missing `action_type`, `original_value`,
+    `corrected_value`, `chain_id`, `chain_seq`, `prev_hash` or `record_hash` raises; `signature`, `sig_alg`,
+    `key_id`, `reviewer_email`, `reviewer_sub` may be NULL; query and append `ORDER BY chain_id, chain_seq`, watermark
+    still `signed_ts`; no approval rule is applied, so `alarm_event` rows pass through. The Lakebase
+    `review_signoff` DDL (app §7 9a) is the app's `state.py`; `lakebase/001_app_schema.sql` mirrors it and is not
+    changed here.)
   - `inspection_note` → `ops.surveillance_inspection`
   - `manual_reading` → CSV into `/Volumes/<cat>/raw/landing/<dam>/readings/manual_<stamp>.csv` (v1.0 said `manual/`, which bronze does not read), so ADAS and manual readings share one ingest path
   - `report_draft` → `rpt.dssmr_draft` (append-only snapshot per content sha256) + `rpt.dssmr` upsert while still `draft`
@@ -395,13 +455,17 @@ name and fail loudly if it does not resolve.
 - **Upgrade (v1.5):** on a deployment created before v1.5, run `sql/migrations/v1_5_001_contract.sql` (idempotent; run
   its pre-check queries first) **before** `dam_uc_setup`, because `CREATE TABLE IF NOT EXISTS` does not alter existing
   tables and `sql/ddl/02` adds a CHECK naming `review_id`. Fresh installs do not need it. UNVERIFIED (MIGRATION-1).
+- **Upgrade (v1.6):** then run `sql/migrations/v1_6_001_audit_chain.sql` (idempotent; pre-check in its header)
+  **before** `dam_uc_setup` (`sql/ddl/08` names the chain columns, `sql/ddl/11` selects
+  `ops.alarm_transition.installation_version`). Do not re-run v1_5_001 afterwards (its older CHECK rejects
+  `alarm_event`); if it was, re-run v1_6_001. UNVERIFIED (MIGRATION-2).
 
 ## 9. Sign-off
 | Party | Agent | Status |
 |---|---|---|
-| Data layer | (this bundle) | proposed v1.5 |
-| App Developer | dd07fe27-3193-4938-9d18-5e3802ce9280 | v1.4 signed off conditional on 7 mismatches (all addressed in v1.5); **v1.5 pending** |
-| QA Engineer (QA-003) | 798e2d02-0b70-4a0d-8dea-77eea4adeed6 | v1.4 not signed off (QA-035..QA-039); **v1.5 sign-off requested, pending** |
+| Data layer | (this bundle) | proposed v1.6 |
+| App Developer | dd07fe27-3193-4938-9d18-5e3802ce9280 | v1.4 signed off conditional on 7 mismatches (all addressed in v1.5); **v1.5 pending**; v1.6 = their §7 items 9–10 (item 9 role mapping not adopted) |
+| QA Engineer (QA-003) | 798e2d02-0b70-4a0d-8dea-77eea4adeed6 | v1.4 not signed off (QA-035..QA-039); **v1.5 sign-off requested, pending**; v1.6 to review |
 
 ## 10. Answers to the App Developer's open questions (app/SCHEMA_CONTRACT.md §6)
 | # | Question | v1.1 answer |

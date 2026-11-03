@@ -1,10 +1,16 @@
-"""v1.5: sql/migrations upgrade existing tables to the sql/ddl shape, idempotently (static checks; the migration
-itself is UNVERIFIED on a workspace, docs/VERIFICATION.md MIGRATION-1)."""
+"""v1.5 / v1.6: sql/migrations upgrade existing tables to the sql/ddl shape, idempotently (static checks; the
+migrations themselves are UNVERIFIED on a workspace, docs/VERIFICATION.md MIGRATION-1 / MIGRATION-2).
+Migration files are historical: a constraint redefined by a later file must equal the DDL only in the LAST file
+that defines it (v1_5_001's ck_review_record_subject_decision is the v1.5 body, superseded by v1_6_001)."""
 import os
 import re
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MIG = open(os.path.join(ROOT, "sql", "migrations", "v1_5_001_contract.sql")).read()
+MIG_DIR = os.path.join(ROOT, "sql", "migrations")
+FILES = sorted(f for f in os.listdir(MIG_DIR) if f.endswith(".sql"))
+MIGS = {f: open(os.path.join(MIG_DIR, f)).read() for f in FILES}
 DDL = {f: open(os.path.join(ROOT, "sql", "ddl", f)).read() for f in os.listdir(os.path.join(ROOT, "sql", "ddl"))}
 
 
@@ -22,33 +28,68 @@ def _ddl_type(table, col):
     return None
 
 
-EXPECTED = [("silver.incl_reduced", "qc_rule_version"), ("silver.incl_reduced", "installation_version"),
-            ("silver.incl_reduced", "probe_constants"), ("ops.alarm_transition", "qa_flag"),
-            ("ref.incl_correction", "supersedes"), ("ref.incl_correction", "review_id")]
+EXPECTED_COLS = {
+    "v1_5_001_contract.sql": [("silver.incl_reduced", "qc_rule_version"), ("silver.incl_reduced", "installation_version"),
+                              ("silver.incl_reduced", "probe_constants"), ("ops.alarm_transition", "qa_flag"),
+                              ("ref.incl_correction", "supersedes"), ("ref.incl_correction", "review_id")],
+    "v1_6_001_audit_chain.sql": [("audit.review_record", c) for c in (
+        "action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
+        "prev_hash", "record_hash", "signature", "sig_alg", "key_id")] + [("ops.alarm_transition", "installation_version")],
+}
+EXPECTED_CKS = {
+    "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
+                              "ck_review_record_subject_decision"},
+    "v1_6_001_audit_chain.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
+}
+_ADD_CK = r"ALTER TABLE ([\w.]+) ADD CONSTRAINT (\w+)\s+CHECK"
+norm = lambda s: re.sub(r"\s+", " ", s)
 
 
-def test_every_column_add_is_guarded_and_matches_the_ddl_type():
-    code = _code(MIG)
+def test_known_migration_files():
+    assert FILES == sorted(EXPECTED_COLS)
+
+
+@pytest.mark.parametrize("f", FILES)
+def test_every_column_add_is_guarded_and_matches_the_ddl_type(f):
+    code = _code(MIGS[f])
     adds = re.findall(r"IF NOT EXISTS \(SELECT 1 FROM information_schema\.columns WHERE table_schema = '(\w+)'\s+"
                       r"AND table_name = '(\w+)' AND column_name = '(\w+)'\) THEN\s+EXECUTE IMMEDIATE "
                       r"'ALTER TABLE (\w+)\.(\w+) ADD COLUMNS \((\w+) (\w+)\)';\s+END IF;", code)
-    assert [(f"{s}.{t}", c) for s, t, c, *_ in adds] == EXPECTED
+    assert [(f"{s}.{t}", c) for s, t, c, *_ in adds] == EXPECTED_COLS[f]
     for s, t, c, s2, t2, c2, typ in adds:
-        assert (s, t, c) == (s2, t2, c2) and _ddl_type(f"{s}.{t}", c) == typ
-    assert len(re.findall(r"ADD COLUMNS", code)) == len(EXPECTED)                          # none unguarded
+        assert (s, t, c) == (s2, t2, c2) and _ddl_type(f"{s}.{t}", c) == typ, (f, c)
+    assert len(re.findall(r"ADD COLUMNS", code)) == len(EXPECTED_COLS[f])                  # none unguarded
 
 
-def test_every_constraint_is_drop_if_exists_then_add_and_identical_to_ddl():
-    code = _code(MIG)
-    adds = re.findall(r"ALTER TABLE ([\w.]+) ADD CONSTRAINT (\w+)\s+CHECK", code)
-    assert {n for _, n in adds} == {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
-                                    "ck_review_record_subject_decision"}
-    alldd = _code("\n".join(DDL.values()))
-    norm = lambda s: re.sub(r"\s+", " ", s)
+@pytest.mark.parametrize("f", FILES)
+def test_every_constraint_is_drop_if_exists_then_add(f):
+    code = _code(MIGS[f])
+    adds = re.findall(_ADD_CK, code)
+    assert {n for _, n in adds} == EXPECTED_CKS[f]
     for table, name in adds:
         assert f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name};" in code
-        body = re.search(rf"ADD CONSTRAINT {name}\s+CHECK \((.*?)\);", code, re.S).group(1)
+    assert not re.search(r"\b(DROP TABLE|DELETE FROM|UPDATE \w+\.\w+ SET|TRUNCATE)\b", code)
+    assert "USE CATALOG IDENTIFIER(:catalog);" in code
+
+
+def test_latest_definition_of_each_constraint_is_identical_to_ddl():
+    alldd = _code("\n".join(DDL.values()))
+    latest = {}
+    for f in FILES:                                   # sorted: v1_5 < v1_6, later files win
+        code = _code(MIGS[f])
+        for _, name in re.findall(_ADD_CK, code):
+            latest[name] = re.search(rf"ADD CONSTRAINT {name}\s+CHECK \((.*?)\);", code, re.S).group(1)
+    assert latest
+    for name, body in latest.items():
         dbody = re.search(rf"ADD CONSTRAINT {name}\s+CHECK \((.*?)\);", alldd, re.S).group(1)
         assert norm(body) == norm(dbody), name
-    assert "SET TBLPROPERTIES ('delta.appendOnly' = 'true')" in code
-    assert not re.search(r"\b(DROP TABLE|DELETE FROM|UPDATE \w+\.\w+ SET|TRUNCATE)\b", code)
+
+
+def test_v1_5_keeps_append_only_property():
+    assert "SET TBLPROPERTIES ('delta.appendOnly' = 'true')" in _code(MIGS["v1_5_001_contract.sql"])
+
+
+def test_v1_6_header_documents_order_and_unverified():
+    h = MIGS["v1_6_001_audit_chain.sql"]
+    for s in ("v1_5_001_contract.sql", "dam_uc_setup", "Do NOT re-run v1_5_001", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK"):
+        assert s in h, s

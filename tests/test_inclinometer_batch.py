@@ -365,3 +365,17 @@ def test_v15_correction_status_view_lists_all_four_statuses():
         assert s in body
     assert "audit.review_record r" in body and "r.decision = 'approve'" in body and "c.supersedes" in body
     assert "lower(r.reviewer_id) <> lower(c.`user`)" in body
+
+
+def test_v16_alarm_event_review_rows_never_reach_approval():
+    """v1.6: audit.review_record now also holds alarm_event (acknowledge / close) chain records. effective_records
+    ignores them: an alarm record sharing the review_id is not an approval and does not mask the real one."""
+    from dam_safety.inclinometer import corrections as C
+    c = corr(review_id="RV1")
+    rv = approve(c)
+    alarm = dict(rv, subject_type="alarm_event", decision="acknowledge", subject_id="ep-1")
+    recs, problems = C.effective_records([c], [alarm])
+    assert recs[0]["applied"] is False and "no audit.review_record approval" in " ".join(sum(problems.values(), []))
+    recs, problems = C.effective_records([c], [rv, alarm])                 # alarm row after the approval
+    assert recs[0]["applied"] is True and not problems
+    assert _applied_ids(_bias_case([c], [rv, alarm])[0]) == {c["record_id"]}

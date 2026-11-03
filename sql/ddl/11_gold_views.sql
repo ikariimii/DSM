@@ -77,7 +77,8 @@ SELECT first_value(CASE WHEN event = 'RAISE' THEN transition_id END, true)
          OVER w AS event_id,
        dam_id, sensor_id, alarm_key, episode_no, ts_utc AS event_ts, event, from_state, to_state,
        value, metric_value, threshold_id, threshold_version, actor, comment,
-       reading_id, calib_id, cal_version, formula_id, formula_version, recompute_batch_id, qa_flag
+       reading_id, calib_id, cal_version, formula_id, formula_version, recompute_batch_id, qa_flag,
+       installation_version
 FROM t WHERE episode_no > 0
 WINDOW w AS (PARTITION BY alarm_key, episode_no ORDER BY ts_utc, recorded_ts
              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
@@ -107,6 +108,9 @@ SELECT event_id, any_value(dam_id) AS dam_id, any_value(se.instrument_id) AS ins
        max_by(formula_id, CASE WHEN reading_id IS NOT NULL THEN event_ts END)  AS formula_id,
        max_by(formula_version, CASE WHEN reading_id IS NOT NULL THEN event_ts END) AS formula_version,
        max_by(qa_flag, CASE WHEN reading_id IS NOT NULL THEN event_ts END)     AS qa_flag,
+       -- v1.6 (App Dev §7 10d): inclinometer episodes have calib_id NULL, so installation_version (the
+       -- ref.incl_installation row valid at the reading's ts, written by alarm_evaluator) is their lineage.
+       max_by(installation_version, CASE WHEN reading_id IS NOT NULL THEN event_ts END) AS installation_version,
        max(CASE WHEN event = 'RAISE' THEN reading_id END)  AS raise_reading_id,
        max(CASE WHEN event = 'RAISE' THEN cal_version END) AS raise_cal_version,
        size(collect_set(cal_version)) > 1                   AS mixed_calibration

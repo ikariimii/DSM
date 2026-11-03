@@ -136,6 +136,13 @@ def installation_row_at(inst_rows, survey_ts):
     return hits[0] if hits else None
 
 
+def installation_version_at(inst_rows, ts):
+    """v1.6 (alarm lineage): effective_from of the ref.incl_installation row valid at `ts` (installation_row_at,
+    half-open), as a naive-UTC datetime, or None when no row covers ts. Overlapping rows raise ValueError."""
+    row = installation_row_at(inst_rows, ts)
+    return None if row is None else _ts(row.get("effective_from"))
+
+
 def reduce_instrument(inst_row, survey_rows, correction_rows, batch_id: str, reduced_ts,
                       target_surveys=None, bias_rule=DEFAULT_BIAS_RULE, label_unit_m: float = 1.0, review_rows=()):
     """Returns (reduced rows [dict with REDUCED_COLUMNS], bias proposals [qc.BiasQC, status PROPOSED or
