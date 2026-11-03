@@ -34,6 +34,7 @@ class Analytics(Protocol):
     def incl_profile(self, instrument_id: str, survey_id: str) -> list[dict]: ...
     def incl_corrections(self, record_ids: list[str]) -> list[dict]: ...
     def incl_bias_proposals(self, instrument_id: str, survey_id: str) -> list[dict]: ...
+    def incl_installations(self, instrument_id: str) -> list[dict]: ...
     def alarm_events(self, dam_ids: list[str], since: str | None = None) -> list[dict]: ...
     def pfms(self, dam_id: str) -> list[dict]: ...
 
@@ -135,9 +136,13 @@ class MockAnalytics:
         return [ct.incl_correction(c) for c in self.d.get("incl_corrections", []) if c["record_id"] in set(record_ids)]
 
     def incl_bias_proposals(self, instrument_id, survey_id):
+        # every engine bias QC record for the survey (proposed, approved, superseded); contract sorts it out
         return [ct.incl_correction(c) for c in self.d.get("incl_corrections", [])
                 if c.get("instrument_id") == instrument_id and c.get("survey_id") == survey_id
-                and c.get("detection_method") == "between_set_bias_qc" and c.get("applied") is False]
+                and c.get("detection_method") == "between_set_bias_qc"]
+
+    def incl_installations(self, instrument_id):
+        return [dict(i) for i in self.d.get("incl_installations", []) if i.get("instrument_id") == instrument_id]
 
     def alarm_events(self, dam_ids, since=None):
         return [dict(e) for e in self.d["alarm_events"] if e["dam_id"] in dam_ids
@@ -219,16 +224,13 @@ class SqlAnalytics:
             f"SELECT * FROM {self.t('ref', 'calibration')} WHERE dam_id = :dam_id", {"dam_id": dam_id})]
 
     def _alarm_sql(self, where: str) -> str:
-        # ops.alarm_episode carries the lineage (reading_id, cal_version, calib_id, formula_version, raise_*,
-        # mixed_calibration) but no formula_id or qc flag (§5 v1.1): formula_id comes from the episode's
-        # calibration row and the qc flag / erroneous mark from the triggering reading.
+        # §4/§5 v1.4: ops.alarm_episode carries formula_id, formula_version, qa_flag and the lineage itself, so the
+        # app no longer joins ref.calibration (formula_id) or takes the qc flag from ops.reading. ops.reading is
+        # joined only for the engineer's erroneous mark (app/ops state, not an episode column).
         return (f"SELECT e.*, t.level, t.limit_type, t.direction, t.value AS value_limit, t.unit, t.pfm_id, "
-                "t.required_actions, c.formula_id AS cal_formula_id, c.formula_version AS cal_formula_version, "
-                "r.qc_flag AS reading_qc_flag, r.qc_reason AS reading_qc_reason, "
-                "r.is_erroneous AS reading_is_erroneous "
+                "t.required_actions, r.is_erroneous AS reading_is_erroneous "
                 f"FROM {self.t('ops', 'alarm_episode')} e LEFT JOIN {self.t('ref', 'threshold')} t "
                 "ON t.threshold_id = e.threshold_id AND t.threshold_version = e.threshold_version "
-                f"LEFT JOIN {self.t('ref', 'calibration')} c ON c.calib_id = e.calib_id "
                 f"LEFT JOIN {self.t('ops', 'reading')} r ON r.reading_id = e.reading_id WHERE {where}")
 
     def alarm_event(self, event_id):
@@ -280,11 +282,17 @@ class SqlAnalytics:
             {"ids": json.dumps(sorted(set(record_ids)))})]
 
     def incl_bias_proposals(self, instrument_id, survey_id):
-        # QA-020 engine proposals (§5.5 v1.2): unapplied, non-superseded rows only; display-only, never applied
+        # QA-021 engine bias QC records (§5.5 v1.4) of every approval_status (proposed / approved / superseded);
+        # display-only, the app never applies one. contract.bias_qc derives approval_status and the summary.
         return [ct.incl_correction(r) for r in self.q(
             f"SELECT * FROM {self.t('ref', 'incl_correction')} WHERE instrument_id = :iid AND survey_id = :sid "
-            "AND detection_method = 'between_set_bias_qc' AND applied = false AND superseded_by IS NULL "
+            "AND detection_method = 'between_set_bias_qc' "
             "ORDER BY timestamp_utc, record_id", {"iid": instrument_id, "sid": survey_id})]
+
+    def incl_installations(self, instrument_id):
+        # §5.5 v1.4: SCD2 versions; installation_version on silver.incl_reduced must equal one effective_from
+        return self.q(f"SELECT instrument_id, effective_from, effective_to FROM {self.t('ref', 'incl_installation')} "
+                      "WHERE instrument_id = :iid ORDER BY effective_from", {"iid": instrument_id})
 
     def alarm_events(self, dam_ids, since=None):
         if not dam_ids:

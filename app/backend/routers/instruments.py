@@ -96,7 +96,8 @@ def incl_profile(instrument_id: str, survey_ids: str = Query(..., description="c
     inst = instrument_checked(an, c, instrument_id)
     if inst["instrument_type"] != "inclinometer":
         raise HTTPException(400, "Not an inclinometer")
-    gate = gate_for(an, inst["dam_id"])
+    # §5.5 v1.4: inclinometer rows (calib_id NULL) are approved via ref.incl_installation, not ref.calibration
+    gate = gate_for(an, inst["dam_id"], an.incl_installations(instrument_id))
     profiles = []
     for sid in [x for x in survey_ids.split(",") if x]:
         rows = an.incl_profile(instrument_id, sid)
@@ -110,6 +111,13 @@ def incl_profile(instrument_id: str, survey_ids: str = Query(..., description="c
             "survey_id": sid, "survey_ts": rows[0].get("survey_ts"), "unit": "mm",
             "calib_id": rows[0].get("calib_id"), "cal_version": rows[0].get("cal_version"),
             "formula_id": rows[0].get("formula_id"), "formula_version": rows[0].get("formula_version"),
+            # §5.5 v1.4 lineage, per survey (distinct values across rows; >1 means mixed reduction batches)
+            "formula_verified": all(gate.formula_verified(r.get("formula_id"), r.get("formula_version")) for r in rows),
+            "qc_rule_version": _distinct(rows, "qc_rule_version"),
+            "installation_version": _distinct(rows, "installation_version"),
+            "probe_constants": _distinct(rows, "probe_constants"),
+            "installation_approved": (all(gate.installation_approved(r) for r in rows)
+                                      if all(r.get("calib_id") is None for r in rows) else None),
             "display_status": dict(st), "qa_flag": dict(Counter(r.get("qa_flag") for r in rows)),
             # No bias correction is applied. The app's own proposal stays suppressed; the engine's QA-020 suspect
             # flag / proposed c are shown UNVERIFIED and never applied (§5.5 v1.2, api_contract §3).
@@ -123,6 +131,12 @@ def incl_profile(instrument_id: str, survey_ids: str = Query(..., description="c
             # API uses the contract column names (cum_a, inc_a, resultant, checksum_a, ...)
             "rows": [ct.incl_api_row(r) for r in rows]})
     return {"instrument": inst, "profiles": profiles}
+
+
+def _distinct(rows: list[dict], key: str):
+    """One value when every row agrees, else the sorted distinct list (never silently picks one)."""
+    vals = sorted({r.get(key) for r in rows if r.get(key) is not None}, key=str)
+    return None if not vals else vals[0] if len(vals) == 1 else vals
 
 
 @router.get("/formulas/{formula_id}/{version}/check")

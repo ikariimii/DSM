@@ -32,7 +32,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   return data as T;
 }
 
-export type DisplayStatus = "VERIFIED" | "UNVERIFIED_FORMULA" | "UNAPPROVED_CALIBRATION" | "QC_BAD" | "MISSING"
+export type DisplayStatus = "VERIFIED" | "UNVERIFIED_FORMULA" | "UNAPPROVED_CALIBRATION" | "UNAPPROVED_INSTALLATION" | "QC_BAD" | "MISSING"
   | "CORRECTION_UNVERIFIED" | "LINEAGE_INCOMPLETE" | "LINEAGE_INCONSISTENT" | "NO_ENGINE_FORMULA";
 
 export interface Me {

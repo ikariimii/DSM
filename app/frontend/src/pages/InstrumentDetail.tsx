@@ -197,7 +197,13 @@ function InclinometerView({ id }: { id: string }) {
       <Loading error={error} />
       {series.map((p: any) => (
         <div key={p.survey_id} className="row">
-          <b>{p.survey_id}</b> {utc(p.survey_ts)} · unit {p.unit} · cal {p.calib_id} v{p.cal_version} · {p.formula_id} v{p.formula_version}
+          <b>{p.survey_id}</b> {utc(p.survey_ts)} · unit {p.unit} · {p.calib_id ? <>cal {p.calib_id} v{p.cal_version} · </> : null}{p.formula_id} v{p.formula_version}
+          {" "}<span className={p.formula_verified ? "badge muted" : "badge warn"}>{p.formula_verified ? "formula verified" : "formula NOT verified"}</span>
+          {p.qc_rule_version && <> · QC rule {Array.isArray(p.qc_rule_version) ? p.qc_rule_version.join(", ") : p.qc_rule_version}</>}
+          {p.installation_version && <> · installation {Array.isArray(p.installation_version) ? p.installation_version.map(utc).join(", ") : utc(p.installation_version)}</>}
+          {p.installation_approved === true && <span className="badge muted">installation approved</span>}
+          {p.installation_approved === false && <span className="badge bad">installation not approved — values withheld</span>}
+          {p.probe_constants && <div className="muted">probe constants: {Array.isArray(p.probe_constants) ? p.probe_constants.join(" | ") : p.probe_constants}</div>}
           <Counts obj={p.display_status} /> <Counts obj={p.qa_flag} />
           {p.rows.some((r: any) => r.qc_checksum_ok === false) && <span className="badge warn">checksum outliers</span>}
           {(p.correction_basis || []).map((b: string) => <span key={b} className="badge muted">{b}</span>)}
@@ -229,14 +235,14 @@ function InclinometerView({ id }: { id: string }) {
   );
 }
 
-/** Engine QA-020 between-set bias QC (SCHEMA_CONTRACT §5.5 v1.2). Display only: UNVERIFIED, never applied. */
+/** Engine between-set bias QC (SCHEMA_CONTRACT §5.5 v1.4, api_contract §4.1). Display only: UNVERIFIED, never applied. */
 function BiasQc({ bq }: { bq?: any }) {
   if (!bq) return null;
-  const axes = Object.entries(bq.axes || {}).filter(([, a]: any) => a.suspect_flag || a.status);
+  const axes = Object.entries(bq.axes || {}).filter(([, a]: any) => a.suspect_flag || a.status || (a.proposals || []).length);
   if (!axes.length && !bq.stable_zone_assumed) return null;
   return (
     <div className="notice">
-      <b>QA-020 bias QC (engine) — UNVERIFIED, never applied</b>
+      <b>Bias QC (engine{bq.rule ? `, ${bq.rule}` : ""}) — UNVERIFIED, never applied by the app</b>
       {axes.map(([ax, a]: any) => (
         <div key={ax}>
           Axis {ax}: {a.suspect_flag && <span className="badge warn">suspect: checksum shift vs reference (investigate)</span>}{" "}
@@ -246,6 +252,22 @@ function BiasQc({ bq }: { bq?: any }) {
                 {a.evidence?.n && <span className="muted"> · n={a.evidence.n} sd={a.evidence.sd}{a.evidence.se ? ` se=${a.evidence.se}` : ""} reference {a.evidence.reference_survey_id}{a.evidence.stable_zone_top_m ? ` · stable zone from ${a.evidence.stable_zone_top_m} m` : ""}{a.evidence.params_unverified === "True" ? " · params UNVERIFIED" : ""}</span>}</span>
             : <span className="muted">proposed c not recorded in ref.incl_correction — hidden</span>)}
         </div>
+      ))}
+      {Object.entries(bq.axes || {}).map(([ax, a]: any) => (a.proposals || []).length > 0 && (
+        <table key={`p-${ax}`} className="small">
+          <caption>Axis {ax} proposals (AGREE first) — UNVERIFIED, not applied by the app</caption>
+          <thead><tr><th>record</th><th>ZA ({a.proposals[0].za_unit})</th><th>|ΔD| (mm)</th><th>|bs| (mm)</th><th>cross-check</th><th>status</th><th>approval</th><th>rule</th></tr></thead>
+          <tbody>{a.proposals.map((q: any) => (
+            <tr key={q.record_id}>
+              <td>{q.record_id}</td><td>{fmt(q.za, 2)}</td><td>{fmt(q.abs_dD, 2)}</td><td>{fmt(q.abs_bs, 2)}</td>
+              <td><span className={q.crosscheck_verdict === "AGREE" ? "badge muted" : "badge warn"}>{q.crosscheck_verdict ?? "—"}</span>{q.crosscheck_diff !== null && q.crosscheck_diff !== undefined ? ` Δ${fmt(q.crosscheck_diff, 2)}/tol ${fmt(q.crosscheck_tol, 2)}` : ""}</td>
+              <td>{q.status}</td>
+              <td><span className={q.approval_status === "approved" ? "badge muted" : q.approval_status === "unreviewed_applied" ? "badge bad" : "badge warn"}
+                        title={q.reviewed_by ? `reviewed by ${q.reviewed_by} ${q.reviewed_utc ?? ""}` : "not reviewed"}>{q.approval_status}</span>{" "}
+                  <span className="badge warn">UNVERIFIED</span></td>
+              <td>{q.rule ?? "—"}</td>
+            </tr>))}</tbody>
+        </table>
       ))}
       {bq.stable_zone_assumed && <div><span className="badge muted">STABLE_ZONE_ASSUMED</span> stable zone not set; bottom intervals assumed</div>}
       <div className="muted">{bq.note}</div>

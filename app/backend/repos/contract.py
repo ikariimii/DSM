@@ -306,6 +306,61 @@ def _parse_statistic(s) -> dict:
 PROPOSAL_STATUSES = ("PROPOSED", "SUSPECT_CROSSCHECK")   # statuses that carry an engine proposal record (QA021-v2)
 
 
+VERDICT_ORDER = {"AGREE": 0, "SUSPECT": 1}
+
+
+def _f(v):
+    try:
+        return float(v) if v is not None and v != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def approval_status(rec: dict) -> str:
+    """api_contract §4.1 / SCHEMA_CONTRACT §5.5 v1.4. superseded (superseded_by set) > approved (applied AND
+    reviewed_by set AND reviewed_by != user AND reviewed_utc set) > proposed (applied=false). An applied record
+    without that review is not approved: the engine rejects/ignores it, so it is reported as 'unreviewed_applied'."""
+    if rec.get("superseded_by"):
+        return "superseded"
+    if rec.get("applied") is True:
+        rb = rec.get("reviewed_by")
+        if rb and rb != rec.get("user") and rec.get("reviewed_utc"):
+            return "approved"
+        return "unreviewed_applied"
+    return "proposed"
+
+
+def bias_proposal(rec: dict) -> dict:
+    """One ref.incl_correction bias QC record -> api_contract §4.1 fields. UNVERIFIED display only; the app applies
+    nothing (an approved record is applied by the engine, and corrected rows are still withheld by the gate)."""
+    st = _parse_statistic(rec.get("detection_statistic"))
+    za = _f(st.get("ZA"))
+    return {
+        "record_id": rec.get("record_id"), "axis": (rec.get("axis") or "").upper() or None,
+        "za": za if za is not None else _f(rec.get("auto_value")),
+        "za_unit": "reading units (ZA/ZB; D' = D + ZA)",
+        "abs_dD": _f(st.get("abs_dD")), "abs_bs": _f(st.get("abs_bs")),
+        "crosscheck_verdict": st.get("crosscheck_verdict"),
+        "crosscheck_diff": _f(st.get("crosscheck_diff")), "crosscheck_tol": _f(st.get("crosscheck_tol")),
+        "status": st.get("status"), "rule": st.get("rule"),
+        "requires_review": st.get("requires_review") == "True",
+        "approval_status": approval_status(rec),
+        "reviewed_by": rec.get("reviewed_by"), "reviewed_utc": rec.get("reviewed_utc"),
+        "timestamp_utc": rec.get("timestamp_utc"),
+        "evidence": st, "display_status": "UNVERIFIED", "applied_by_app": False,
+    }
+
+
+def bias_proposals(recs: list[dict]) -> list[dict]:
+    """PROPOSED and SUSPECT_CROSSCHECK records (§4.1), AGREE verdicts first, then newest first, then record_id."""
+    out = [bias_proposal(r) for r in recs if r.get("detection_method") == "between_set_bias_qc"]
+    out = [p for p in out if p["status"] in PROPOSAL_STATUSES]
+    out.sort(key=lambda p: str(p["record_id"]))
+    out.sort(key=lambda p: str(p["timestamp_utc"] or ""), reverse=True)
+    out.sort(key=lambda p: VERDICT_ORDER.get(p["crosscheck_verdict"], 2))
+    return out
+
+
 def bias_qc(rows: list[dict], proposals: list[dict]) -> dict:
     """Per-axis QA-020 summary for one survey, from the engine's qa_reason codes (silver.incl_reduced, §5.5 v1.3)
     and its unapplied proposal rows (ref.incl_correction, detection_method='between_set_bias_qc', applied=false).
@@ -337,6 +392,8 @@ def bias_qc(rows: list[dict], proposals: list[dict]) -> dict:
             "ranking": "SUSPECT" if status == "SUSPECT_CROSSCHECK" else ("OK" if status == "PROPOSED" else None),
             "display_status": "UNVERIFIED",
             "applied": False,
+            # api_contract §4.1: every PROPOSED / SUSPECT_CROSSCHECK record for this axis with its approval_status
+            "proposals": [q for q in bias_proposals(proposals) if q["axis"] == ax],
         }
     return {"axes": out, "stable_zone_assumed": "STABLE_ZONE_ASSUMED" in codes, "note": BIAS_PROPOSAL_NOTE}
 
@@ -364,31 +421,26 @@ EPISODE_LINEAGE = ("reading_id", "cal_version", "calib_id", "formula_version", "
 
 
 def alarm_event(row: dict) -> dict:
-    """Row from ops.alarm_episode LEFT JOIN ref.threshold (id + version) LEFT JOIN ref.calibration (calib_id, for
-    formula_id) LEFT JOIN ops.reading (reading_id, for qc_flag / erroneous mark).
+    """Row from ops.alarm_episode LEFT JOIN ref.threshold (id + version) LEFT JOIN ops.reading (reading_id, only
+    for the engineer's erroneous mark).
 
-    ops.alarm_episode has no formula_id column (§5), so formula_id comes from the episode's calibration row,
-    and only when that row's formula_version equals the episode's formula_version; otherwise the lineage is
-    inconsistent and formula_id stays None, so the gate withholds the value."""
+    §4/§5 v1.4: the episode itself carries formula_id, formula_version and qa_flag (no app-side join). Its value
+    is never NULL for a reading-driven episode; a NULL is still withheld by the gate (defensive)."""
     r = threshold({**row, "value": row.get("value_limit")})  # episode `value` is the measured value
     r["limit"] = row.get("value_limit")
     r["value"] = row.get("value")
     for k in EPISODE_LINEAGE:
         r[k] = row.get(k)
     r["mixed_calibration"] = bool(row.get("mixed_calibration"))
-    fid, fver = row.get("cal_formula_id"), row.get("cal_formula_version")
-    ok = (row.get("calib_id") is not None and fid is not None and row.get("formula_version") is not None
-          and str(fver) == str(row.get("formula_version")))
-    r["formula_id"] = row.get("formula_id") if row.get("formula_id") is not None else (fid if ok else None)
-    r["lineage_issue"] = None if (ok or row.get("formula_id") is not None or row.get("calib_id") is None) else \
-        "calibration formula_version does not match the episode formula_version"
-    qc = row.get("reading_qc_flag", row.get("qa_flag"))
+    r["formula_id"] = row.get("formula_id")
+    r["lineage_issue"] = None
+    qc = row.get("qa_flag")
     if row.get("reading_is_erroneous"):
         qc = "BAD"
     r["qa_flag"] = qc
-    r["qa_reason"] = row.get("reading_qc_reason", row.get("qa_reason"))
-    for k in ("cal_formula_id", "cal_formula_version", "reading_qc_flag", "reading_qc_reason", "reading_is_erroneous"):
-        r.pop(k, None)
+    r["qa_reason"] = (join_reasons(row.get("qa_reason"), "ERRONEOUS_MARK") if row.get("reading_is_erroneous")
+                      else row.get("qa_reason"))
+    r.pop("reading_is_erroneous", None)
     r["message"] = (f"{r.get('instrument_id')} L{r.get('level')} {r.get('rule')} limit "
                     f"{r.get('limit')} {r.get('unit') or ''} ({r.get('machine_state')})").strip()
     return r

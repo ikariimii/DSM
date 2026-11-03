@@ -26,6 +26,13 @@ app/
 - **Shared writes** (acks, drafts, users/ACL, audit) go to Lakebase Autoscaling as the app **service principal**
   (injected PG* env, `ENDPOINT_NAME`, `generate_database_credential` per new pooled connection). Acks are also
   written to `audit.event_log` as `ALARM_ACK`; DSSMR drafts go to `rpt.dssmr_draft`. No synced tables.
+- **Who can open the app (SCHEMA_CONTRACT v1.4 §6, `resources/app.yml`):** `CAN_USE` is granted per dam to the
+  `dam-<dam_id>-members` groups (one `permissions` entry per onboarded dam; the sample bundle lists
+  `dam-SYN-DAM-01-members` … `dam-SYN-DAM-05-members`). It is **no longer** granted to `dam-portfolio-all`.
+  `dam-platform-admins` keeps `CAN_MANAGE`. Onboarding a dam means adding its group to `resources/app.yml` (owned by
+  the Data Architect) and redeploying; portfolio-wide users need membership in each dam group (or a deliberately
+  added portfolio group). `CAN_USE` only gates opening the app: **data visibility is still enforced by the UC row
+  filters** on the user's own token (OBO), and the app's per-dam roles below sit on top of both.
 - **Per-dam roles** are viewer < engineer < dso < dam_admin, plus a global admin, and are stored in
   `dam_app.dam_role`. They are a UX layer on top of the UC filters, not a replacement for them.
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
@@ -38,7 +45,9 @@ app/
   - whenever it is set, the app logs a prominent `SECURITY WARNING` banner at startup, even when it is ignored.
   There is no default admin.
 - **Accuracy rule:** a computed value is shown only if its formula version is verified, its calibration
-  is approved and its QC flag is not BAD/MISSING. Everything else is shown as *unverified/hidden*.
+  is approved (inclinometer rows with `calib_id` NULL instead need `(INCL_PROBE_2PASS, 1.0.0)` verified in `ref.formula`
+  and `installation_version` matching a `ref.incl_installation.effective_from`, v1.4 §5.5) and its QC flag is not
+  BAD/MISSING. Everything else is shown as *unverified/hidden*.
   Units, calibration version and QC flags are shown on every value and plot.
 
 ## Run locally (demo mode, seed data for 5 dams, in-memory SQLite)

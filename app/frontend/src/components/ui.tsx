@@ -5,6 +5,7 @@ export const STATUS_TEXT: Record<string, string> = {
   VERIFIED: "verified",
   UNVERIFIED_FORMULA: "withheld: formula not verified",
   UNAPPROVED_CALIBRATION: "withheld: calibration not approved",
+  UNAPPROVED_INSTALLATION: "withheld: inclinometer formula/installation not approved (§5.5)",
   QC_BAD: "withheld: QC flag BAD",
   MISSING: "withheld: reading missing",
   CORRECTION_UNVERIFIED: "withheld: correction record not verified",

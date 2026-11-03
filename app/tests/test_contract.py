@@ -109,23 +109,46 @@ def test_alarm_episode_without_lineage_is_withheld():
 
 
 def test_alarm_episode_with_lineage_is_shown():
+    """v1.4 §4/§5: ops.alarm_episode carries formula_id and qa_flag itself; no calibration / reading-qc join."""
     row = {"event_id": "T2", "instrument_id": "I", "value": 9.9, "value_limit": 9.0, "level": 1, "unit": "m",
            "limit_type": "magnitude", "direction": "upper", "reading_id": "R9", "raise_reading_id": "R1",
            "cal_version": 2, "raise_cal_version": 1, "mixed_calibration": True, "calib_id": "C",
-           "formula_version": "1", "cal_formula_id": "F", "cal_formula_version": "1", "reading_qc_flag": "OK",
-           "reading_qc_reason": None}
+           "formula_id": "F", "formula_version": "1", "qa_flag": "OK", "qa_reason": None}
     e = ct.alarm_event(row)
     assert (e["formula_id"], e["lineage_issue"], e["mixed_calibration"], e["raise_reading_id"]) == ("F", None, True, "R1")
+    assert e["qa_flag"] == "OK" and "reading_is_erroneous" not in e
     g = Gate(F, [{"calib_id": "C", "approved_by": "x"}])
     out = g.apply_event(dict(e))
     assert out["value"] == 9.9 and out["display_status"] == "VERIFIED"
-    bad = ct.alarm_event({**row, "cal_formula_version": "2"})
-    assert bad["formula_id"] is None and bad["lineage_issue"]
-    assert g.apply_event(bad)["display_status"] == "LINEAGE_INCONSISTENT"
+    # legacy join columns are ignored: formula_id / qa_flag come only from the episode
+    legacy = ct.alarm_event({**row, "formula_id": None, "cal_formula_id": "F", "cal_formula_version": "1",
+                             "reading_qc_flag": "OK"})
+    assert legacy["formula_id"] is None and g.apply_event(legacy)["display_status"] == "LINEAGE_INCOMPLETE"
+    assert ct.alarm_event({**row, "qa_flag": None, "reading_qc_flag": "BAD"})["qa_flag"] is None
     err = ct.alarm_event({**row, "reading_is_erroneous": True})
+    assert err["qa_flag"] == "BAD" and "ERRONEOUS_MARK" in err["qa_reason"]
     assert g.apply_event(err)["display_status"] == "QC_BAD"
-    miss = ct.alarm_event({**row, "reading_qc_flag": "MISSING"})
-    assert g.apply_event(miss)["display_status"] == "MISSING"
+    assert g.apply_event(ct.alarm_event({**row, "qa_flag": "MISSING"}))["display_status"] == "MISSING"
+    assert g.apply_event(ct.alarm_event({**row, "qa_flag": "BAD"}))["display_status"] == "QC_BAD"
+
+
+def test_alarm_episode_null_value_is_withheld_defensively():
+    """v1.4 §4: value is never NULL for a reading-driven episode; if one arrives anyway it is never VERIFIED."""
+    row = {"event_id": "T3", "instrument_id": "I", "value": None, "value_limit": 9.0, "level": 1, "unit": "m",
+           "limit_type": "magnitude", "direction": "upper", "calib_id": "C", "formula_id": "F",
+           "formula_version": "1", "qa_flag": "OK"}
+    out = Gate(F, [{"calib_id": "C", "approved_by": "x"}]).apply_event(ct.alarm_event(row))
+    assert out["display_status"] == "MISSING" and out["value"] is None and out["verified"] is False
+    assert "withheld" in out["message"]
+
+
+def test_sql_alarm_query_has_no_formula_or_qc_join():
+    from backend.repos.analytics import SqlAnalytics
+    sql = SqlAnalytics.__new__(SqlAnalytics)
+    sql.t = lambda layer, name: f"{layer}.{name}"
+    q = sql._alarm_sql("TRUE")
+    assert "ref.calibration" not in q and "qc_flag" not in q and "cal_formula" not in q
+    assert "ops.alarm_episode e" in q and "r.is_erroneous" in q
 
 
 def test_retired_calibration_is_not_approved():

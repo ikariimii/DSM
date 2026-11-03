@@ -1,13 +1,13 @@
 # App-side schema contract: dam safety app
 
-This file maps the app to the data layer's contract, **root `../SCHEMA_CONTRACT.md` v1.1 (PROPOSED)**, including the
-v1.2/v1.3 additions to §5.5 (QA-020 bias QC, the `silver.incl_reduced` writer). The root file is authoritative for UC
-objects. The adapter code is `backend/repos/contract.py`; the SQL is in `backend/repos/analytics.py`. A rename in the
-data layer should need a change only in `contract.py`. Nothing in this repo has been run against a real workspace.
+This file maps the app to the data layer's contract, **root `../SCHEMA_CONTRACT.md` v1.4 (PROPOSED, 2026-11-02)**, and
+`../docs/api_contract.md` §4.1. The root file is authoritative for UC objects. The adapter code is
+`backend/repos/contract.py`; the SQL is in `backend/repos/analytics.py`. A rename in the data layer should need a change
+only in `contract.py`. Nothing in this repo has been run against a real workspace.
 
-**App Developer sign-off on root v1.1: AGREED, conditional on the mismatches in §7** (none blocks the app; each is
-handled conservatively, i.e. by withholding a value or joining a column). The §9 table lives in the Data Architect's root
-file, which the app does not edit, so the DA should record this sign-off there.
+**App Developer sign-off on root v1.4: AGREED, conditional on the mismatches in §7** (none blocks the app; each is
+handled conservatively, by withholding a value or labelling it). The §9 table lives in the Data Architect's root file,
+which the app does not edit, so the DA should record this sign-off there.
 
 ## 1. Catalog and schemas (QA-003)
 One catalog per target (`dam_dev|dam_test|dam_prod`) with `ref, raw, silver, gold, ops, audit, rpt` (+ `ml`). The app
@@ -24,10 +24,11 @@ reads `DAM_CATALOG` (bundle: `${var.catalog}`); each schema can be overridden (`
 | `ref.threshold` (`is_current`) | limits | `contract.threshold`: `limit_type` (magnitude\|rate\|cyclic), `direction` (upper\|lower\|abs), `value`, `pfm_id`, `required_actions`. `abs` = \|x\| ≥ value; **cyclic is labelled "not evaluated"** (§10 Q7) |
 | `ref.pfm`, `ref.pfm_instrument` | DSSMP/PFM (§5.4 PFM fields) | `contract.pfm` (pfm_code, Ch.17 / legacy Ch.14 category, loading condition, mechanism, effective dates) |
 | `ops.reading` | time series | `contract.reading`; `qa_reason` is **comma**-joined; `is_erroneous` → BAD |
-| `ops.alarm_episode` ⨝ `ref.threshold` ⨝ `ref.calibration` ⨝ `ops.reading` | alarms with lineage | `contract.alarm_event` (reading_id, cal_version, calib_id, formula_version, raise_reading_id, raise_cal_version, mixed_calibration) |
+| `ops.alarm_episode` ⨝ `ref.threshold` (⟕ `ops.reading` for `is_erroneous` only) | alarms with lineage | `contract.alarm_event`: `formula_id`, `formula_version`, `qa_flag`, `value`, reading_id, cal_version, calib_id, raise_reading_id, raise_cal_version, mixed_calibration all from the **episode** (v1.4 §4; no `ref.calibration` join, no reading qc join). An engineer's `is_erroneous` mark → `qa_flag` BAD + `ERRONEOUS_MARK` |
 | `gold.instrument_latest` | latest value | as-is (warehouse, OBO) |
-| `silver.incl_survey_header`, `silver.incl_reduced` | inclinometer profiles | `contract.incl_row`: API names `cum_a, cum_b, inc_a, inc_b, resultant, checksum_a/b` |
-| `ref.incl_correction` | the 23 audit fields | `contract.incl_correction` (`audit_complete`, `missing_audit_fields`) |
+| `silver.incl_survey_header`, `silver.incl_reduced` | inclinometer profiles | `contract.incl_row`: API names `cum_a, cum_b, inc_a, inc_b, resultant, checksum_a/b`; v1.4 lineage `qc_rule_version`, `installation_version`, `probe_constants` passed through and shown |
+| `ref.incl_installation` (v1.4 read) | approval of inclinometer rows with `calib_id` NULL | `incl_installations(instrument_id)` → `Gate(installations=…)` |
+| `ref.incl_correction` | the 23 audit fields; all `between_set_bias_qc` records (proposals list) | `contract.incl_correction` (`audit_complete`, `missing_audit_fields`) |
 
 `LEVEL_DATUM` stays hidden (no verified engine formula). The app writes **Lakebase only** (§7.2): acks →
 `dam_app.alarm_ack`, which `dam_lakebase_extract` turns into `ALARM_ACK` rows in `audit.event_log` (and the evaluator
@@ -38,17 +39,35 @@ the app; the data layer's `manual_reading` extract writes `<dam>/readings/manual
 ## 3. Display gate (accuracy rule)
 A computed value is shown only when its formula version is verified, its calibration approved/current/not retired and
 without issues, and its QC flag is not BAD/MISSING. Statuses: `VERIFIED`, `UNVERIFIED_FORMULA`, `UNAPPROVED_CALIBRATION`,
-`QC_BAD`, `MISSING`, `CORRECTION_UNVERIFIED`, `LINEAGE_INCOMPLETE`, `LINEAGE_INCONSISTENT`, `NO_ENGINE_FORMULA`.
-- **Alarms (v1.1 lineage):** episodes always stay visible. Their value is shown once lineage is present and consistent
-  (calibration `formula_version` = episode `formula_version`); otherwise `LINEAGE_INCOMPLETE`/`LINEAGE_INCONSISTENT`.
+`UNAPPROVED_INSTALLATION`, `QC_BAD`, `MISSING`, `CORRECTION_UNVERIFIED`, `LINEAGE_INCOMPLETE`, `LINEAGE_INCONSISTENT`, `NO_ENGINE_FORMULA`.
+- **Alarms (v1.4 §4):** episodes always stay visible. `formula_id`/`qa_flag` come from the episode (no app-side joins).
+  The value is shown only with complete lineage (calib_id, formula_id, formula_version), a verified formula, an approved
+  calibration and `qa_flag` not BAD/MISSING. v1.4 guarantees a non-NULL `value` for non-ACK transitions; the app still
+  withholds a NULL value defensively (`MISSING`). `LINEAGE_INCONSISTENT` remains in the gate but is no longer produced.
+- **Inclinometer approval when `calib_id` is NULL (v1.4 §5.5):** a row is `VERIFIED` only when
+  `(formula_id, formula_version) = (INCL_PROBE_2PASS, 1.0.0)` matches a `ref.formula` row with `verified=true` **and**
+  `(instrument_id, installation_version)` matches a `ref.incl_installation` row's `effective_from` (timestamps compared
+  in UTC; any SCD2 row for that instrument). Otherwise `UNVERIFIED_FORMULA` (e.g. the never-deployed
+  `1.0.0+QA021-v1`) or `UNAPPROVED_INSTALLATION` (no/wrong/unparseable `installation_version`). The profile shows
+  `formula_verified`, `installation_approved`, `qc_rule_version` (e.g. `QA021-v2`), `installation_version` and
+  `probe_constants`; mixed values within a survey are listed, never collapsed. Rows that do carry a `calib_id` (demo)
+  still use the calibration path.
 - **Inclinometers (§5.5):** values are **uncorrected**. A row with `correction_record_ids` is withheld
   (`CORRECTION_UNVERIFIED`) and its correction records are listed with their audit fields.
+- **Bias proposals (v1.4, api_contract §4.1):** each axis of `bias_qc` carries `proposals`: every engine record
+  (`detection_method='between_set_bias_qc'`) with status `PROPOSED` or `SUSPECT_CROSSCHECK`, ordered **AGREE first**,
+  then newest. Fields: `za` (`za_unit`), `abs_dD`, `abs_bs`, `crosscheck_verdict`, `crosscheck_diff`,
+  `crosscheck_tol`, `status`, `rule`, `requires_review`, `approval_status`, `reviewed_by`, `reviewed_utc`, `evidence`,
+  `display_status=UNVERIFIED`, `applied_by_app=false`. `approval_status`: `superseded` (superseded_by set) >
+  `approved` (applied ∧ reviewed_by set ∧ reviewed_by ≠ user ∧ reviewed_utc set) > `unreviewed_applied` (applied
+  without a valid review; §7 item 1) > `proposed`. **Nothing is applied by the app**; displayed profile values stay
+  uncorrected regardless of approval_status. Unparseable numbers are `null`, never invented.
 - **QA-020 bias QC (§5.5 v1.2/QA-021, engine `qc.between_set_bias_qc`):** per survey and axis the API returns `bias_qc` with
   `suspect_flag` (`BIAS_CS_SHIFT_A/B`), `status` (`PROPOSED`/`SUSPECT_CROSSCHECK`/`BAD_RESURVEY` from
   `BIAS_PROPOSED_*`/`BIAS_CROSSCHECK_*`/`BIAS_BAD_RESURVEY_*`; QA-021 rule),
   and `proposed_c` (reading units) only from an engine proposal row in `ref.incl_correction`
   (`detection_method='between_set_bias_qc'`, `applied=false`, not superseded). `proposed_c`, `proposal_record_id`
-  and `evidence` are shown for `PROPOSED` and for `SUSPECT_CROSSCHECK` (a proposal ranked SUSPECT, `ranking`, QA-030);
+  and `evidence` are shown for `PROPOSED` and for `SUSPECT_CROSSCHECK` (a proposal ranked SUSPECT, `ranking`, QA-030; v1.4: magnitude-only cross-check, no sign gate);
   never for `BAD_RESURVEY` or with no record. It is always `display_status=UNVERIFIED`,
   `applied=false`, and never changes a value. The app's own internal bias computation is never exposed
   (`proposed_bias` is dropped from every row; owner decision 2026-11-02).
@@ -60,7 +79,7 @@ without issues, and its QC flag is not BAD/MISSING. Statuses: `VERIFIED`, `UNVER
 ## 4. Lakebase (`dam_app`, service principal)
 Created by `backend/repos/state.py` (mirrored in `../lakebase/001_app_schema.sql`): `app_user, dam_role, alarm_ack,
 alarm_comment, onboarding_draft, onboarding_publication, report_draft, pfm_review, audit_log`. Connection: injected
-`PG*` env + `ENDPOINT_NAME`, `generate_database_credential` per new pooled connection, TCP keepalives and retry for HA
+`PG*` env + `ENDPOINT_NAME` (bundle v1.4: `${resources.postgres_endpoints.dam_lakebase_primary.id}`; the app requires the full `projects/<p>/branches/<b>/endpoints/<e>` name and fails fast otherwise), `generate_database_credential` per new pooled connection, TCP keepalives and retry for HA
 failover. Identity is keyed on `X-Forwarded-User`; the user token is never logged and never used for Lakebase.
 
 ## 5. Reductions vs the QA oracle (`../qa/reference_examples.py`, read-only)
@@ -69,24 +88,23 @@ load cells, thermistor). SG-01..03 are asserted not displayed (`strain_gauge` ha
 read by path from `$DAM_QA_PRIVATE` and never copied.
 
 ## 6. Questions from v1.0
-All 12 are answered by root §10 and implemented above.
+All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4, 5, 6, 7 (partly), 9 are resolved by v1.4;
+3 (§7.3 text) is resolved.
 
-## 7. Mismatches / follow-ups for the Data Architect (proposals; the app does not edit DA files)
-1. `ops.alarm_episode` has no `formula_id` or `qa_flag`; the app joins `ref.calibration` (formula_id, only when versions
-   match) and `ops.reading` (qc flag). Adding them to the episode would remove the joins.
-2. Episode `value` via `max_by` can pick a NULL reading; please confirm the evaluator never writes a NULL value.
-3. Root §7.3 says the synced block "stays commented out"; per steering it is now **removed** (the test
-   `test_app_yml_has_no_synced_table_wired` still passes). Please update the §7.3 text.
-4. Root header still says v1.1 while §5 carries v1.2/v1.3 content; a version bump + changelog line would help sign-off.
-5. `docs/api_contract.md` §4 should list the new response fields (`rule_label`, `evaluated`, lineage fields,
-   `lineage_issue`, `bias_qc`, `qa_reasons`, `calibration_issues`).
-6. **v1.3 writer rows will be withheld by the app:** `reduce_inclinometers` writes `calib_id = NULL` and
-   `formula_version = '1.0.0+QA021-v1'` (bias-rule version). The gate requires a verified `(formula_id, formula_version)` in `ref.formula` and an
-   approved calibration, so those rows show as `UNVERIFIED_FORMULA`/`UNAPPROVED_CALIBRATION` until (a) `ref.formula` has a
-   verified `INCL_PROBE_2PASS 1.0.0+QA021-v1` row and (b) the contract says what approves an inclinometer row without a
-   calib_id (e.g. an approved `ref.incl_installation` row). The app was deliberately not loosened.
-7. `stable_zone_top_m` (ref.incl_installation, v1.2) is not read by the app (it does not read `ref.incl_installation`);
-   the UI shows `STABLE_ZONE_ASSUMED` and the proposal's recorded `stable_zone_top_m` evidence.
-8. Demo inclinometer alarm `reading_id` is synthetic (demo only).
-9. Grants: `dam-portfolio-all` has `CAN_USE` on the app. Recommendation (not applied): grant `CAN_USE` to the
-   per-dam `dam-<id>-members` groups instead; UC row filters plus the in-app ACL still restrict data.
+## 7. Mismatches / follow-ups for the Data Architect (v1.4; proposals, the app does not edit DA files)
+1. **`approval_status` has a 4th app value, `unreviewed_applied`.** api_contract §4.1 lists `proposed|approved|superseded`.
+   A record with `applied=true` but no valid review (reviewer missing, reviewer = author, or no `reviewed_utc`) is
+   rejected by the engine; labelling it `proposed` or `approved` would misrepresent it. Proposal: add it to the enum
+   (or have a DB CHECK make the state impossible).
+2. **`ops.reading` join kept for `is_erroneous` only.** The engineer's erroneous mark is not an episode column; the app
+   forces `qa_flag` BAD (`ERRONEOUS_MARK`) when it is set. Proposal: either fold it into episode `qa_flag` or confirm the
+   join is intended.
+3. **`ENDPOINT_NAME` via `.id` is UNVERIFIED until `databricks bundle validate`/deploy.** The app accepts only the full
+   `projects/…/endpoints/…` name (test-enforced); if `.id` resolves to a short id the app fails at startup with a clear
+   `ValueError` instead of connecting wrongly. Please confirm the resolved value on the first deploy.
+4. **Field-name casing:** api_contract uses `za`; the engine statistic key is `ZA`. The app returns `za` (with `za_unit`).
+5. `installation_version` matches any SCD2 `ref.incl_installation` row for the instrument (the contract says "a row for
+   that instrument"), not only the current one. Please confirm, or say if it must be the row valid at `survey_ts`.
+6. Demo inclinometer alarm `reading_id` is synthetic (demo only); demo inclinometer rows carry a `calib_id`.
+7. Grants: v1.4 §6 implemented in `resources/app.yml` (per-dam `dam-<dam_id>-members` CAN_USE, `dam-platform-admins`
+   CAN_MANAGE); app README updated. Each newly onboarded dam needs its group added to `resources/app.yml`.
