@@ -89,10 +89,7 @@ Strict errors (`Toa5Error`, with `.line` set to the 1-based line):
 - `src/common/` is a **neutral shared module**, deliberately outside the Data Architect's `src/dam_safety/` and `src/jobs/`.
   - Jobs pick it up through `src/jobs/_common.py`, which puts `src/` on `sys.path`. The bundle syncs `src/`. Tests use `pythonpath=["src"]`.
   - It imports only the stdlib.
-- **Duplication to resolve (DA):** `src/dam_safety/toa5.py` appeared at 19:15 EST on 2026-11-02, written by the DA in parallel. I did not edit it. It has no tests and no callers yet.
-  - Proposal: the DA keeps the ingest-specific layer (channel/thermistor mapping and the required `utc_offset_min`) and builds it on `common.toa5.parse_lines`/`read_toa5`.
-  - This leaves one parser that QA verifies.
-  - The DA should record the clean-room provenance of their file either way.
+- **One parser:** `common.toa5` (`src/common/toa5.py`) is the only TOA5 reader. Every caller imports it directly, including the ingest layer `dam_safety.toa5_landing`, which adds the channel/thermistor mapping and the required `utc_offset_min`. There is no `dam_safety` re-export (see `docs/PROVENANCE.md`).
 - `/workspace/oss-review/verify/verify_pins.py` and `verify_candidates.py` still contain PyTOA5 checks. Those checks cannot run now that the package is uninstalled. Under the clean-room rule I did not open them. Whoever owns the review harness should delete those sections.
 
 ## Tests (`tests/test_toa5.py`) and QA verification

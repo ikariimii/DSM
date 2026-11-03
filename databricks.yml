@@ -61,6 +61,7 @@ sync:
     - app/.coverage
     - app/htmlcov/**
     - app/frontend/node_modules/**
+    - node_modules/**              # .gitignore LICENSING block lists node_modules/ (Data Architect, 2026-11-02)
     - app/frontend/tsconfig.tsbuildinfo
     - app/tests/**
     - "**/*.sqlite"
