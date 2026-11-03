@@ -240,8 +240,8 @@ function BiasQc({ bq }: { bq?: any }) {
       {axes.map(([ax, a]: any) => (
         <div key={ax}>
           Axis {ax}: {a.suspect_flag && <span className="badge warn">suspect: checksum shift vs reference (investigate)</span>}{" "}
-          {a.status && <span className={a.status === "BAD_RESURVEY" ? "badge bad" : "badge warn"}>{a.status}{a.status === "SUSPECT_CROSSCHECK" ? " (review; no proposal)" : ""}</span>}{" "}
-          {a.status === "PROPOSED" && (a.proposed_c !== null
+          {a.status && <span className={a.status === "BAD_RESURVEY" ? "badge bad" : "badge warn"}>{a.status}{a.status === "SUSPECT_CROSSCHECK" ? " (proposal ranked SUSPECT: cross-check disagrees; review)" : ""}</span>}{" "}
+          {(a.status === "PROPOSED" || a.status === "SUSPECT_CROSSCHECK") && (a.proposed_c !== null
             ? <span><span className="badge warn">UNVERIFIED</span> proposed c = {fmt(a.proposed_c, 2)} {a.proposed_c_unit} · record {a.proposal_record_id} · <b>not applied</b>
                 {a.evidence?.n && <span className="muted"> · n={a.evidence.n} sd={a.evidence.sd}{a.evidence.se ? ` se=${a.evidence.se}` : ""} reference {a.evidence.reference_survey_id}{a.evidence.stable_zone_top_m ? ` · stable zone from ${a.evidence.stable_zone_top_m} m` : ""}{a.evidence.params_unverified === "True" ? " · params UNVERIFIED" : ""}</span>}</span>
             : <span className="muted">proposed c not recorded in ref.incl_correction — hidden</span>)}

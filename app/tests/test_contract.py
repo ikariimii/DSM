@@ -147,7 +147,21 @@ def test_qa_reason_codes_v13():
     assert d["BIAS_CROSSCHECK_A"]["severity"] == "SUSPECT"
     q = ct.bias_qc([{"qa_reason": "BIAS_CROSSCHECK_A"}], [{"axis": "A", "applied": False, "auto_value": 1.0,
                                                           "detection_method": "between_set_bias_qc"}])
-    assert q["axes"]["A"]["status"] == "SUSPECT_CROSSCHECK" and q["axes"]["A"]["proposed_c"] is None
+    # QA-030: a SUSPECT_CROSSCHECK proposal shows its ZA, record and evidence (UNVERIFIED, not applied)
+    a = q["axes"]["A"]
+    assert a["status"] == "SUSPECT_CROSSCHECK" and a["proposed_c"] == 1.0 and a["ranking"] == "SUSPECT"
+    assert a["applied"] is False and a["display_status"] == "UNVERIFIED"
+    q = ct.bias_qc([{"qa_reason": "BIAS_PROPOSED_A,BIAS_CROSSCHECK_A"}],
+                   [{"record_id": "R9", "axis": "A", "applied": False, "auto_value": -6.0,
+                     "detection_method": "between_set_bias_qc", "detection_statistic": "n=6;se=0.1"}])["axes"]["A"]
+    assert (q["status"], q["proposed_c"], q["proposal_record_id"], q["evidence"]) == \
+        ("SUSPECT_CROSSCHECK", -6.0, "R9", {"n": "6", "se": "0.1"})
+    # no proposal record -> nothing to show; NO code / BAD_RESURVEY never shows a c even if a record exists
+    assert ct.bias_qc([{"qa_reason": "BIAS_CROSSCHECK_A"}], [])["axes"]["A"]["proposed_c"] is None
+    r = ct.bias_qc([{"qa_reason": "BIAS_BAD_RESURVEY_A"}], [{"record_id": "R1", "axis": "A", "applied": False,
+                                                           "auto_value": 30.0, "detection_method": "between_set_bias_qc"}])
+    assert r["axes"]["A"]["proposed_c"] is None and r["axes"]["A"]["proposal_record_id"] is None
+    assert "no proposal" not in ct.QA_REASON_CODES["BIAS_CROSSCHECK_A"][0]
     assert d["CORRECTION_ERROR:rotation"]["severity"] == "BAD" and "rotation" in d["CORRECTION_ERROR:rotation"]["label"]
     assert d["CORRECTION_RECORD_INVALID"]["severity"] == "SUSPECT"
     assert d["NEW_CODE"] == {"code": "NEW_CODE", "label": None, "severity": None, "known": False}  # shown verbatim

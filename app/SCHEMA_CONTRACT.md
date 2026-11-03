@@ -47,7 +47,9 @@ without issues, and its QC flag is not BAD/MISSING. Statuses: `VERIFIED`, `UNVER
   `suspect_flag` (`BIAS_CS_SHIFT_A/B`), `status` (`PROPOSED`/`SUSPECT_CROSSCHECK`/`BAD_RESURVEY` from
   `BIAS_PROPOSED_*`/`BIAS_CROSSCHECK_*`/`BIAS_BAD_RESURVEY_*`; QA-021 rule),
   and `proposed_c` (reading units) only from an engine proposal row in `ref.incl_correction`
-  (`detection_method='between_set_bias_qc'`, `applied=false`, not superseded). It is always `display_status=UNVERIFIED`,
+  (`detection_method='between_set_bias_qc'`, `applied=false`, not superseded). `proposed_c`, `proposal_record_id`
+  and `evidence` are shown for `PROPOSED` and for `SUSPECT_CROSSCHECK` (a proposal ranked SUSPECT, `ranking`, QA-030);
+  never for `BAD_RESURVEY` or with no record. It is always `display_status=UNVERIFIED`,
   `applied=false`, and never changes a value. The app's own internal bias computation is never exposed
   (`proposed_bias` is dropped from every row; owner decision 2026-11-02).
 - **qa_reason codes (v1.3):** `contract.QA_REASON_CODES` labels BAD:TEXT, BAD:RANGE, MISSING:PASS, MEAN_CS_GT_100_A/B,
