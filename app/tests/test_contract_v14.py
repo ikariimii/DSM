@@ -70,10 +70,41 @@ def test_approval_status():
     assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t")) == "proposed"
     ok = dict(applied=True, reviewed_by="rev", reviewed_utc="2026-11-02T00:00:00Z")
     assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **ok)) == "approved"
-    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **{**ok, "reviewed_by": "qa"})) == "unreviewed_applied"
-    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **{**ok, "reviewed_utc": None})) == "unreviewed_applied"
-    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", applied=True)) == "unreviewed_applied"
+    # QA-036: an applied record without an independent review is not given an invented status; it is a
+    # data-integrity error (ck_incl_correction_applied_reviewed makes it unstorable)
+    bad = [{**ok, "reviewed_by": "qa"}, {**ok, "reviewed_utc": None}, dict(applied=True),
+           dict(applied=True, superseded_by="b")]
+    for kw in bad:
+        with pytest.raises(ct.DataIntegrityError) as e:
+            ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **kw))
+        assert e.value.code == "APPLIED_WITHOUT_VALID_REVIEW" and e.value.record_id == "a"
     assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", superseded_by="b", **ok)) == "superseded"
+
+
+def test_approval_statuses_are_exactly_the_api_contract_values():
+    import re
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "api_contract.md").read_text()
+    line = next(x for x in doc.splitlines() if "`approval_status`" in x)
+    assert set(ct.APPROVAL_STATUSES) <= set(re.findall(r"`([a-z_]+)`", line))
+    ok = dict(applied=True, reviewed_by="rev", reviewed_utc="2026-11-02T00:00:00Z")
+    got = {ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **kw))
+           for kw in ({}, ok, {"superseded_by": "b"}, {**ok, "superseded_by": "b"})}
+    assert got == set(ct.APPROVAL_STATUSES)
+
+
+def test_bias_proposal_integrity_error_is_shown_but_values_hidden(caplog):
+    p = ct.bias_proposal(_rec("BAD", "AGREE", "PROPOSED", "t", applied=True, reviewed_by="qa",
+                              reviewed_utc="2026-11-02T00:00:00Z"))
+    assert p["record_id"] == "BAD" and p["approval_status"] is None
+    assert p["integrity_error"] == "APPLIED_WITHOUT_VALID_REVIEW" and p["display_status"] == "DATA_INTEGRITY_ERROR"
+    assert all(p[k] is None for k in ("za", "abs_dD", "abs_bs", "crosscheck_diff", "crosscheck_tol"))
+    assert p["evidence"] == {} and p["applied_by_app"] is False
+    assert "APPLIED_WITHOUT_VALID_REVIEW" in caplog.text
+    ok = ct.bias_proposal(_rec("OK", "AGREE", "PROPOSED", "t"))
+    assert ok["integrity_error"] is None and ok["za"] == -6.0 and ok["user"] == "qa"
+    # still listed (anomaly visible), never as a valid proposal
+    assert [q["record_id"] for q in ct.bias_proposals([_rec("BAD", "AGREE", "PROPOSED", "t", applied=True)])] == ["BAD"]
 
 
 def test_bias_proposals_fields_and_agree_first():

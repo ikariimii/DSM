@@ -6,7 +6,10 @@ change is a change here plus a test. Nothing here computes an engineering value;
 through with their lineage, and missing or inconsistent lineage makes the display gate withhold them."""
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------- §5.4 instrument types
 # Canonical ref.instrument_type vocabulary (sql/seed/ref_instrument_type_seed.sql). engine_formulas == ()
@@ -316,26 +319,48 @@ def _f(v):
         return None
 
 
+APPROVAL_STATUSES = ("proposed", "approved", "superseded")   # api_contract §4.1; the app never adds a value
+APPLIED_WITHOUT_REVIEW = "APPLIED_WITHOUT_VALID_REVIEW"
+
+
+class DataIntegrityError(ValueError):
+    """A stored record violates the contract (QA-036): e.g. ref.incl_correction applied=true without an independent
+    review, which ck_incl_correction_applied_reviewed (02 DDL, v1.5) makes unstorable. Never mapped to a status."""
+
+    def __init__(self, code: str, record_id):
+        super().__init__(f"{code}: ref.incl_correction {record_id}")
+        self.code, self.record_id = code, record_id
+
+
+def _reviewed(rec: dict) -> bool:
+    rb = rec.get("reviewed_by")
+    return bool(rb) and rb != rec.get("user") and bool(rec.get("reviewed_utc"))
+
+
 def approval_status(rec: dict) -> str:
-    """api_contract §4.1 / SCHEMA_CONTRACT §5.5 v1.4. superseded (superseded_by set) > approved (applied AND
-    reviewed_by set AND reviewed_by != user AND reviewed_utc set) > proposed (applied=false). An applied record
-    without that review is not approved: the engine rejects/ignores it, so it is reported as 'unreviewed_applied'."""
+    """api_contract §4.1 / SCHEMA_CONTRACT §5.5: superseded (superseded_by set) > approved (applied AND reviewed_by
+    set AND reviewed_by != user AND reviewed_utc set) > proposed (applied=false). Anything else is not a status: an
+    applied record without that review raises DataIntegrityError (QA-036) instead of being given an invented status."""
+    if rec.get("applied") is True and not _reviewed(rec):
+        raise DataIntegrityError(APPLIED_WITHOUT_REVIEW, rec.get("record_id"))
     if rec.get("superseded_by"):
         return "superseded"
-    if rec.get("applied") is True:
-        rb = rec.get("reviewed_by")
-        if rb and rb != rec.get("user") and rec.get("reviewed_utc"):
-            return "approved"
-        return "unreviewed_applied"
-    return "proposed"
+    return "approved" if rec.get("applied") is True else "proposed"
 
 
 def bias_proposal(rec: dict) -> dict:
     """One ref.incl_correction bias QC record -> api_contract §4.1 fields. UNVERIFIED display only; the app applies
-    nothing (an approved record is applied by the engine, and corrected rows are still withheld by the gate)."""
+    nothing (an approved record is applied by the engine, and corrected rows are still withheld by the gate).
+    A record that violates the approval rule stays listed (the anomaly is visible) but as a data-integrity error:
+    approval_status null, every value and the evidence withheld."""
     st = _parse_statistic(rec.get("detection_statistic"))
+    try:
+        appr, integrity = approval_status(rec), None
+    except DataIntegrityError as e:
+        log.error("data integrity: %s", e)
+        appr, integrity = None, e.code
     za = _f(st.get("ZA"))
-    return {
+    out = {
         "record_id": rec.get("record_id"), "axis": (rec.get("axis") or "").upper() or None,
         "za": za if za is not None else _f(rec.get("auto_value")),
         "za_unit": "reading units (ZA/ZB; D' = D + ZA)",
@@ -344,11 +369,16 @@ def bias_proposal(rec: dict) -> dict:
         "crosscheck_diff": _f(st.get("crosscheck_diff")), "crosscheck_tol": _f(st.get("crosscheck_tol")),
         "status": st.get("status"), "rule": st.get("rule"),
         "requires_review": st.get("requires_review") == "True",
-        "approval_status": approval_status(rec),
+        "approval_status": appr, "integrity_error": integrity,
+        "user": rec.get("user"),
         "reviewed_by": rec.get("reviewed_by"), "reviewed_utc": rec.get("reviewed_utc"),
         "timestamp_utc": rec.get("timestamp_utc"),
         "evidence": st, "display_status": "UNVERIFIED", "applied_by_app": False,
     }
+    if integrity:
+        out.update({k: None for k in ("za", "abs_dD", "abs_bs", "crosscheck_diff", "crosscheck_tol")},
+                   evidence={}, display_status="DATA_INTEGRITY_ERROR")
+    return out
 
 
 def bias_proposals(recs: list[dict]) -> list[dict]:
@@ -404,10 +434,10 @@ def incl_api_row(row: dict) -> dict:
 
 
 def incl_correction(row: dict) -> dict:
-    """ref.incl_correction row -> exactly the 23 audit fields in contract order (+ review fields if present)."""
+    """ref.incl_correction row -> exactly the 23 audit fields in contract order (+ review / v1.5 fields if present)."""
     missing = [k for k in INCL_CORRECTION_FIELDS if k not in row]
     out = {k: row.get(k) for k in INCL_CORRECTION_FIELDS}
-    for k in ("reviewed_by", "reviewed_utc"):
+    for k in ("reviewed_by", "reviewed_utc", "supersedes", "review_id"):   # review / v1.5 versioning columns
         if k in row:
             out[k] = row[k]
     out["audit_complete"] = not missing
