@@ -17,13 +17,13 @@ resources:
   postgres_branches:
     dam_lakebase_production:
       branch_id: production
-      parent: ${resources.postgres_projects.dam_lakebase.name}
+      parent: ${resources.postgres_projects.dam_lakebase.id}
       is_protected: true
       replace_existing: true
   postgres_endpoints:
     dam_lakebase_primary:
       endpoint_id: primary
-      parent: ${resources.postgres_branches.dam_lakebase_production.name}
+      parent: ${resources.postgres_branches.dam_lakebase_production.id}
       endpoint_type: ENDPOINT_TYPE_READ_WRITE
       autoscaling_limit_min_cu: ${var.lb_min_cu}
       autoscaling_limit_max_cu: ${var.lb_max_cu}

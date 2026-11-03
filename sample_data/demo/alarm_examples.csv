@@ -1,0 +1,4 @@
+transition_seq,dam_id,sensor_id,event,from_state,to_state,ts_utc,value,metric_value,reading_ts_utc,reading_source_file,reading_id
+1,SYN-DAM-03,SYN-DAM-03-PZ-02-VW,RAISE,NORMAL,ALERT_UNACK,2026-02-10T00:00:00Z,8553.8000,8553.8000,2026-02-10T00:00:00Z,/Volumes/dam_dev/raw/landing/SYN-DAM-03/readings/SYN-DAM-03_readings.csv,8c10a5e2868970343540add29aaae509fbea6c4f1cd6e4f86694af782a4a19b6
+2,SYN-DAM-03,SYN-DAM-03-PZ-02-VW,ESCALATE,ALERT_UNACK,ACTION_UNACK,2026-02-20T00:00:00Z,8497.5000,8497.5000,2026-02-20T00:00:00Z,/Volumes/dam_dev/raw/landing/SYN-DAM-03/readings/SYN-DAM-03_readings.csv,eb7c4d1ce42795ee166864d7bc4996fa754fe9bd5b51cf1815e08a8315025daf
+3,SYN-DAM-03,SYN-DAM-03-PZ-02-VW,RTN_UNACK,ACTION_UNACK,RTN_UNACK,2026-03-01T00:00:00Z,8469.1000,8469.1000,2026-03-01T00:00:00Z,/Volumes/dam_dev/raw/landing/SYN-DAM-03/readings/SYN-DAM-03_readings.csv,4aaa3e4c0d73f4d2199a2a1d1ac7a431de22d56abc83d2da6692021d7d4b9b7d

@@ -32,10 +32,13 @@ resources:
           - name: DEMO_MODE
             value: "false"
           # Lakebase endpoint for w.postgres.generate_database_credential(endpoint=...): projects/<p>/branches/<b>/
-          # endpoints/<e>. UNVERIFIED that `.name` resolves to that full path (it does for the branch reference
-          # below) and that bundle config.env overrides the app.yaml value; not validated against a workspace.
+          # endpoints/<e>. Uses `.id`: docs.databricks.com/aws/en/oltp/projects/manage-with-bundles ("Resource
+          # substitutions": `${resources.postgres_branches.<k>.id}` "references the branch resource name") and every
+          # example in dev-tools/bundles/resources use `.id`; the API/Terraform `name` is output-only and = the full
+          # path, so `.name` probably resolves too but is undocumented (checked 2026-11-02). Still UNVERIFIED by
+          # `bundle validate`/deploy, and that bundle config.env overrides the app.yaml value.
           - name: ENDPOINT_NAME
-            value: ${resources.postgres_endpoints.dam_lakebase_primary.name}
+            value: ${resources.postgres_endpoints.dam_lakebase_primary.id}
       resources:
         - name: sql-warehouse
           description: Analytics reads (OBO, UC row filters apply)
@@ -45,14 +48,30 @@ resources:
         - name: lakebase
           description: App state (acks, onboarding drafts, users/ACL, audit outbox) - service principal writes
           postgres:
-            branch: ${resources.postgres_branches.dam_lakebase_production.name}
-            database: ${resources.postgres_branches.dam_lakebase_production.name}/databases/databricks_postgres
+            branch: ${resources.postgres_branches.dam_lakebase_production.id}
+            database: ${resources.postgres_branches.dam_lakebase_production.id}/databases/databricks_postgres
             permission: CAN_CONNECT_AND_CREATE
+      # Access (SCHEMA_CONTRACT §6): CAN_USE per dam via the same `dam-<dam_id>-members` groups the UC row filter
+      # uses, plus dam-platform-admins CAN_MANAGE; never dam-portfolio-all (also not via target-level permissions:
+      # QA-037, databricks.yml prod). Bundles cannot loop, so the block below is GENERATED from the dam list by
+      # tools/render_app_permissions.py (default sample_data/ref/dam.csv = the five synthetic dams; pass the real
+      # ref.dam export or --dam-ids per deployment) and CI fails if it is out of sync (--check).
+      # App access is only the front door: data visibility is still the UC row filter, evaluated OBO.
+      # BEGIN GENERATED permissions (tools/render_app_permissions.py; do not edit by hand)
       permissions:
-        - group_name: dam-portfolio-all
+        - group_name: dam-SYN-DAM-01-members
+          level: CAN_USE
+        - group_name: dam-SYN-DAM-02-members
+          level: CAN_USE
+        - group_name: dam-SYN-DAM-03-members
+          level: CAN_USE
+        - group_name: dam-SYN-DAM-04-members
+          level: CAN_USE
+        - group_name: dam-SYN-DAM-05-members
           level: CAN_USE
         - group_name: dam-platform-admins
           level: CAN_MANAGE
+      # END GENERATED permissions
 
 targets:
   prod:

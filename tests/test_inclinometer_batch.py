@@ -109,8 +109,22 @@ def test_a180_only_shift_proposed_in_batch():
     assert [p.status for p in props] == ["PROPOSED"] and props[0].za_proposed_c == pytest.approx(6.0)
 
 
+def approve(rec, subject=None, **kw):
+    """An audit.review_record approval of `subject` (default: rec itself), signed per SCHEMA_CONTRACT §5.5."""
+    from dam_safety.inclinometer import corrections as C
+    subject = subject or rec
+    rv = dict(review_id=rec["review_id"], dam_id="D1", subject_type="incl_correction", subject_id=subject["record_id"],
+              review_level="engineer", decision="approve", comment="rationale", reviewer_id=rec["reviewed_by"],
+              reviewer_pe_license=None, signed_ts=TS, source="APP")
+    rv.update(kw)
+    rv["signature_hash"] = C.review_signature(rv, subject)
+    return rv
+
+
 def test_applied_reviewed_bias_record_is_used_and_suppresses_proposal():
-    out, props = run([survey("S0", "2026-01-01"), survey("S5", "2026-03-01", a0_shift=-6.0)], [corr()])
+    c = corr(review_id="RV1")
+    out, props = run([survey("S0", "2026-01-01"), survey("S5", "2026-03-01", a0_shift=-6.0)], [c],
+                     review_rows=[approve(c)])
     s5, s0 = by(out, "S5"), by(out, "S0")
     assert not props
     assert all(r["correction_record_ids"] == ["R1"] for r in s5.values())
@@ -202,3 +216,152 @@ def test_inclinometer_lineage_joins_a_verified_formula_row_without_calibration()
     assert r["calib_id"] is None and (r["formula_id"], r["formula_version"]) == ("INCL_PROBE_2PASS", "1.0.0")
     assert r["installation_version"] == "2026-01-01T00:00:00"
 
+
+
+# ---- v1.5 (App Developer mismatch 5, QA info): installation row valid AT SURVEY TIME ------------------------------
+def _scd2():
+    return [inst_row(effective_from="2026-01-01T00:00:00", effective_to="2026-02-15T00:00:00"),
+            inst_row(effective_from="2026-02-15T00:00:00", effective_to=None, probe_K=20000.0)]
+
+
+def test_v15_each_survey_uses_the_installation_row_valid_at_its_survey_ts():
+    surveys = [survey("S0", "2026-01-01T00:00:00"), survey("S1", "2026-02-01T00:00:00"),
+               survey("S2", "2026-02-15T00:00:00"), survey("S3", "2026-03-01T00:00:00")]
+    out, _ = run(surveys, inst=_scd2())
+    iv = {r["survey_id"]: r["installation_version"] for r in out}
+    assert iv == {"S0": "2026-01-01T00:00:00", "S1": "2026-01-01T00:00:00",       # half-open: S2 at effective_to
+                  "S2": "2026-02-15T00:00:00", "S3": "2026-02-15T00:00:00"}       # of row 1 -> row 2 (not row 1)
+    k = {r["survey_id"]: r["probe_constants"].split(";")[1] for r in out}
+    assert k == {"S0": "K=25000.0", "S1": "K=25000.0", "S2": "K=20000.0", "S3": "K=20000.0"}
+
+
+def test_v15_not_the_current_row_for_old_surveys_and_order_independent():
+    out, _ = run([survey("S0", "2026-01-01T00:00:00"), survey("S1", "2026-02-01T00:00:00")],
+                 inst=list(reversed(_scd2())))
+    assert {r["installation_version"] for r in out} == {"2026-01-01T00:00:00"}     # current row starts later
+
+
+def test_v15_survey_with_no_valid_row_is_not_emitted_and_overlap_raises():
+    rows = [inst_row(effective_from="2026-02-01T00:00:00", effective_to=None)]
+    out, _ = run([survey("S0", "2026-01-01T00:00:00"), survey("S1", "2026-03-01T00:00:00")], inst=rows)
+    assert {r["survey_id"] for r in out} == {"S1"}
+    with pytest.raises(ValueError, match="overlapping"):
+        run([survey("S0", "2026-01-01T00:00:00")],
+            inst=[inst_row(effective_from="2025-12-01T00:00:00", effective_to=None),
+                  inst_row(effective_from="2026-01-01T00:00:00", effective_to=None)])
+
+
+def test_v15_installation_row_at_timestamp_forms():
+    from datetime import datetime
+    rows = _scd2()
+    assert batch.installation_row_at(rows, "2026-02-14T23:59:59Z") is rows[0]
+    assert batch.installation_row_at(rows, datetime(2026, 2, 15)) is rows[1]
+    assert batch.installation_row_at(rows, "2025-12-31 23:00:00") is None
+
+
+def test_v15_spark_wrapper_range_joins_all_scd2_rows():
+    src = open(os.path.join(ROOT, "src/jobs/reduce_inclinometers.py")).read()
+    assert 'where(F.col("effective_to").isNull())' not in src                     # not "current row only"
+    assert "surv.survey_ts >= inst.i_from" in src and "surv.survey_ts < inst.i_to" in src and "i_to.isNull()" in src
+    assert 'max_by("installation_version", "reduced_ts")' in src                   # re-reduce when the valid row changes
+
+
+# ---- v1.5 / QA-039: approval = insert-only audit.review_record row; ref.incl_correction append-only -------------
+def _bias_case(corrs, reviews):
+    return run([survey("S0", "2026-01-01"), survey("S5", "2026-03-01", a0_shift=-6.0)], corrs, review_rows=reviews)
+
+
+def _applied_ids(out):
+    return {i for r in by(out, "S5").values() for i in r["correction_record_ids"]}
+
+
+def test_v15_reviewed_by_columns_alone_never_approve():
+    c = corr(review_id="RV1")                                # denormalized columns fine, but no review row
+    out, props = _bias_case([c], [])
+    assert _applied_ids(out) == set() and len(props) == 1
+    assert all("CORRECTION_RECORD_INVALID" in (r["qa_reason"] or "") for r in by(out, "S5").values())
+
+
+@pytest.mark.parametrize("bad", [
+    dict(decision="reject"), dict(subject_type="reading"), dict(reviewer_id="eng"),     # eng = the author
+    dict(reviewer_id="someone-else"), dict(subject_id="R9")])
+def test_v15_review_row_must_be_an_independent_matching_approval(bad):
+    from dam_safety.inclinometer import corrections as C
+    c = corr(review_id="RV1")
+    rv = approve(c, **bad)
+    assert _applied_ids(_bias_case([c], [rv])[0]) == set()
+    assert C.approval_problem(c, {c["record_id"]: c}, {"RV1": rv})
+
+
+def test_v15_tampered_record_or_review_fails_the_signature():
+    c = corr(review_id="RV1")
+    rv = approve(c)
+    assert _applied_ids(_bias_case([dict(c, auto_value=60.0)], [rv])[0]) == set()          # record changed later
+    assert _applied_ids(_bias_case([c], [dict(rv, comment="edited")])[0]) == set()         # review changed later
+    assert _applied_ids(_bias_case([c], [rv])[0]) == {"R1"}
+
+
+def test_v15_proposal_approved_then_new_applied_version_supersedes_it():
+    """Append-only flow: proposal P (applied=false) is reviewed in the app (review signs P as stored); the corrections
+    job then INSERTS version A (applied=true, supersedes=P, review_id, denormalized reviewer). Nothing is updated."""
+    p = corr("P1", applied=False, reviewed_by=None, reviewed_utc=None)
+    a = corr("A1", supersedes="P1", review_id="RV1", reviewed_by="eng2", reviewed_utc=TS)
+    rv = approve(a, subject=p)
+    out, props = _bias_case([p, a], [rv])
+    assert _applied_ids(out) == {"A1"} and not props
+    # the applied version must carry exactly the reviewed value
+    out2, _ = _bias_case([p, dict(a, auto_value=7.0)], [rv])
+    assert _applied_ids(out2) == set()
+    # a later version superseding A1 (e.g. a withdrawal row, applied=false) switches it off without any UPDATE
+    w = corr("W1", applied=False, supersedes="A1", reviewed_by=None, reviewed_utc=None)
+    out3, _ = _bias_case([p, a, w], [rv])
+    assert _applied_ids(out3) == set()
+
+
+def test_v15_ddl_append_only_check_and_review_link():
+    from dam_safety.inclinometer import corrections as C
+    ddl = open(os.path.join(ROOT, "sql/ddl/02_ref_calibration_threshold.sql")).read()
+    assert "ALTER TABLE ref.incl_correction SET TBLPROPERTIES ('delta.appendOnly' = 'true')" in ddl
+    chk = re.search(r"ADD CONSTRAINT ck_incl_correction_applied_reviewed\s+CHECK \((.*)\);", ddl).group(1)
+    assert chk == ("NOT applied OR (reviewed_by IS NOT NULL AND reviewed_by <> `user` AND reviewed_utc IS NOT NULL "
+                   "AND review_id IS NOT NULL)")
+    assert C.AUDIT_FIELDS[-2:] == ("supersedes", "review_id")
+    audit = open(os.path.join(ROOT, "sql/ddl/08_audit.sql")).read()
+    assert "incl_correction" in audit.split("CREATE TABLE IF NOT EXISTS audit.review_record (")[1].split(") TBLPROPERTIES")[0]
+
+
+def test_v15_check_expression_evaluated(tmp_path):
+    """The CHECK text from the DDL, evaluated by sqlite (same boolean/NULL semantics for these operators)."""
+    import sqlite3
+    ddl = open(os.path.join(ROOT, "sql/ddl/02_ref_calibration_threshold.sql")).read()
+    expr = re.search(r"ADD CONSTRAINT ck_incl_correction_applied_reviewed\s+CHECK \((.*)\);", ddl).group(1)
+    db = sqlite3.connect(":memory:")
+    db.execute(f'CREATE TABLE t (applied BOOLEAN NOT NULL, "user" TEXT, reviewed_by TEXT, reviewed_utc TEXT, '
+               f'review_id TEXT, CHECK ({expr.replace("`user`", chr(34) + "user" + chr(34))}))')
+    ok = [(0, "a", None, None, None), (1, "a", "b", TS, "RV1")]
+    bad = [(1, "a", None, TS, "RV1"), (1, "a", "a", TS, "RV1"), (1, "a", "b", None, "RV1"), (1, "a", "b", TS, None)]
+    for r in ok:
+        db.execute("INSERT INTO t VALUES (?,?,?,?,?)", r)
+    for r in bad:
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("INSERT INTO t VALUES (?,?,?,?,?)", r)
+
+
+def test_v15_signature_interop_vector():
+    """Shared synthetic vector for the app (backend/signoff.py) and the engine: same canonical form both sides."""
+    import json
+    from dam_safety.inclinometer import corrections as C
+    v = json.load(open(os.path.join(ROOT, "tests", "fixtures", "review_signature_vector.json")))
+    assert C.review_signature(v["review"], v["subject"]) == v["signature_hash"]
+    # timestamp spellings normalise to one canonical form
+    alt = dict(v["subject"], timestamp_utc=v["subject"]["timestamp_utc"].replace("+00:00", "Z").replace(".000000", ""))
+    assert C.review_signature(v["review"], alt) == v["signature_hash"]
+
+
+def test_v15_correction_status_view_lists_all_four_statuses():
+    v = open(os.path.join(ROOT, "sql/ddl/11_gold_views.sql")).read()
+    body = v[v.index("CREATE OR REPLACE VIEW gold.incl_correction_status"):]
+    for s in ("'superseded'", "'approved'", "'unreviewed_applied'", "'proposed'"):
+        assert s in body
+    assert "audit.review_record r" in body and "r.decision = 'approve'" in body and "c.supersedes" in body
+    assert "lower(r.reviewer_id) <> lower(c.`user`)" in body

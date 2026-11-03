@@ -84,7 +84,7 @@ for sid in sensors:
         tr_rows.append((tid, t.key, dam_of[sid], sid, t.ts, t.event, t.from_state, t.to_state, t.value, t.metric_value,
                         t.threshold_id, t.threshold_version, t.actor, t.comment, rid, run_id, now,
                         src.get("calib_id"), src.get("cal_version"), src.get("formula_id"), src.get("formula_version"),
-                        src.get("recompute_batch_id")))
+                        src.get("recompute_batch_id"), src.get("qa_flag")))
         if t.event in ("RAISE", "ESCALATE") and rid:
             spec = next(s for s in ok_specs if s["threshold_id"] == t.threshold_id)
             ex_rows.append((f"ex-{tid[:32]}", dam_of[sid], rid, tid, t.threshold_id, t.threshold_version, t.ts,
@@ -92,6 +92,10 @@ for sid in sensors:
     state_row.update(dam_id=dam_of[sid], sensor_id=sid, updated_ts=now)
     st_rows.append(state_row)
 
+# v1.4 guard (mirrors ck_alarm_transition_value): never write a reading-driven transition with NULL value/lineage.
+bad = [r for r in tr_rows if r[5] != "ACK" and (r[8] is None or r[9] is None or r[14] is None)]
+if bad:
+    raise RuntimeError(f"{len(bad)} non-ACK transitions with NULL value/metric_value/reading_id, e.g. {bad[0][:6]}")
 if tr_rows:
     spark.createDataFrame(tr_rows, spark.table(fq(C, "ops", "alarm_transition")).schema).write.mode("append") \
         .saveAsTable(fq(C, "ops", "alarm_transition"))

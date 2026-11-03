@@ -1,4 +1,4 @@
-"""Inclinometer reduction job: silver.incl_survey + ref.incl_installation (current row) + ref.incl_correction ->
+"""Inclinometer reduction job: silver.incl_survey + ref.incl_installation (row valid at survey time) + ref.incl_correction ->
 silver.incl_reduced (append-only, job-owned; SCHEMA_CONTRACT §5.5). All maths is in the pure-Python core
 dam_safety.inclinometer.batch.reduce_instrument (tested locally, tests/test_inclinometer_batch.py); this file only
 moves rows. UNTESTED HERE: no pyspark/Java on the build box (docs/VERIFICATION.md INC-WIRE). Not deployed.
@@ -47,6 +47,8 @@ except ImportError:                     # importable without pyspark (tests)
 INST_COLS = ("instrument_id", "dam_id", "system", "probe_L_m", "probe_K", "raw_unit", "casing_depth_m",
              "depth_reference", "a0_azimuth_deg", "sign_mult_A", "sign_mult_B", "baseline_survey_id",
              "spiral_survey_id", "stable_zone_top_m")
+REVIEW_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+               "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash")
 SURVEY_COLS = ("instrument_id", "survey_id", "survey_ts", "depth_m", "a0", "a180", "b0", "b180")
 
 
@@ -57,13 +59,26 @@ def make_udf(batch_id, reduced_ts):
         if surveys.empty:
             return pd.DataFrame(columns=list(batch.REDUCED_COLUMNS))
         clean = lambda v: None if pd.isna(v) else v                  # noqa: E731
-        inst = {c: clean(surveys.iloc[0][f"i_{c}"]) for c in INST_COLS}
-        inst["effective_from"] = clean(surveys.iloc[0]["i_from"])      # -> installation_version lineage
+        # v1.5: every SCD2 installation row any survey was range-joined to; batch.reduce_instrument picks, per
+        # survey, the row valid at survey_ts (and raises on overlapping rows, which would duplicate survey rows here).
+        inst = []
+        for _f, g in surveys.groupby("i_from", sort=True, dropna=False):
+            r0 = g.iloc[0]
+            row = {c: clean(r0[f"i_{c}"]) for c in INST_COLS}
+            row.update(effective_from=clean(r0["i_from"]), effective_to=clean(r0["i_to"]))
+            inst.append(row)
         rows = [{c: clean(r[c]) for c in SURVEY_COLS} for r in surveys.to_dict("records")]
         targets = set(surveys.loc[surveys["_target"], "survey_id"])
-        crow = [{k: (v if isinstance(v, (list, tuple)) else clean(v)) for k, v in r.items()}
-                for r in corrs.to_dict("records")]
-        out, _proposals = batch.reduce_instrument(inst, rows, crow, batch_id, reduced_ts, target_surveys=targets)
+        crow, reviews = [], {}
+        for r in corrs.to_dict("records"):
+            r = {k: (v if isinstance(v, (list, tuple)) else clean(v)) for k, v in r.items()}
+            rv = {k[2:]: r.pop(k) for k in list(r) if k.startswith("r_")}
+            if rv.get("review_id"):
+                reviews[rv["review_id"]] = rv
+            crow.append(r)
+        # v1.5 (QA-039): approvals are the audit.review_record rows, verified in C.approval_problem
+        out, _proposals = batch.reduce_instrument(inst, rows, crow, batch_id, reduced_ts, target_surveys=targets,
+                                                  review_rows=list(reviews.values()))
         return pd.DataFrame(out, columns=list(batch.REDUCED_COLUMNS))
     return _reduce
 
@@ -76,29 +91,36 @@ def main():
     batch_id = f"incl-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     reduced_ts = datetime.now(timezone.utc).replace(tzinfo=None)     # UTC, naive for Arrow TimestampType
 
-    inst = (spark.read.table(fq("ref", "incl_installation")).where(F.col("effective_to").isNull())
-            .select(*[F.col(c).alias(f"i_{c}") for c in INST_COLS], F.col("effective_from").alias("i_from")))
+    # v1.5 (SCHEMA_CONTRACT §5.5): ALL SCD2 rows; each survey joins the row valid at survey time
+    # (effective_from <= survey_ts < effective_to, NULL = open). Not the current row.
+    inst = (spark.read.table(fq("ref", "incl_installation"))
+            .select(*[F.col(c).alias(f"i_{c}") for c in INST_COLS], F.col("effective_from").alias("i_from"),
+                    F.col("effective_to").alias("i_to")))
     surv = spark.read.table(fq("silver", "incl_survey")).select(*SURVEY_COLS)
     corr = spark.read.table(fq("ref", "incl_correction"))
+    rv = (spark.read.table(fq("audit", "review_record")).where(F.col("subject_type") == "incl_correction")
+          .select(*[F.col(c).alias(f"r_{c}") for c in REVIEW_COLS]))
+    corr_rv = corr.join(rv, corr.review_id == rv.r_review_id, "left")       # approving review row (or NULLs)
     version = f"{batch.ENGINE_VERSION}+{batch.BIAS_RULE_VERSION}"     # formula_version + qc_rule_version
     last = (spark.read.table(fq("silver", "incl_reduced")).groupBy("instrument_id", "survey_id")
             .agg(F.max("reduced_ts").alias("last_ts"),
-                 F.max_by(F.concat_ws("+", "formula_version", "qc_rule_version"), "reduced_ts").alias("last_version")))
-    last_inst = last.groupBy("instrument_id").agg(F.max("last_ts").alias("inst_last_ts"))
+                 F.max_by(F.concat_ws("+", "formula_version", "qc_rule_version"), "reduced_ts").alias("last_version"),
+                 F.max_by("installation_version", "reduced_ts").alias("last_inst_version")))
     corr_ts = (corr.groupBy("instrument_id", "survey_id")
                .agg(F.max(F.greatest("timestamp_utc", F.coalesce("reviewed_utc", "timestamp_utc"))).alias("corr_ts")))
 
-    s = (surv.join(inst, surv.instrument_id == inst.i_instrument_id, "inner")        # no installation row: skipped
+    valid = ((surv.instrument_id == inst.i_instrument_id) & (surv.survey_ts >= inst.i_from)
+             & (inst.i_to.isNull() | (surv.survey_ts < inst.i_to)))
+    s = (surv.join(inst, valid, "inner")                       # no installation row valid at survey time: skipped
              .join(last, ["instrument_id", "survey_id"], "left")
-             .join(last_inst, ["instrument_id"], "left")
              .join(corr_ts, ["instrument_id", "survey_id"], "left"))
     s = s.withColumn("_target", F.lit(True) if full else (
-        F.col("last_ts").isNull() | (F.col("corr_ts") > F.col("last_ts")) | (F.col("i_from") > F.col("inst_last_ts"))
+        F.col("last_ts").isNull() | (F.col("corr_ts") > F.col("last_ts")) | ~F.col("last_inst_version").eqNullSafe(F.col("i_from"))
         | ~F.col("last_version").eqNullSafe(F.lit(version))))                 # bias-rule / engine version bump
     keep = s.groupBy("instrument_id").agg(F.max(F.col("_target").cast("int")).alias("_any")).where("_any = 1")
-    s = s.join(keep.select("instrument_id"), ["instrument_id"], "inner").drop("last_ts", "inst_last_ts",
+    s = s.join(keep.select("instrument_id"), ["instrument_id"], "inner").drop("last_ts", "last_inst_version",
                                                                              "corr_ts", "last_version")
-    out = (s.groupBy("instrument_id").cogroup(corr.groupBy("instrument_id"))
+    out = (s.groupBy("instrument_id").cogroup(corr_rv.groupBy("instrument_id"))
             .applyInPandas(make_udf(batch_id, reduced_ts), schema=OUT_SCHEMA))
     out.write.mode("append").saveAsTable(fq("silver", "incl_reduced"))   # silver.incl_reduced is appendOnly
 

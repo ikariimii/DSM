@@ -176,3 +176,18 @@ def test_contract_docs_and_ddl_expose_fields():
     ddl = open(os.path.join(ROOT, "sql", "ddl", "02_ref_calibration_threshold.sql"), encoding="utf-8").read()
     block = ddl.split("CREATE TABLE IF NOT EXISTS ref.incl_installation (")[1].split("\n);")[0]
     assert re.search(r"^\s*stable_zone_top_m\s+DOUBLE", block, re.M)
+
+
+def test_v15_api_uses_lowercase_za_mapped_at_the_boundary():
+    """App Developer mismatch 4: engine/storage key `ZA`, API/contract field `za` (no `ZA` in any API payload)."""
+    q = run(shifted(a0_shift=6.0))
+    api = qc.bias_qc_api(q)
+    assert api["za"] == pytest.approx(q.za_proposed_c) and "ZA" not in api and api["applied"] is False
+    rec = qc.bias_proposal_record(q, "R1", "D1", "I1", "eng", "2026-11-02T00:00:00Z")
+    st = qc.parse_detection_statistic(rec.detection_statistic)
+    assert float(st["za"]) == pytest.approx(q.za_proposed_c) and "ZA" not in st
+    assert "ZA=" in rec.detection_statistic                  # stored key unchanged (existing records parse)
+    for doc in ("docs/api_contract.md",):
+        txt = open(os.path.join(os.path.dirname(__file__), "..", doc)).read()
+        api_rows = [l for l in txt.splitlines() if l.startswith("| `/api/")]
+        assert api_rows and not any(re.search(r"`ZA`", l) for l in api_rows)

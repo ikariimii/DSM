@@ -6,18 +6,28 @@ USE CATALOG IDENTIFIER(:catalog);
 CREATE TABLE IF NOT EXISTS audit.review_record (
   review_id           STRING NOT NULL,
   dam_id              STRING NOT NULL,
-  subject_type        STRING NOT NULL COMMENT 'reading | exceedance | dssmr | threshold | commentary | rule_finding',
+  subject_type        STRING NOT NULL COMMENT 'reading | exceedance | dssmr | threshold | commentary | rule_finding | incl_correction',
   subject_id          STRING NOT NULL,
   review_level        STRING NOT NULL COMMENT 'technician | engineer | CDSE | IC',
-  decision            STRING NOT NULL,
-  comment             STRING,
+  decision            STRING NOT NULL COMMENT 'incl_correction: approve | reject (lowercase)',
+  comment             STRING COMMENT 'incl_correction: the reviewer rationale (required)',
   reviewer_id         STRING NOT NULL,
   reviewer_pe_license STRING,
   signed_ts           TIMESTAMP NOT NULL,
-  signature_hash      STRING NOT NULL COMMENT 'sha256 of the reviewed content/artifact',
+  signature_hash      STRING NOT NULL COMMENT 'sha256 of the reviewed content/artifact; incl_correction: SCHEMA_CONTRACT §5.5 canonical record',
   source              STRING COMMENT 'APP (Lakebase extract)',
   CONSTRAINT pk_review PRIMARY KEY (review_id)
 ) TBLPROPERTIES (delta.appendOnly = true);
+
+-- v1.5 (QA-039): subject_type / decision domain. 'incl_correction' rows come from the app's Lakebase
+-- review_signoff (job dam_lakebase_extract) with decision 'approve' or 'reject' (lowercase) and a rationale.
+-- The pre-v1.5 uppercase decisions of the other subject types stay allowed. Migration for an existing table:
+-- sql/migrations/v1_5_001_contract.sql.
+ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
+ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
+  subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction')
+  AND (subject_type <> 'incl_correction'
+       OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
 
 -- Generic event log: alarm transitions, acks, threshold/calibration changes, logins of note.
 CREATE TABLE IF NOT EXISTS audit.event_log (
@@ -68,4 +78,4 @@ CREATE TABLE IF NOT EXISTS audit.app_extract (
   payload    STRING NOT NULL COMMENT 'Row as JSON (sorted keys)',
   extract_ts TIMESTAMP NOT NULL
 ) TBLPROPERTIES ('delta.appendOnly' = 'true')
-  COMMENT 'At-least-once copy of Lakebase review_signoff/exceedance_status/audit_log/...; dedupe on (table_name, pk)';
+  COMMENT 'At-least-once copy of Lakebase exceedance_status/audit_log/... (review_signoff goes to audit.review_record since v1.5); dedupe on (table_name, pk)';

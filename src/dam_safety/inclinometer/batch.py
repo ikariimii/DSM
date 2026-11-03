@@ -1,7 +1,9 @@
 """Pure-Python core of the silver.incl_reduced job (src/jobs/reduce_inclinometers.py). No Spark imports.
 
 Per instrument, from table rows (dicts):
-  ref.incl_installation (current row)  -> Installation (+ depth_reference, raw_unit)
+  ref.incl_installation SCD2 rows      -> per survey, the ONE row valid at survey time (effective_from <= survey_ts <
+                                          effective_to, effective_to NULL = open) -> Installation (+ depth_reference,
+                                          raw_unit); that row's effective_from is the survey's installation_version
   silver.incl_survey rows              -> RawReading per (survey, depth, axis) via survey_import (sign once,
                                           BAD/MISSING checks); workbook 'from_bottom_label' depths re-keyed to the
                                           interval top from top of casing (procedure §4.0, REPORT D2), raw label kept
@@ -108,11 +110,66 @@ def _pairs(readings, axis):
             if r.axis == axis and r.qa_flag in ("OK", "SUSPECT")}
 
 
-def reduce_instrument(inst_row: dict, survey_rows, correction_rows, batch_id: str, reduced_ts,
-                      target_surveys=None, bias_rule=DEFAULT_BIAS_RULE, label_unit_m: float = 1.0):
+def _ts(v):
+    """Comparable naive-UTC datetime from a datetime / pandas Timestamp / ISO string ('Z' allowed); None stays None."""
+    from datetime import datetime, timezone
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.astimezone(timezone.utc).replace(tzinfo=None) if v.tzinfo else v
+    t = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00").replace(" ", "T", 1))
+    return t.astimezone(timezone.utc).replace(tzinfo=None) if t.tzinfo else t
+
+
+def installation_row_at(inst_rows, survey_ts):
+    """v1.5 (SCHEMA_CONTRACT §5.5): the ref.incl_installation row valid at survey time, half-open
+    effective_from <= survey_ts < effective_to (effective_to NULL = still open). Not 'any row' and not necessarily the
+    current row. None when no row covers the survey; ValueError when rows overlap (SCD2 data error).
+    A row without effective_from (in-memory callers only; DDL makes it NOT NULL) covers all time."""
+    t = _ts(survey_ts)
+    hits = [r for r in inst_rows
+            if (r.get("effective_from") is None or _ts(r["effective_from"]) <= t)
+            and (r.get("effective_to") is None or t < _ts(r["effective_to"]))]
+    if len(hits) > 1:
+        raise ValueError(f"{hits[0].get('instrument_id')}: {len(hits)} ref.incl_installation rows valid at {survey_ts} "
+                         f"(overlapping effective_from/effective_to)")
+    return hits[0] if hits else None
+
+
+def reduce_instrument(inst_row, survey_rows, correction_rows, batch_id: str, reduced_ts,
+                      target_surveys=None, bias_rule=DEFAULT_BIAS_RULE, label_unit_m: float = 1.0, review_rows=()):
     """Returns (reduced rows [dict with REDUCED_COLUMNS], bias proposals [qc.BiasQC, status PROPOSED or
     SUSPECT_CROSSCHECK; review-only, never applied]).
-    target_surveys: survey_ids to emit (None = all); all surveys are still read for baseline/reference."""
+    inst_row: one ref.incl_installation row (dict) or all SCD2 rows of the instrument (list). Each emitted survey is
+    reduced with, and carries installation_version = effective_from of, the row valid at its survey_ts
+    (installation_row_at). A target survey no row covers is not emitted (same as the job's old inner join).
+    target_surveys: survey_ids to emit (None = all); all surveys are still read for baseline/reference.
+    review_rows: audit.review_record rows with subject_type 'incl_correction' (QA-039). Without its approving row an
+    applied correction is NOT applied (there is no 'trust reviewed_by' mode)."""
+    rows = [inst_row] if isinstance(inst_row, dict) else list(inst_row)
+    if not rows:
+        return [], []
+    ts_of = {}
+    for r in survey_rows:
+        ts_of.setdefault(r["survey_id"], r["survey_ts"])
+    groups = {}                                            # id(valid row) -> (row, [survey_id])
+    for sid, ts in ts_of.items():
+        if target_surveys is not None and sid not in target_surveys:
+            continue
+        row = installation_row_at(rows, ts)
+        if row is not None:
+            groups.setdefault(id(row), (row, []))[1].append(sid)
+    out, props = [], []
+    for row, sids in groups.values():
+        o, p = _reduce_with_row(row, survey_rows, correction_rows, batch_id, reduced_ts, set(sids), bias_rule,
+                                label_unit_m, review_rows)
+        out += o
+        props += p
+    return out, props
+
+
+def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str, reduced_ts,
+                     target_surveys, bias_rule, label_unit_m, review_rows=()):
     ir = installation_from_row(inst_row)
     inst = ir.installation
     probe_constants = (f"L_m={inst.probe.L_m!r};K={inst.probe.K!r};raw_unit={ir.raw_unit};system={inst.system};"
@@ -121,6 +178,10 @@ def reduce_instrument(inst_row: dict, survey_rows, correction_rows, batch_id: st
     if not surveys:
         return [], []
     recs, bad_recs = [], set()
+    # v1.5 (QA-039): approval comes from audit.review_record rows only (C.approval_problem); an applied row without
+    # one is never applied and its survey is flagged CORRECTION_RECORD_INVALID. Supersession from `supersedes`.
+    correction_rows, unapproved = C.effective_records(correction_rows, review_rows)
+    bad_recs.update(unapproved)
     for r in correction_rows:
         try:
             recs.append(correction_from_row(r))

@@ -127,8 +127,23 @@ targets:
       lb_ha_nodes: 2
     run_as:
       service_principal_name: ${var.service_principal_app_id}
+    # Target-level permissions apply to EVERY resource in the target, apps included; the CLI maps CAN_VIEW to
+    # CAN_USE on an app (databricks/cli bundle/config/mutator/resourcemutator/apply_bundle_permissions.go, read by
+    # QA 2026-11-02). So dam-portfolio-all is NOT granted here (QA-037): app access follows the per-dam CAN_USE
+    # groups in resources/app.yml only. dam-platform-admins CAN_MANAGE stays bundle-wide (the app lists it too).
     permissions:
       - group_name: dam-platform-admins
         level: CAN_MANAGE
-      - group_name: dam-portfolio-all
-        level: CAN_VIEW
+    # dam-portfolio-all CAN_VIEW on the specific jobs and the pipeline only (run history / pipeline status). The
+    # alerts, registered model, Lakebase and app no longer get it. UNVERIFIED until `databricks bundle validate -t prod`
+    # shows the resolved permissions (no CLI on the build box); tests/test_bundle_config.py checks the YAML.
+    resources:
+      jobs:
+        dam_ingest:           {permissions: &portfolio_view [{group_name: dam-portfolio-all, level: CAN_VIEW}]}
+        dam_heartbeat:        {permissions: *portfolio_view}
+        dam_recompute:        {permissions: *portfolio_view}
+        dam_lakebase_extract: {permissions: *portfolio_view}
+        dam_interpretation:   {permissions: *portfolio_view}
+        dam_uc_setup:         {permissions: *portfolio_view}
+      pipelines:
+        dam_pipeline:         {permissions: *portfolio_view}

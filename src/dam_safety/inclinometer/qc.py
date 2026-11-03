@@ -74,10 +74,11 @@ class BiasQCParams:
                                                            # DIGIPRO2 p36]; as a rule UNVERIFIED
     significance_k: float = 3.0                            # gate (ii) bias_signif_k: |ΔD| > k·SE(ΔD); UNVERIFIED
     max_spread: tuple = (("A", 8.0), ("B", 16.0))          # gate (iii) SD(ΔD) <= value; UNVERIFIED (MIKKELSEN-2003 p6 σ bands)
-    crosscheck_tol_abs: float = 2.0                        # gate (iv) bias_crosscheck_tol_abs, reading units; UNVERIFIED,
-                                                           # PRODUCTION BLOCKER pending lead/user sign-off
-                                                           # (docs/VERIFICATION.md INC-QA021)
-    crosscheck_tol_k: float = 3.0                          # gate (iv) bias_crosscheck_tol_k × SE(ΔD); UNVERIFIED, BLOCKER
+    crosscheck_tol_abs: float = 2.0                        # gate (iv) bias_crosscheck_tol_abs, reading units; UNVERIFIED.
+                                                           # Ranks proposals only (AGREE / SUSPECT), never applies or
+                                                           # rejects: procedure §5 ruling, GTILT PDF p45 (<1% of datasets)
+                                                           # -> not a production blocker (docs/VERIFICATION.md INC-QA021)
+    crosscheck_tol_k: float = 3.0                          # gate (iv) bias_crosscheck_tol_k × SE(ΔD); UNVERIFIED, ranks only
     max_abs_c: float = 25.0                                # gate (v) |ZA| <= 25 else BAD / resurvey; UNVERIFIED as a rule
                                                            # ("Generally ... does not exceed 25 units" MIKKELSEN-2003 p7)
     fallback_bottom_intervals: int = 5                     # stable_zone_top missing -> bottom 5; UNVERIFIED fallback
@@ -210,3 +211,30 @@ def bias_proposal_record(q: BiasQC, record_id, dam_id, instrument_id, user, time
                             f"{q.crosscheck_verdict}; reviewer approval required; check D-profile signature (§5)",
                             "procedure §5 bias row (lead ruling 2026-11-02), §7.1; MIKKELSEN-2003-FMGM PDF p4-7",
                             user, timestamp_utc)
+
+
+# ---- v1.5 (App Developer mismatch 4): API field naming -------------------------------------------------------
+# Engine notation (and the stored ref.incl_correction.detection_statistic key) is the procedure's `ZA`/`ZB`. The
+# contract and every API field use lowercase snake_case `za`/`zb`. The mapping happens HERE, at the boundary; no
+# API payload may carry `ZA`. (Stored statistic keys are unchanged so existing records stay parseable.)
+API_FIELD_MAP = {"ZA": "za", "ZB": "zb"}
+ZA_UNIT = "reading units (za/zb; D' = D + za)"
+
+
+def parse_detection_statistic(stat) -> dict:
+    """'k=v;k=v' (ref.incl_correction.detection_statistic) -> dict with API field names (ZA -> za)."""
+    out = {}
+    for part in str(stat or "").split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[API_FIELD_MAP.get(k.strip(), k.strip())] = v.strip()
+    return out
+
+
+def bias_qc_api(q: BiasQC) -> dict:
+    """BiasQC -> API dict (api_contract §4 bias fields), `za` not `ZA`."""
+    return {"survey_id": q.survey_id, "axis": q.axis, "status": q.status, "rule": q.rule, "qa_flag": q.qa_flag,
+            "za": q.za_proposed_c, "za_unit": ZA_UNIT, "abs_dD": q.abs_dD, "abs_bs": q.abs_bs,
+            "crosscheck_verdict": q.crosscheck_verdict, "crosscheck_diff": q.crosscheck_diff,
+            "crosscheck_tol": q.crosscheck_tol, "reference_survey_id": q.reference_survey_id,
+            "requires_review": q.requires_review, "applied": False}

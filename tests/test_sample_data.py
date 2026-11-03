@@ -87,3 +87,53 @@ def test_syn_dam_02_shear_zone_reduces_to_1p5mm_per_survey():
     deep = [r for r in last if r.depth_top_m > 8.5]
     assert abs(deep[0].cum_change_mm) < 0.5           # no movement below the shear zone
     assert shallow[-1].cum_change_mm == pytest.approx(7.5, abs=0.5)
+
+
+# ---- v1.5 (App Developer mismatch 6): demo rows reference real sample data ------------------------------------
+def _csv(*p):
+    with open(os.path.join(SAMPLE, *p), newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+def test_v15_demo_inclinometer_rows_have_null_calib_and_the_installation_row_valid_at_survey_time():
+    from datetime import datetime
+    from dam_safety.inclinometer import batch
+    inst = _csv("ref", "incl_installation.csv")
+    demo = _csv("demo", "incl_surveys.csv")
+    assert demo and all(r["calib_id"] == "" for r in demo)                       # NULL, never a calibration id
+    seen = set()
+    for r in demo:
+        rows = [dict(i, effective_to=i["effective_to"] or None) for i in inst if i["instrument_id"] == r["instrument_id"]]
+        v = batch.installation_row_at(rows, r["survey_ts"])
+        assert v is not None and r["installation_version"] == v["effective_from"]
+        seen.add(r["installation_version"])
+        landing = _csv("landing", r["dam_id"], "inclinometer", f"{r['instrument_id']}.csv")
+        assert int(r["n_depths"]) == sum(1 for x in landing if x["survey_ts"] == r["survey_ts"])
+    assert len(seen) == 2                                                        # both SCD2 rows are exercised
+    # not "the current row": surveys before the change name the CLOSED row
+    early = [r for r in demo if r["survey_ts"] < "2026-03-17"]
+    assert early and all(r["installation_version"] == "2026-01-01T00:00:00Z" for r in early)
+
+
+def test_v15_demo_alarm_reading_refs_are_real_sample_readings():
+    gen = _gen()
+    for t in _csv("demo", "alarm_examples.csv"):
+        rel = t["reading_source_file"].split("/raw/landing/")[1]
+        rows = _csv("landing", *rel.split("/"))
+        hit = [r for r in rows if r["sensor_id"] == t["sensor_id"] and r["ts_utc"] == t["reading_ts_utc"]]
+        assert len(hit) == 1 and hit[0]["raw_value"] == t["value"] and t["metric_value"] != ""
+        assert t["reading_id"] == gen.silver_reading_id(t["sensor_id"], t["reading_ts_utc"], t["reading_source_file"])
+    assert [t["event"] for t in _csv("demo", "alarm_examples.csv")] == ["RAISE", "ESCALATE", "RTN_UNACK"]
+
+
+def test_v15_reading_id_mirrors_the_silver_expression():
+    src = open(os.path.join(ROOT, "src", "pipelines", "silver.py")).read()
+    assert 'F.sha2(F.concat_ws("|", "sensor_id", F.col("ts_utc").cast("string"), "source_file"), 256)' in src
+    assert 'F.sha2(F.concat_ws("|", "instrument_id", F.col("survey_ts").cast("string")), 256)' in src
+
+
+def test_v15_new_outputs_are_deterministic(tmp_path):
+    gen = _gen()
+    gen.write_all(str(tmp_path))
+    for p in ("ref/incl_installation.csv", "demo/incl_surveys.csv", "demo/alarm_examples.csv"):
+        assert filecmp.cmp(os.path.join(SAMPLE, p), os.path.join(tmp_path, p), shallow=False), p
