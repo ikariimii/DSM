@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from .. import formulas as fx
+from .. import signoff as so
 from ..repos import contract as ct
 from ..common import gate_for, instrument_checked, site_or_404
-from ..deps import Ctx, analytics, ctx, require
+from ..deps import Ctx, analytics, ctx, require, store
 from ..verify import INCL_KEYS
 
 router = APIRouter(prefix="/api")
@@ -92,7 +95,7 @@ def incl_surveys(instrument_id: str, c: Ctx = Depends(ctx), an=Depends(analytics
 
 @router.get("/instruments/{instrument_id}/incl/profile")
 def incl_profile(instrument_id: str, survey_ids: str = Query(..., description="comma-separated survey ids"),
-                 c: Ctx = Depends(ctx), an=Depends(analytics)):
+                 c: Ctx = Depends(ctx), an=Depends(analytics), state=Depends(store)):
     inst = instrument_checked(an, c, instrument_id)
     if inst["instrument_type"] != "inclinometer":
         raise HTTPException(400, "Not an inclinometer")
@@ -122,7 +125,9 @@ def incl_profile(instrument_id: str, survey_ids: str = Query(..., description="c
             # No bias correction is applied. The app's own proposal stays suppressed; the engine's QA-020 suspect
             # flag / proposed c are shown UNVERIFIED and never applied (§5.5 v1.2, api_contract §3).
             "bias_applied": False,
-            "bias_qc": ct.bias_qc(rows, an.incl_bias_proposals(instrument_id, sid)),
+            "bias_qc": ct.bias_qc(rows, recs := an.incl_bias_proposals(instrument_id, sid)),
+            # QA-039: append-only sign-offs on this survey's proposals, each re-verified against the current record
+            "bias_signoffs": _signoffs(state, recs),
             "qa_reasons": ct.qa_reason_detail(",".join(dict.fromkeys(
                 c for r in rows for c in ct.qa_reason_codes(r.get("qa_reason"))))),
             # §5.5: values are uncorrected; a row that references corrections is withheld (CORRECTION_UNVERIFIED)
@@ -142,3 +147,57 @@ def _distinct(rows: list[dict], key: str):
 @router.get("/formulas/{formula_id}/{version}/check")
 def formula_check(formula_id: str, version: str, c: Ctx = Depends(ctx)):
     return fx.run_vectors(formula_id, version)
+
+
+# ---------------------------------------------------------------- QA-039 bias proposal review (append-only sign-off)
+class BiasReviewBody(BaseModel):
+    decision: str
+    rationale: str = Field(min_length=1, max_length=8000)
+    reviewer_pe_license: str | None = Field(default=None, max_length=64)
+
+
+def _signoffs(st, recs: list[dict]) -> list[dict]:
+    by_id = {r.get("record_id"): r for r in recs}
+    out = st.review_signoffs(so.SUBJECT_TYPE, sorted(k for k in by_id if k))
+    return [{**r, "signature_verified": so.verify(r, by_id.get(r["subject_id"]))} for r in out]
+
+
+@router.post("/instruments/{instrument_id}/incl/surveys/{survey_id}/bias-proposals/{record_id}/review")
+def review_bias_proposal(instrument_id: str, survey_id: str, record_id: str, body: BiasReviewBody, request: Request,
+                         c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
+    """Record an engineer's approve/reject of one engine bias proposal as an append-only signed sign-off row.
+    Never updates ref.incl_correction and never applies a correction: applying stays with the engine (§5.5)."""
+    inst = instrument_checked(an, c, instrument_id, "engineer")
+    if inst["instrument_type"] != "inclinometer":
+        raise HTTPException(400, "Not an inclinometer")
+    if body.decision not in so.DECISIONS:
+        raise HTTPException(422, f"decision must be one of {', '.join(so.DECISIONS)}")
+    rationale = body.rationale.strip()
+    if not rationale:
+        raise HTTPException(422, "A rationale is required")
+    # reviewer identity is the stable X-Forwarded-User id; demo personas (no proxy) are labelled as such
+    reviewer = c.user_id or (f"demo:{c.email}" if request.app.state.settings.demo_mode else "")
+    if not reviewer:  # pragma: no cover - deps.identity already returns 401 outside demo mode
+        raise HTTPException(401, "No authenticated user (X-Forwarded-User missing)")
+    rec = next((r for r in an.incl_bias_proposals(instrument_id, survey_id) if r.get("record_id") == record_id), None)
+    if rec is None:
+        raise HTTPException(404, f"Unknown bias proposal {record_id} for {instrument_id} survey {survey_id}")
+    view = ct.bias_proposal(rec)
+    if view["integrity_error"]:
+        raise HTTPException(409, f"Record {record_id} has a data-integrity error ({view['integrity_error']})")
+    if view["approval_status"] != "proposed" or view["status"] not in ct.PROPOSAL_STATUSES:
+        raise HTTPException(409, f"Record {record_id} is {view['approval_status']} / {view['status']}; "
+                                 "only an open proposal can be reviewed")
+    if so.same_person((c.user_id, c.email), rec.get("user")):
+        raise HTTPException(403, "The reviewer must not be the author of the proposal")
+    row = so.build(rec, inst["dam_id"], body.decision, rationale, reviewer, body.reviewer_pe_license,
+                   _now())
+    st.add_review_signoff(row)
+    st.audit(c.email, "bias_proposal_review", inst["dam_id"], record_id,
+             {"review_id": row["review_id"], "decision": body.decision, "signature_hash": row["signature_hash"],
+              "reviewer_id": reviewer, "survey_id": survey_id})
+    return {**row, "signature_verified": True, "applied_by_app": False}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")

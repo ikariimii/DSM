@@ -53,7 +53,15 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS {s}audit_log (
         id {serial}, ts TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, dam_id TEXT,
         target TEXT, detail TEXT)""",
+    # QA-039: data-layer table (../lakebase/001_app_schema.sql, column-compatible with UC audit.review_record),
+    # created here too so the app never depends on DDL order. Insert-only (triggers below).
+    """CREATE TABLE IF NOT EXISTS {s}review_signoff (
+        review_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
+        review_level TEXT NOT NULL, decision TEXT NOT NULL, comment TEXT, reviewer_id TEXT NOT NULL,
+        reviewer_pe_license TEXT, signed_ts TEXT NOT NULL, signature_hash TEXT NOT NULL)""",
 ]
+
+APPEND_ONLY = ("review_signoff",)
 
 
 class StateStore:
@@ -119,6 +127,23 @@ class StateStore:
         else:
             self.execute("ALTER TABLE {s}app_user ADD COLUMN IF NOT EXISTS user_id TEXT")
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON {s}app_user (user_id)")
+        self._append_only_guards()
+
+    def _append_only_guards(self) -> None:
+        """UPDATE/DELETE on append-only tables fail in the database, not only in app code (QA-039)."""
+        for t in APPEND_ONLY:
+            if self.kind == "sqlite":
+                for op in ("UPDATE", "DELETE"):
+                    self.execute(f"CREATE TRIGGER IF NOT EXISTS t_no{op.lower()}_{t} BEFORE {op} ON {t} "
+                                 f"BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END")
+            else:
+                # app-owned names, so the data layer's forbid_mutation()/t_noupd_* (lakebase/001) are never replaced;
+                # no '%' in the body (params are always passed, so psycopg would parse it as a placeholder)
+                self.execute("CREATE OR REPLACE FUNCTION {s}app_forbid_mutation() RETURNS trigger LANGUAGE plpgsql "
+                             "AS $$ BEGIN RAISE EXCEPTION USING MESSAGE = TG_TABLE_NAME || ' is append-only'; END $$")
+                self.execute(f"DROP TRIGGER IF EXISTS t_app_noupd_{t} ON {{s}}{t}")
+                self.execute(f"CREATE TRIGGER t_app_noupd_{t} BEFORE UPDATE OR DELETE ON {{s}}{t} "
+                             "FOR EACH ROW EXECUTE FUNCTION {s}app_forbid_mutation()")
 
     # ------------------------------------------------------------ users & roles
     def resolve_user(self, user_id: str, email: str) -> dict | None:
@@ -287,6 +312,24 @@ class StateStore:
 
     def pfm_reviews(self, dam_id: str) -> list[dict]:
         return self.execute("SELECT * FROM {s}pfm_review WHERE dam_id = %s ORDER BY id DESC", (dam_id,))
+
+    # ------------------------------------------------------------ review sign-offs (QA-039, insert-only)
+    _SIGNOFF_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+                     "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash")
+
+    def add_review_signoff(self, row: dict) -> dict:
+        """INSERT only. There is deliberately no update/delete method for this table."""
+        cols = self._SIGNOFF_COLS
+        self.execute(f"INSERT INTO {{s}}review_signoff ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                     tuple(row[c] for c in cols))
+        return dict(row)
+
+    def review_signoffs(self, subject_type: str, subject_ids: list[str]) -> list[dict]:
+        if not subject_ids:
+            return []
+        marks = ", ".join(["%s"] * len(subject_ids))
+        return self.execute(f"SELECT * FROM {{s}}review_signoff WHERE subject_type = %s AND subject_id IN ({marks}) "
+                            "ORDER BY signed_ts, review_id", (subject_type, *subject_ids))
 
     # ------------------------------------------------------------ audit
     def audit(self, actor: str, action: str, dam_id: str | None = None, target: str | None = None,

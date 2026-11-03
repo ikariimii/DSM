@@ -58,9 +58,13 @@ without issues, and its QC flag is not BAD/MISSING. Statuses: `VERIFIED`, `UNVER
   (`detection_method='between_set_bias_qc'`) with status `PROPOSED` or `SUSPECT_CROSSCHECK`, ordered **AGREE first**,
   then newest. Fields: `za` (`za_unit`), `abs_dD`, `abs_bs`, `crosscheck_verdict`, `crosscheck_diff`,
   `crosscheck_tol`, `status`, `rule`, `requires_review`, `approval_status`, `reviewed_by`, `reviewed_utc`, `evidence`,
-  `display_status=UNVERIFIED`, `applied_by_app=false`. `approval_status`: `superseded` (superseded_by set) >
-  `approved` (applied ∧ reviewed_by set ∧ reviewed_by ≠ user ∧ reviewed_utc set) > `unreviewed_applied` (applied
-  without a valid review; §7 item 1) > `proposed`. **Nothing is applied by the app**; displayed profile values stay
+  `display_status=UNVERIFIED`, `applied_by_app=false`, `integrity_error`, `user` (author). `approval_status` takes only
+  the api_contract §4.1 values: `superseded` (superseded_by set) > `approved` (applied ∧ reviewed_by set ∧ reviewed_by ≠
+  user ∧ reviewed_utc set) > `proposed` (applied=false). QA-036: an applied record without a valid review is not
+  given a status. It stays listed (the anomaly is visible) with `approval_status=null`,
+  `integrity_error=APPLIED_WITHOUT_VALID_REVIEW` and `display_status=DATA_INTEGRITY_ERROR`, with `za`, `abs_dD`,
+  `abs_bs`, the cross-check numbers and `evidence` withheld; the DA's v1.5 CHECK `ck_incl_correction_applied_reviewed`
+  makes such a row unstorable. **Nothing is applied by the app**; displayed profile values stay
   uncorrected regardless of approval_status. Unparseable numbers are `null`, never invented.
 - **QA-020 bias QC (§5.5 v1.2/QA-021, engine `qc.between_set_bias_qc`):** per survey and axis the API returns `bias_qc` with
   `suspect_flag` (`BIAS_CS_SHIFT_A/B`), `status` (`PROPOSED`/`SUSPECT_CROSSCHECK`/`BAD_RESURVEY` from
@@ -87,15 +91,30 @@ failover. Identity is keyed on `X-Forwarded-User`; the user token is never logge
 load cells, thermistor). SG-01..03 are asserted not displayed (`strain_gauge` has no engine formula). Restricted cases are
 read by path from `$DAM_QA_PRIVATE` and never copied.
 
+## 5a. Bias-proposal review sign-off (QA-039)
+`POST /api/instruments/{iid}/incl/surveys/{sid}/bias-proposals/{record_id}/review` (engineer or higher on the dam), body
+`{decision: approve|reject, rationale (required), reviewer_pe_license?}`. It only ever **inserts** one row into Lakebase
+`review_signoff` (lakebase/001 table, column-compatible with UC `audit.review_record`): `review_id`, `dam_id`,
+`subject_type='incl_correction'`, `subject_id=record_id`, `review_level='engineer'`, `decision`, `comment=rationale`,
+`reviewer_id` = X-Forwarded-User (demo personas: `demo:<email>`), `reviewer_pe_license`, `signed_ts` (UTC),
+`signature_hash` = sha256 of canonical JSON `{"signoff": those fields, "subject": every ref.incl_correction column of
+the record as reviewed (23 audit fields + reviewed_by, reviewed_utc, supersedes, review_id)}`, values normalised by
+`canonical_value` (UTC ISO-8601 timestamps with microseconds, NaN → null), sort_keys, `(',', ':')`, UTF-8. This is
+byte-identical to the engine's v1.5 `corrections.review_signature`, checked by an app test against the engine module
+when it is importable. It is a content hash, not a key-based signature. UPDATE/DELETE are refused by triggers (sqlite and Postgres;
+app-owned names `t_noupd*_review_signoff` / `app_forbid_mutation`). Refused: reviewer = record `user` (403, compared
+against both X-Forwarded-User and email), record not an open `proposed` PROPOSED/SUSPECT_CROSSCHECK proposal or with an
+integrity error (409), unknown record (404). The app never updates ref.incl_correction or applies anything. The
+profile returns `bias_signoffs` with `signature_verified` re-computed against the current record, so a record changed
+after sign-off shows a mismatch. DA follow-ups: §7 item 8.
+
 ## 6. Questions from v1.0
 All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4, 5, 6, 7 (partly), 9 are resolved by v1.4;
 3 (§7.3 text) is resolved.
 
 ## 7. Mismatches / follow-ups for the Data Architect (v1.4; proposals, the app does not edit DA files)
-1. **`approval_status` has a 4th app value, `unreviewed_applied`.** api_contract §4.1 lists `proposed|approved|superseded`.
-   A record with `applied=true` but no valid review (reviewer missing, reviewer = author, or no `reviewed_utc`) is
-   rejected by the engine; labelling it `proposed` or `approved` would misrepresent it. Proposal: add it to the enum
-   (or have a DB CHECK make the state impossible).
+1. **Resolved (QA-036):** the app no longer returns `unreviewed_applied`; an applied-without-review record is a
+   data-integrity error (above), matching the v1.5 CHECK `ck_incl_correction_applied_reviewed`.
 2. **`ops.reading` join kept for `is_erroneous` only.** The engineer's erroneous mark is not an episode column; the app
    forces `qa_flag` BAD (`ERRONEOUS_MARK`) when it is set. Proposal: either fold it into episode `qa_flag` or confirm the
    join is intended.
@@ -108,3 +127,18 @@ All 12 are answered by root §10 and implemented above. v1.3 follow-ups 1, 2, 4,
 6. Demo inclinometer alarm `reading_id` is synthetic (demo only); demo inclinometer rows carry a `calib_id`.
 7. Grants: v1.4 §6 implemented in `resources/app.yml` (per-dam `dam-<dam_id>-members` CAN_USE, `dam-platform-admins`
    CAN_MANAGE); app README updated. Each newly onboarded dam needs its group added to `resources/app.yml`.
+8. **QA-039 DA follow-ups (proposals; the app edits no DA file):**
+   a. `src/jobs/lakebase_extract.py` copies `review_signoff` to the generic `audit.app_extract`. It should map it to
+      `audit.review_record`, with the same columns, so the engine approval rule can require it.
+   b. `sql/ddl/08_audit.sql`: add `incl_correction` to the `audit.review_record.subject_type` comment/enum, and
+      `approve | reject` to `decision`.
+   c. `ref.incl_correction`: add `delta.appendOnly = true` and no UPDATE grant. Approval then becomes a new superseding
+      record (or the engine joins `audit.review_record`), not an in-place `reviewed_by`/`reviewed_utc` update.
+   d. Engine approval rule (§5.5): in progress in the DA's uncommitted v1.5 work (`corrections.approval_problem` /
+      `review_signature`, matching the app's hash). Please publish the canonical-JSON spec in SCHEMA_CONTRACT and
+      api_contract, including the test vector the DA's docstring names (`tests/fixtures/review_signature_vector.json`).
+   f. v1.5 `supersedes`/`review_id`: the app passes both through. `approval_status` still follows api_contract §4.1
+      v1.4 (superseded = `superseded_by`; approved = reviewed_by/reviewed_utc). When §4.1 is updated (superseded
+      derived from a later row's `supersedes`; approved requiring `review_id`), the app will follow.
+   e. A key-based signature (for example a KMS/HSM-held key) is not in place: `signature_hash` gives tamper evidence
+      only. Lead decision needed if REQ-22/23 requires a cryptographic signature.

@@ -4,6 +4,7 @@ import {
   CartesianGrid, ComposedChart, Legend, Line, LineChart, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { useApi } from "../hooks";
+import { api } from "../api";
 import { Card, Counts, Loading, QcBadge, StatusBadge, fmt, utc } from "../components/ui";
 
 export default function InstrumentDetail() {
@@ -175,7 +176,7 @@ function InclinometerView({ id }: { id: string }) {
   const [axis, setAxis] = useState<"a" | "b">("a");
   const surveys = sv?.surveys || [];
   const chosen = sel.length ? sel : surveys.slice(-3).map((s: any) => s.survey_id);
-  const { data, error } = useApi<any>(chosen.length ? `/api/instruments/${id}/incl/profile?survey_ids=${chosen.join(",")}` : null);
+  const { data, error, reload } = useApi<any>(chosen.length ? `/api/instruments/${id}/incl/profile?survey_ids=${chosen.join(",")}` : null);
   const series = useMemo(() => (data?.profiles || []).map((p: any) => ({
     ...p,
     pts: p.rows.map((r: any) => ({ depth: r.depth_m, cum: r[`cum_${axis}`], status: r.display_status, chk: r.qc_checksum_ok })),
@@ -212,7 +213,7 @@ function InclinometerView({ id }: { id: string }) {
             <span key={q.code} className={q.severity === "BAD" ? "badge bad" : q.severity === "SUSPECT" || q.severity === "MISSING" ? "badge warn" : "badge muted"}
                   title={q.label || "code not in app vocabulary (shown verbatim)"}>{q.code}</span>
           ))}
-          <BiasQc bq={p.bias_qc} />
+          <BiasQc bq={p.bias_qc} iid={id} sid={p.survey_id} signoffs={p.bias_signoffs || []} onReviewed={reload} />
         </div>
       ))}
       <ResponsiveContainer width="100%" height={520}>
@@ -236,7 +237,7 @@ function InclinometerView({ id }: { id: string }) {
 }
 
 /** Engine between-set bias QC (SCHEMA_CONTRACT §5.5 v1.4, api_contract §4.1). Display only: UNVERIFIED, never applied. */
-function BiasQc({ bq }: { bq?: any }) {
+function BiasQc({ bq, iid, sid, signoffs, onReviewed }: { bq?: any; iid: string; sid: string; signoffs: any[]; onReviewed: () => void }) {
   if (!bq) return null;
   const axes = Object.entries(bq.axes || {}).filter(([, a]: any) => a.suspect_flag || a.status || (a.proposals || []).length);
   if (!axes.length && !bq.stable_zone_assumed) return null;
@@ -256,21 +257,58 @@ function BiasQc({ bq }: { bq?: any }) {
       {Object.entries(bq.axes || {}).map(([ax, a]: any) => (a.proposals || []).length > 0 && (
         <table key={`p-${ax}`} className="small">
           <caption>Axis {ax} proposals (AGREE first) — UNVERIFIED, not applied by the app</caption>
-          <thead><tr><th>record</th><th>ZA ({a.proposals[0].za_unit})</th><th>|ΔD| (mm)</th><th>|bs| (mm)</th><th>cross-check</th><th>status</th><th>approval</th><th>rule</th></tr></thead>
+          <thead><tr><th>record</th><th>ZA ({a.proposals[0].za_unit})</th><th>|ΔD| (mm)</th><th>|bs| (mm)</th><th>cross-check</th><th>status</th><th>approval</th><th>rule</th><th>sign-offs (append-only)</th></tr></thead>
           <tbody>{a.proposals.map((q: any) => (
             <tr key={q.record_id}>
               <td>{q.record_id}</td><td>{fmt(q.za, 2)}</td><td>{fmt(q.abs_dD, 2)}</td><td>{fmt(q.abs_bs, 2)}</td>
               <td><span className={q.crosscheck_verdict === "AGREE" ? "badge muted" : "badge warn"}>{q.crosscheck_verdict ?? "—"}</span>{q.crosscheck_diff !== null && q.crosscheck_diff !== undefined ? ` Δ${fmt(q.crosscheck_diff, 2)}/tol ${fmt(q.crosscheck_tol, 2)}` : ""}</td>
               <td>{q.status}</td>
-              <td><span className={q.approval_status === "approved" ? "badge muted" : q.approval_status === "unreviewed_applied" ? "badge bad" : "badge warn"}
-                        title={q.reviewed_by ? `reviewed by ${q.reviewed_by} ${q.reviewed_utc ?? ""}` : "not reviewed"}>{q.approval_status}</span>{" "}
-                  <span className="badge warn">UNVERIFIED</span></td>
+              <td>{q.integrity_error
+                    ? <span className="badge bad" title="Stored record violates the approval rule (applied without an independent review); values withheld">DATA INTEGRITY ERROR: {q.integrity_error}</span>
+                    : <span className={q.approval_status === "approved" ? "badge muted" : "badge warn"}
+                        title={q.reviewed_by ? `reviewed by ${q.reviewed_by} ${q.reviewed_utc ?? ""}` : "not reviewed"}>{q.approval_status}</span>}{" "}
+                  <span className="badge warn">{q.display_status}</span></td>
               <td>{q.rule ?? "—"}</td>
+              <td><SignOffs rows={signoffs.filter((x: any) => x.subject_id === q.record_id)} />
+                {!q.integrity_error && q.approval_status === "proposed" && <ReviewForm iid={iid} sid={sid} rid={q.record_id} onDone={onReviewed} />}</td>
             </tr>))}</tbody>
         </table>
       ))}
       {bq.stable_zone_assumed && <div><span className="badge muted">STABLE_ZONE_ASSUMED</span> stable zone not set; bottom intervals assumed</div>}
       <div className="muted">{bq.note}</div>
+    </div>
+  );
+}
+
+/** QA-039 sign-offs: each is an append-only row; the hash is re-verified against the current record by the server. */
+function SignOffs({ rows }: { rows: any[] }) {
+  if (!rows.length) return <span className="muted">none</span>;
+  return <>{rows.map((r) => (
+    <div key={r.review_id} className="small">
+      <span className={r.decision === "approve" ? "badge muted" : "badge warn"}>{r.decision}</span> {r.reviewer_id}{r.reviewer_pe_license ? ` (PE ${r.reviewer_pe_license})` : ""} · {utc(r.signed_ts)}
+      {" "}<span className={r.signature_verified ? "badge muted" : "badge bad"} title={`sha256 ${r.signature_hash}`}>{r.signature_verified ? "signature verified" : "SIGNATURE MISMATCH — record changed after sign-off"}</span>
+      <div className="muted">{r.comment}</div>
+    </div>))}</>;
+}
+
+/** Records a signed decision only; the app never applies a correction (the engine applies approved records). */
+function ReviewForm({ iid, sid, rid, onDone }: { iid: string; sid: string; rid: string; onDone: () => void }) {
+  const [rationale, setRationale] = useState("");
+  const [pe, setPe] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const send = (decision: "approve" | "reject") => {
+    setErr(null);
+    api(`/api/instruments/${iid}/incl/surveys/${sid}/bias-proposals/${rid}/review`, {
+      method: "POST", body: { decision, rationale, reviewer_pe_license: pe || null },
+    }).then(() => { setRationale(""); onDone(); }).catch((e) => setErr(String(e.message || e)));
+  };
+  return (
+    <div className="row small">
+      <input placeholder="rationale (required)" value={rationale} onChange={(e) => setRationale(e.target.value)} />
+      <input placeholder="PE licence (optional)" value={pe} onChange={(e) => setPe(e.target.value)} size={10} />
+      <button disabled={!rationale.trim()} onClick={() => send("approve")}>Sign approve</button>
+      <button disabled={!rationale.trim()} onClick={() => send("reject")}>Sign reject</button>
+      {err && <span className="badge bad">{err}</span>}
     </div>
   );
 }
