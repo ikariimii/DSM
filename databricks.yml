@@ -1,0 +1,132 @@
+# Dam safety monitoring - Databricks Asset Bundle (AWS, fully Databricks-native).
+# Nothing here has been deployed; `databricks bundle validate` could not be run on the build box
+# (no CLI). See docs/VERIFICATION.md (BUNDLE-*).
+bundle:
+  name: dam_safety
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for this target (dam_dev | dam_test | dam_prod)
+  warehouse_id:
+    description: Serverless SQL warehouse for DDL tasks and SQL alerts
+  ops_destination_id:
+    description: Notification destination (email/Slack/PagerDuty/webhook) for routine alerts - created by a workspace admin
+    default: ""
+  life_safety_destination_id:
+    description: Notification destination for ACTION-level alarms (independent paging path, KB rec 7)
+    default: ""
+  ops_email:
+    description: Fallback email subscription for alerts and job failures
+  service_principal_app_id:
+    description: Application ID of the prod run_as service principal
+    default: ""
+  runtime_sp_app_id:
+    description: Application ID of the service principal the pipeline and SQL alerts run as. MUST be a member of
+      dam-portfolio-all (else the dam row filter hides rows from alert counts and pipeline refreshes).
+  security_mode:
+    description: "Row-level security mode: table (ALTER SET ROW FILTER + LDP row_filter=) or abac (one catalog ABAC
+      policy, no table-level filters). Mutually exclusive (UC_ABAC_MULTIPLE_ROW_FILTERS)."
+    default: table
+  lb_ha_nodes:
+    description: Lakebase endpoint group size (min = max). 1 = HA off; prod 2 = primary + 1 secondary
+    default: 1
+  lb_min_cu:
+    description: Lakebase autoscaling floor (CU)
+    default: 0.5
+  lb_max_cu:
+    description: Lakebase autoscaling ceiling (CU)
+    default: 2
+  lb_no_suspension:
+    description: true in prod (HA requires no scale-to-zero)
+    default: false
+  alert_paused:
+    description: PAUSED in dev so alerts do not page anyone
+    default: UNPAUSED
+
+# Files synced to the workspace. The licensing excludes mirror .gitignore (tests/test_license_leak.py
+# fails if they drift). Restricted data is never in the repo; these are defence in depth.
+sync:
+  exclude:
+    - qa/**
+    - .venv/**
+    - .pytest_cache/**
+    - "**/__pycache__/**"
+    # app/ IS part of this bundle (App Developer, steering 6); only its local tooling is excluded.
+    # app/frontend/dist (prebuilt UI) must sync - see the negation in .gitignore.
+    - app/.venv/**
+    - app/.pytest_cache/**
+    - app/.coverage
+    - app/htmlcov/**
+    - app/frontend/node_modules/**
+    - app/frontend/tsconfig.tsbuildinfo
+    - app/tests/**
+    - "**/*.sqlite"
+    - .internal_test_artifacts/
+    - .internal_test_artifacts/**
+    - testonly_restricted/
+    - testonly_restricted/**
+    - "**/icold_bw2022_themeA/"
+    - "**/icold_bw2022_themeC/"
+    - "**/enguri_piezometers/"
+    - "**/enguri_status_evidence/"
+    - "**/usbr_rise_monticello/"
+    - "**/kaniv_hpp_gnss/"
+    - "**/ngl_orvb_oroville/"
+    - "**/scedc_pacoima_24741/"
+    - "**/cesmd_dam_records/"
+    - "**/vendor_manual_samples/"
+    - "**/vendor_export_samples_vdv/"
+    - "**/mendeley_anchor_force_loss_RESTRICTED/"
+    - "*Theme_A_16th_ICOLD_BW*"
+    - "*ThemeA_data_fmt0*"
+    - "*Theme-C_embankment*"
+    - "*RISE_10785*"
+    - enguri*.tar
+    - "**/user_tool/"
+    - "*user_tool_surveys*"
+    - "*libreoffice_recalc_compare*"
+    - "*.mseed"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: dam_dev
+      alert_paused: PAUSED
+    resources: &testonly_resources
+      jobs:
+        dam_testonly_setup:
+          name: dam_testonly_setup_${var.catalog}
+          description: Creates the testonly_restricted schema (internal-test-only datasets). dev/test ONLY.
+          tasks:
+            - task_key: testonly_schema
+              sql_task:
+                warehouse_id: ${var.warehouse_id}
+                file:
+                  path: sql/testonly/00_testonly_schema.sql
+                parameters:
+                  catalog: ${var.catalog}
+  test:
+    variables:
+      catalog: dam_test
+      alert_paused: PAUSED
+    resources: *testonly_resources
+  prod:
+    mode: production
+    variables:
+      catalog: dam_prod
+      lb_min_cu: 2
+      lb_max_cu: 8
+      lb_no_suspension: true
+      lb_ha_nodes: 2
+    run_as:
+      service_principal_name: ${var.service_principal_app_id}
+    permissions:
+      - group_name: dam-platform-admins
+        level: CAN_MANAGE
+      - group_name: dam-portfolio-all
+        level: CAN_VIEW

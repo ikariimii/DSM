@@ -1,0 +1,417 @@
+"""Transactional app state: Lakebase (Postgres) in Databricks, SQLite in demo mode.
+
+Same SQL for both backends: statements are written with %s placeholders and
+converted to ? for SQLite. JSON columns are stored as text and decoded here."""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Iterable
+
+log = logging.getLogger(__name__)
+
+ROLES = ("viewer", "engineer", "dso", "dam_admin")  # ascending privilege
+ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
+ALARM_STATES = ("open", "acknowledged", "closed")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+DDL = [
+    """CREATE TABLE IF NOT EXISTS {s}app_user (
+        email TEXT PRIMARY KEY, display_name TEXT, is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+        active BOOLEAN NOT NULL DEFAULT TRUE, created_at TEXT NOT NULL, created_by TEXT)""",
+    """CREATE TABLE IF NOT EXISTS {s}dam_role (
+        email TEXT NOT NULL, dam_id TEXT NOT NULL, role TEXT NOT NULL, granted_by TEXT, granted_at TEXT NOT NULL,
+        PRIMARY KEY (email, dam_id))""",
+    """CREATE TABLE IF NOT EXISTS {s}alarm_ack (
+        event_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, state TEXT NOT NULL,
+        acknowledged_by TEXT, acknowledged_at TEXT, closed_by TEXT, closed_at TEXT, close_reason TEXT)""",
+    """CREATE TABLE IF NOT EXISTS {s}alarm_comment (
+        id {serial}, event_id TEXT NOT NULL, dam_id TEXT NOT NULL, author TEXT NOT NULL,
+        created_at TEXT NOT NULL, body TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS {s}onboarding_draft (
+        draft_id TEXT PRIMARY KEY, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        status TEXT NOT NULL, proposed_dam_id TEXT, data TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS {s}onboarding_publication (
+        pub_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, dam_id TEXT NOT NULL, payload TEXT NOT NULL,
+        requested_by TEXT NOT NULL, requested_at TEXT NOT NULL, status TEXT NOT NULL, applied_at TEXT, message TEXT)""",
+    """CREATE TABLE IF NOT EXISTS {s}report_draft (
+        report_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
+        created_by TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL, content_md TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS {s}pfm_review (
+        id {serial}, pfm_id TEXT NOT NULL, dam_id TEXT NOT NULL, reviewed_by TEXT NOT NULL,
+        reviewed_at TEXT NOT NULL, status TEXT NOT NULL, notes TEXT)""",
+    """CREATE TABLE IF NOT EXISTS {s}audit_log (
+        id {serial}, ts TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, dam_id TEXT,
+        target TEXT, detail TEXT)""",
+]
+
+
+class StateStore:
+    """Thin DB-API wrapper. `kind` is 'sqlite' or 'postgres'.
+
+    Postgres uses a connection pool (`pg_pool`, psycopg_pool.ConnectionPool in Databricks; see
+    `lakebase_pool`). Each statement borrows a connection; connection errors (scale-to-zero wake-up, HA
+    failover drops every open connection) are retried with backoff on a fresh connection."""
+
+    def __init__(self, kind: str, schema: str = "", sqlite_path: str = ":memory:", pg_pool=None,
+                 retries: int | None = None):
+        self.kind = kind
+        self._lock = threading.RLock()
+        self._pool = pg_pool
+        self._conn = None
+        self.retries = int(os.getenv("PG_QUERY_RETRIES", "4")) if retries is None else retries
+        if kind == "sqlite":
+            self.prefix = ""
+            self._conn = sqlite3.connect(sqlite_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+        else:
+            if pg_pool is None:
+                raise ValueError("postgres StateStore needs pg_pool")
+            self.prefix = f'"{schema}".' if schema else ""
+            self.schema = schema
+        self.init_schema()
+
+    # ------------------------------------------------------------ plumbing
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
+        sql = sql.replace("{s}", self.prefix)
+        if self.kind == "sqlite":
+            with self._lock:
+                cur = self._conn.execute(sql.replace("%s", "?"), tuple(params))
+                rows = [dict(r) for r in cur.fetchall()] if cur.description else []
+                self._conn.commit()
+                return rows
+        for attempt in range(self.retries):
+            try:
+                # the pool commits on clean exit and rolls back on error
+                with self._pool.connection() as conn, conn.cursor() as cur:
+                    cur.execute(sql, tuple(params))
+                    rows = cur.fetchall() if cur.description else []
+                return [dict(r) for r in rows]
+            except Exception as e:  # noqa: BLE001
+                if attempt == self.retries - 1 or not _is_connection_error(e):
+                    raise
+                log.warning("Lakebase connection error (%s); retry %d/%d", type(e).__name__, attempt + 1,
+                            self.retries - 1)
+                time.sleep(min(0.25 * (2 ** attempt), 4.0))
+        return []  # pragma: no cover - loop always returns or raises
+
+    def init_schema(self) -> None:
+        serial = "INTEGER PRIMARY KEY AUTOINCREMENT" if self.kind == "sqlite" else "BIGSERIAL PRIMARY KEY"
+        if self.kind != "sqlite" and self.schema:
+            self.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
+        for ddl in DDL:
+            self.execute(ddl.replace("{serial}", serial))
+        # Stable identity (X-Forwarded-User) is bound to the admin-granted email row on first sign-in.
+        if self.kind == "sqlite":
+            cols = {r["name"] for r in self.execute("PRAGMA table_info(app_user)")}
+            if "user_id" not in cols:
+                self.execute("ALTER TABLE app_user ADD COLUMN user_id TEXT")
+        else:
+            self.execute("ALTER TABLE {s}app_user ADD COLUMN IF NOT EXISTS user_id TEXT")
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON {s}app_user (user_id)")
+
+    # ------------------------------------------------------------ users & roles
+    def resolve_user(self, user_id: str, email: str) -> dict | None:
+        """Look the caller up by stable user id; bind it to the email row only if that row is unbound.
+
+        Returns None when no grant exists, or when the email row is bound to a DIFFERENT user id (an email
+        that was reassigned or spoofed must not inherit another identity's roles)."""
+        rows = self.execute("SELECT * FROM {s}app_user WHERE user_id = %s", (user_id,))
+        if rows:
+            return _bools(rows[0], "is_admin", "active")
+        u = self.get_user(email) if email else None
+        if u is None or (u.get("user_id") and u["user_id"] != user_id):
+            return None
+        self.execute("UPDATE {s}app_user SET user_id = %s WHERE email = %s AND user_id IS NULL", (user_id, u["email"]))
+        self.audit(f"user:{user_id}", "user.identity_bound", None, u["email"], {"user_id": user_id})
+        return self.get_user(u["email"])
+
+    def upsert_user(self, email: str, display_name: str | None, is_admin: bool, actor: str) -> dict:
+        email = email.strip().lower()
+        self.execute(
+            "INSERT INTO {s}app_user (email, display_name, is_admin, active, created_at, created_by) "
+            "VALUES (%s, %s, %s, TRUE, %s, %s) ON CONFLICT (email) DO UPDATE SET "
+            "display_name = EXCLUDED.display_name, is_admin = EXCLUDED.is_admin, active = TRUE",
+            (email, display_name, bool(is_admin), now_iso(), actor))
+        return self.get_user(email)
+
+    def deactivate_user(self, email: str) -> None:
+        self.execute("UPDATE {s}app_user SET active = FALSE WHERE email = %s", (email.lower(),))
+        self.execute("DELETE FROM {s}dam_role WHERE email = %s", (email.lower(),))
+
+    def get_user(self, email: str) -> dict | None:
+        rows = self.execute("SELECT * FROM {s}app_user WHERE email = %s", (email.lower(),))
+        return _bools(rows[0], "is_admin", "active") if rows else None
+
+    def active_admin_count(self) -> int:
+        rows = self.execute("SELECT COUNT(*) AS n FROM {s}app_user WHERE is_admin = TRUE AND active = TRUE")
+        return int(rows[0]["n"])
+
+    def list_users(self) -> list[dict]:
+        users = [_bools(u, "is_admin", "active") for u in self.execute("SELECT * FROM {s}app_user ORDER BY email")]
+        roles = self.execute("SELECT * FROM {s}dam_role ORDER BY dam_id")
+        for u in users:
+            u["roles"] = {r["dam_id"]: r["role"] for r in roles if r["email"] == u["email"]}
+        return users
+
+    def roles_for(self, email: str) -> dict[str, str]:
+        rows = self.execute(
+            "SELECT r.dam_id, r.role FROM {s}dam_role r JOIN {s}app_user u ON u.email = r.email "
+            "WHERE r.email = %s AND u.active = TRUE", (email.lower(),))
+        return {r["dam_id"]: r["role"] for r in rows}
+
+    def set_role(self, email: str, dam_id: str, role: str | None, actor: str) -> None:
+        email = email.lower()
+        if role is None:
+            self.execute("DELETE FROM {s}dam_role WHERE email = %s AND dam_id = %s", (email, dam_id))
+            return
+        if role not in ROLE_RANK:
+            raise ValueError(f"unknown role {role!r}; expected one of {ROLES}")
+        self.execute(
+            "INSERT INTO {s}dam_role (email, dam_id, role, granted_by, granted_at) VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (email, dam_id) DO UPDATE SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by, "
+            "granted_at = EXCLUDED.granted_at", (email, dam_id, role, actor, now_iso()))
+
+    def users_for_dam(self, dam_id: str) -> list[dict]:
+        return self.execute(
+            "SELECT u.email, u.display_name, r.role FROM {s}dam_role r JOIN {s}app_user u ON u.email = r.email "
+            "WHERE r.dam_id = %s AND u.active = TRUE ORDER BY u.email", (dam_id,))
+
+    # ------------------------------------------------------------ alarms
+    def ack_states(self, event_ids: list[str]) -> dict[str, dict]:
+        if not event_ids:
+            return {}
+        ph = ",".join(["%s"] * len(event_ids))
+        rows = self.execute(f"SELECT * FROM {{s}}alarm_ack WHERE event_id IN ({ph})", event_ids)
+        return {r["event_id"]: r for r in rows}
+
+    def acknowledge(self, event_id: str, dam_id: str, actor: str) -> dict:
+        cur = self.ack_states([event_id]).get(event_id)
+        if cur and cur["state"] != "open":
+            raise ValueError(f"alarm {event_id} is already {cur['state']}")
+        self.execute(
+            "INSERT INTO {s}alarm_ack (event_id, dam_id, state, acknowledged_by, acknowledged_at) "
+            "VALUES (%s, %s, 'acknowledged', %s, %s) ON CONFLICT (event_id) DO UPDATE SET state = 'acknowledged', "
+            "acknowledged_by = EXCLUDED.acknowledged_by, acknowledged_at = EXCLUDED.acknowledged_at",
+            (event_id, dam_id, actor, now_iso()))
+        return self.ack_states([event_id])[event_id]
+
+    def close_alarm(self, event_id: str, dam_id: str, actor: str, reason: str) -> dict:
+        cur = self.ack_states([event_id]).get(event_id)
+        if not cur or cur["state"] != "acknowledged":
+            raise ValueError(f"alarm {event_id} must be acknowledged before it is closed")
+        self.execute("UPDATE {s}alarm_ack SET state = 'closed', closed_by = %s, closed_at = %s, close_reason = %s "
+                     "WHERE event_id = %s", (actor, now_iso(), reason, event_id))
+        return self.ack_states([event_id])[event_id]
+
+    def add_comment(self, event_id: str, dam_id: str, actor: str, body: str) -> None:
+        self.execute("INSERT INTO {s}alarm_comment (event_id, dam_id, author, created_at, body) VALUES (%s,%s,%s,%s,%s)",
+                     (event_id, dam_id, actor, now_iso(), body))
+
+    def comments(self, event_id: str) -> list[dict]:
+        return self.execute("SELECT * FROM {s}alarm_comment WHERE event_id = %s ORDER BY id", (event_id,))
+
+    # ------------------------------------------------------------ onboarding
+    def create_draft(self, actor: str, data: dict) -> dict:
+        did = str(uuid.uuid4())
+        ts = now_iso()
+        self.execute("INSERT INTO {s}onboarding_draft (draft_id, created_by, created_at, updated_at, status, "
+                     "proposed_dam_id, data) VALUES (%s,%s,%s,%s,'draft',%s,%s)",
+                     (did, actor, ts, ts, (data.get("details") or {}).get("dam_id"), json.dumps(data)))
+        return self.get_draft(did)
+
+    def get_draft(self, draft_id: str) -> dict | None:
+        rows = self.execute("SELECT * FROM {s}onboarding_draft WHERE draft_id = %s", (draft_id,))
+        if not rows:
+            return None
+        r = rows[0]
+        r["data"] = json.loads(r["data"])
+        return r
+
+    def list_drafts(self, actor: str | None = None) -> list[dict]:
+        if actor:
+            rows = self.execute("SELECT * FROM {s}onboarding_draft WHERE created_by = %s ORDER BY updated_at DESC", (actor,))
+        else:
+            rows = self.execute("SELECT * FROM {s}onboarding_draft ORDER BY updated_at DESC")
+        for r in rows:
+            r["data"] = json.loads(r["data"])
+        return rows
+
+    def update_draft(self, draft_id: str, data: dict, status: str = "draft") -> dict:
+        self.execute("UPDATE {s}onboarding_draft SET data = %s, status = %s, updated_at = %s, proposed_dam_id = %s "
+                     "WHERE draft_id = %s",
+                     (json.dumps(data), status, now_iso(), (data.get("details") or {}).get("dam_id"), draft_id))
+        return self.get_draft(draft_id)
+
+    def publish(self, draft_id: str, dam_id: str, payload: dict, actor: str, status: str = "pending") -> dict:
+        pid = str(uuid.uuid4())
+        self.execute("INSERT INTO {s}onboarding_publication (pub_id, draft_id, dam_id, payload, requested_by, "
+                     "requested_at, status) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                     (pid, draft_id, dam_id, json.dumps(payload), actor, now_iso(), status))
+        return {"pub_id": pid, "status": status}
+
+    def publications(self) -> list[dict]:
+        rows = self.execute("SELECT pub_id, draft_id, dam_id, requested_by, requested_at, status, applied_at, message "
+                            "FROM {s}onboarding_publication ORDER BY requested_at DESC")
+        return rows
+
+    # ------------------------------------------------------------ reports, PFM reviews
+    def save_report(self, dam_id: str, start: str, end: str, actor: str, content_md: str) -> dict:
+        rid = str(uuid.uuid4())
+        self.execute("INSERT INTO {s}report_draft (report_id, dam_id, period_start, period_end, created_by, "
+                     "created_at, status, content_md) VALUES (%s,%s,%s,%s,%s,%s,'draft',%s)",
+                     (rid, dam_id, start, end, actor, now_iso(), content_md))
+        return self.get_report(rid)
+
+    def get_report(self, report_id: str) -> dict | None:
+        rows = self.execute("SELECT * FROM {s}report_draft WHERE report_id = %s", (report_id,))
+        return rows[0] if rows else None
+
+    def list_reports(self, dam_id: str) -> list[dict]:
+        return self.execute("SELECT report_id, dam_id, period_start, period_end, created_by, created_at, status "
+                            "FROM {s}report_draft WHERE dam_id = %s ORDER BY created_at DESC", (dam_id,))
+
+    def add_pfm_review(self, pfm_id: str, dam_id: str, actor: str, status: str, notes: str) -> None:
+        self.execute("INSERT INTO {s}pfm_review (pfm_id, dam_id, reviewed_by, reviewed_at, status, notes) "
+                     "VALUES (%s,%s,%s,%s,%s,%s)", (pfm_id, dam_id, actor, now_iso(), status, notes))
+
+    def pfm_reviews(self, dam_id: str) -> list[dict]:
+        return self.execute("SELECT * FROM {s}pfm_review WHERE dam_id = %s ORDER BY id DESC", (dam_id,))
+
+    # ------------------------------------------------------------ audit
+    def audit(self, actor: str, action: str, dam_id: str | None = None, target: str | None = None,
+              detail: dict | None = None) -> None:
+        self.execute("INSERT INTO {s}audit_log (ts, actor, action, dam_id, target, detail) VALUES (%s,%s,%s,%s,%s,%s)",
+                     (now_iso(), actor, action, dam_id, target, json.dumps(detail or {})))
+
+    def audit_entries(self, dam_id: str | None = None, limit: int = 200) -> list[dict]:
+        if dam_id:
+            rows = self.execute("SELECT * FROM {s}audit_log WHERE dam_id = %s ORDER BY id DESC LIMIT %s", (dam_id, limit))
+        else:
+            rows = self.execute("SELECT * FROM {s}audit_log ORDER BY id DESC LIMIT %s", (limit,))
+        for r in rows:
+            r["detail"] = json.loads(r["detail"]) if r.get("detail") else {}
+        return rows
+
+
+def _bools(row: dict, *keys: str) -> dict:
+    for k in keys:
+        row[k] = bool(row[k])
+    return row
+
+
+def _is_connection_error(e: Exception) -> bool:
+    name = type(e).__name__
+    return name in {"OperationalError", "InterfaceError", "PoolTimeout", "TooManyRequests"} or \
+        "closed" in str(e).lower()
+
+
+# ---------------------------------------------------------------- Lakebase (service principal)
+# docs.databricks.com/aws/en/oltp/projects/authentication + tutorial-databricks-apps-autoscaling (KB 05):
+# the password is a Lakebase database credential for the app's service principal, minted with
+# w.postgres.generate_database_credential(endpoint="projects/<p>/branches/<b>/endpoints/<e>"). It lasts 1 h and is
+# checked only at login, so every NEW connection gets a credential that is not about to expire. The workspace
+# OAuth token (w.config.oauth_token()) is NOT a valid Lakebase password.
+TOKEN_REFRESH_MARGIN_S = 300.0      # re-mint when the cached credential expires within 5 min
+DEFAULT_TOKEN_LIFETIME_S = 3600.0   # documented lifetime, used only when expire_time is missing
+KEEPALIVE_KW = {"keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3}
+
+
+def _expire_epoch(exp: Any, now: float) -> float:
+    """expire_time from the SDK (protobuf Timestamp, datetime or RFC 3339 text) -> epoch seconds."""
+    try:
+        if exp is None:
+            raise ValueError
+        if hasattr(exp, "ToDatetime"):
+            return exp.ToDatetime(tzinfo=timezone.utc).timestamp()
+        if isinstance(exp, datetime):
+            return (exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)).timestamp()
+        return datetime.fromisoformat(str(exp).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError, AttributeError):
+        return now + DEFAULT_TOKEN_LIFETIME_S
+
+
+class LakebaseCredentials:
+    """Caches one database credential and re-mints it before expire_time (never logs the token)."""
+
+    def __init__(self, endpoint_name: str, client=None, clock=time.time):
+        if not endpoint_name or not endpoint_name.startswith("projects/") or "/endpoints/" not in endpoint_name:
+            raise ValueError("ENDPOINT_NAME must be projects/<project>/branches/<branch>/endpoints/<endpoint>")
+        self.endpoint_name = endpoint_name
+        self._client = client
+        self._clock = clock
+        self._tok: str | None = None
+        self._exp = 0.0
+        self._lock = threading.Lock()
+
+    def _w(self):
+        if self._client is None:
+            from databricks.sdk import WorkspaceClient
+            self._client = WorkspaceClient()
+        return self._client
+
+    def token(self) -> str:
+        with self._lock:
+            now = self._clock()
+            if self._tok is None or now >= self._exp - TOKEN_REFRESH_MARGIN_S:
+                cred = self._w().postgres.generate_database_credential(endpoint=self.endpoint_name)
+                if not cred.token:
+                    raise RuntimeError("Lakebase generate_database_credential returned no token")
+                self._tok, self._exp = cred.token, _expire_epoch(cred.expire_time, now)
+                log.info("Minted Lakebase credential for %s (expires in %.0f s)", self.endpoint_name,
+                         self._exp - now)
+            return self._tok
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._tok, self._exp = None, 0.0
+
+
+def lakebase_conninfo(env: dict | None = None) -> dict:
+    """Connection kwargs from the env vars Databricks Apps injects for the `postgres` resource."""
+    env = os.environ if env is None else env
+    missing = [k for k in ("PGHOST", "PGDATABASE", "PGUSER") if not env.get(k)]
+    if missing:
+        raise RuntimeError(f"Lakebase resource env missing: {', '.join(missing)}")
+    return {"host": env["PGHOST"], "port": int(env.get("PGPORT") or 5432), "dbname": env["PGDATABASE"],
+            "user": env["PGUSER"], "sslmode": env.get("PGSSLMODE") or "require",
+            "application_name": env.get("PGAPPNAME") or "dam-safety-app", "connect_timeout": 10, **KEEPALIVE_KW}
+
+
+def lakebase_pool(env: dict | None = None, creds: LakebaseCredentials | None = None, pool_cls=None,
+                  min_size: int = 1, max_size: int = 10):
+    """psycopg_pool.ConnectionPool whose connection class injects a fresh credential per new connection
+    (docs example), with TCP keepalives and a health check on checkout so connections dropped by an HA
+    failover are replaced instead of handed out."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    env = os.environ if env is None else env
+    creds = creds or LakebaseCredentials(env.get("ENDPOINT_NAME", ""))
+    kwargs = lakebase_conninfo(env)
+
+    class OAuthConnection(psycopg.Connection):
+        @classmethod
+        def connect(cls, conninfo: str = "", **kw):
+            kw["password"] = creds.token()
+            try:
+                return super().connect(conninfo, **kw)
+            except psycopg.OperationalError:
+                creds.invalidate()   # an expired/revoked credential and a cold endpoint look alike
+                raise
+
+    if pool_cls is None:
+        from psycopg_pool import ConnectionPool as pool_cls
+    return pool_cls(kwargs=kwargs | {"row_factory": dict_row}, connection_class=OAuthConnection,
+                    min_size=min_size, max_size=max_size, open=True, check=pool_cls.check_connection,
+                    reconnect_timeout=60, name="dam-lakebase")

@@ -1,0 +1,80 @@
+# LOCKED by tools/lock_requirements.sh from requirements/job-ml-env6.in against serverless env-6 base (Python 3.12, linux x86_64).
+# Released from base constraint: statsmodels. Do not edit by hand.
+annotated-doc==0.0.4      # via fastapi
+annotated-types==0.7.0    # via pydantic
+anyio==4.10.0             # via starlette
+attrs==25.4.0             # via jsonschema, referencing
+cachetools==5.5.1         # via mlflow-skinny
+certifi==2025.11.12       # via requests
+cffi==2.0.0               # via cryptography
+charset-normalizer==3.4.4  # via requests
+click==8.2.1              # via mlflow-skinny, uvicorn
+cloudpickle==3.1.1        # via mlflow-skinny
+contourpy==1.3.3          # via matplotlib
+cryptography==46.0.3      # via google-auth
+cycler==0.11.0            # via matplotlib
+databricks-sdk==0.108.0   # via mlflow-skinny
+fastapi==0.136.1          # via mlflow-skinny
+fonttools==4.60.1         # via matplotlib
+formulaic==1.2.2          # via statsmodels
+geographiclib==2.1        # via ioos-qc
+geojson==3.3.0            # via ioos-qc
+gitdb==4.0.11             # via gitpython
+gitpython==3.1.45         # via mlflow-skinny
+google-auth==2.53.0       # via databricks-sdk
+h11==0.16.0               # via uvicorn
+h5netcdf==1.8.2           # via ioos-qc
+idna==3.11                # via anyio, requests
+importlib-metadata==8.7.0  # via mlflow-skinny
+interface-meta==2.0.1     # via formulaic
+ioos-qc==3.0.0            # via -r requirements/job-ml-env6.in
+jsonschema==4.25.0        # via ioos-qc
+jsonschema-specifications==2025.9.1  # via jsonschema
+kiwisolver==1.4.8         # via matplotlib
+llvmlite==0.45.1          # via numba
+matplotlib==3.10.6        # via pastas
+mlflow-skinny==3.12.0     # via -r requirements/job-ml-env6.in
+narwhals==2.28.0          # via formulaic
+numba==0.62.1             # via pastas
+numpy==2.3.4              # via contourpy, formulaic, h5netcdf, ioos-qc, matplotlib, numba, pandas, pastas, patsy, ruptures, scipy, shapely, statsmodels, xarray
+opentelemetry-api==1.42.1  # via mlflow-skinny, opentelemetry-sdk, opentelemetry-semantic-conventions
+opentelemetry-proto==1.42.1  # via mlflow-skinny
+opentelemetry-sdk==1.42.1  # via mlflow-skinny
+opentelemetry-semantic-conventions==0.63b1  # via opentelemetry-sdk
+packaging==25.0           # via h5netcdf, matplotlib, mlflow-skinny, pastas, statsmodels, xarray
+pandas==2.3.3             # via formulaic, ioos-qc, pastas, statsmodels, xarray
+pastas==2.0.1             # via -r requirements/job-ml-env6.in
+patsy==1.0.1              # via statsmodels
+pillow==12.0.0            # via matplotlib
+protobuf==6.33.5          # via databricks-sdk, mlflow-skinny, opentelemetry-proto
+pyasn1==0.6.1             # via pyasn1-modules
+pyasn1-modules==0.4.2     # via google-auth
+pycparser==2.23           # via cffi
+pydantic==2.13.3          # via fastapi, mlflow-skinny
+pydantic-core==2.46.3     # via pydantic
+pyparsing==3.2.5          # via ioos-qc, matplotlib
+python-dateutil==2.9.0.post0  # via matplotlib, pandas
+python-dotenv==1.2.2      # via mlflow-skinny
+pytz==2025.2              # via pandas
+pyyaml==6.0.3             # via mlflow-skinny
+referencing==0.37.0       # via jsonschema, jsonschema-specifications
+requests==2.32.5          # via databricks-sdk, mlflow-skinny
+rpds-py==0.28.0           # via jsonschema, referencing
+ruamel-yaml==0.19.1       # via ioos-qc
+ruptures==1.1.10          # via -r requirements/job-ml-env6.in
+scipy==1.16.3             # via formulaic, ioos-qc, pastas, ruptures, statsmodels
+shapely==2.2.0            # via ioos-qc
+six==1.17.0               # via python-dateutil
+smmap==5.0.0              # via gitdb
+sniffio==1.3.0            # via anyio
+sqlparse==0.5.5           # via mlflow-skinny
+starlette==0.52.1         # via fastapi, mlflow-skinny
+statsmodels==0.15.0       # via -r requirements/job-ml-env6.in
+typing-extensions==4.15.0  # via anyio, fastapi, formulaic, mlflow-skinny, opentelemetry-api, opentelemetry-sdk, opentelemetry-semantic-conventions, pydantic, pydantic-core, referencing, starlette, typing-inspection
+typing-inspection==0.4.2  # via fastapi, pydantic
+tzdata==2026.2            # via pandas
+urllib3==2.5.0            # via requests
+uvicorn==0.47.0           # via mlflow-skinny
+wrapt==1.17.0             # via formulaic
+xarray==2026.9.0          # via ioos-qc
+zipp==3.23.0              # via importlib-metadata

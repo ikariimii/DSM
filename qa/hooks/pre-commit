@@ -1,0 +1,12 @@
+#!/bin/sh
+# Pre-commit path guard: block commits that stage restricted (internal-test-only) data or content derived from it.
+# Install: ln -sf ../../qa/hooks/pre-commit .git/hooks/pre-commit
+REPO=$(git rev-parse --show-toplevel) || exit 1
+FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -Ev "^qa/(restricted_guard.py|restricted_denylist.json|test_restricted_guard.py)$" | sed "s#^#$REPO/#")
+[ -z "$FILES" ] && exit 0
+if echo "$FILES" | grep -Eiq '/(dam-refs|datasets|qa_private)/|INTERNAL_ONLY|RESTRICTED'; then
+  echo "pre-commit: staged path looks like a dam-refs/dataset copy:"; echo "$FILES" | grep -Ei '/(dam-refs|datasets|qa_private)/|INTERNAL_ONLY|RESTRICTED'; exit 1
+fi
+PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+# shellcheck disable=SC2086
+"$PY" "$REPO/qa/restricted_guard.py" scan $FILES || { echo "pre-commit: restricted data detected (see above). Read it by path instead."; exit 1; }

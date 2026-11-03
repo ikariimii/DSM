@@ -1,0 +1,65 @@
+# API contract: data layer ⇄ app ⇄ QA
+
+Version: **1.1 (2026-11-02, PROPOSED)**. Source of truth for UC objects: `../SCHEMA_CONTRACT.md` v1.1.
+This page lists the **interfaces** each side may rely on: what UC objects the app reads, what it writes to Lakebase,
+how those writes reach UC, and the HTTP surface the app exposes (owned by the App Developer, listed here for QA).
+Nothing here has been exercised against a live workspace (see `VERIFICATION.md` BUNDLE-1).
+
+## 1. Read interface (app → UC, SQL warehouse, on behalf of the user)
+All reads run as the signed-in user (Apps user authorization, scope `sql`) so `ref.dam_row_filter` applies.
+The app never reads UC through its service principal and never reads a synced copy (SCHEMA_CONTRACT §7.3).
+
+| Object | Grain | Key | Guaranteed columns |
+|---|---|---|---|
+| `ref.site` (view) | dam | `dam_id` | SCHEMA_CONTRACT §5 |
+| `ref.instrument` | instrument | `instrument_id` | §5 |
+| `ref.calibration` | sensor × version (SCD2) | `calib_id` | §5; `sign_mult`, `offset` are columns (§10 Q3) |
+| `ref.formula` | formula × version | (`formula_id`,`formula_version`) | `verified` gates display |
+| `ref.threshold` | threshold × version (SCD2) | (`threshold_id`,`threshold_version`) | §4 |
+| `ref.pfm`, `ref.pfm_instrument` | PFM (SCD2) | `pfm_id` | §5.4 |
+| `ref.instrument_type` | type | `instrument_type` | §5.4 |
+| `ref.incl_installation` | inclinometer (SCD2) | `instrument_id`,`effective_from` | §5 |
+| `silver.v_reading_current` / `ops.reading` | reading (latest reduction) | `reading_id` | §5, lineage per row |
+| `silver.incl_survey_header`, `silver.incl_reduced` | survey × depth | (`survey_id`,`depth_m`) | §5, §5.5 |
+| `ops.alarm_event`, `ops.alarm_episode` | episode | `event_id` (RAISE transition id) | §4, lineage §5 |
+| `gold.instrument_latest` | sensor | `sensor_id` | pipeline MV |
+| `gold.threshold_exceedances` | open exceedance | — | source of every SQL alert |
+
+**Display gate** (app/SCHEMA_CONTRACT §3, agreed): show a computed value only if the formula version is
+`verified`, the calibration is approved and current, and `qa_flag` ∉ {BAD, MISSING}. `qa_reason` is a
+**comma**-separated code list.
+
+## 2. Write interface (app → Lakebase `dam_app`, service principal)
+| Lakebase table | Mutability | UC destination (job `dam_lakebase_extract`) |
+|---|---|---|
+| `alarm_ack` | mutable (open→acknowledged→closed) | `audit.event_log` `ALARM_ACK` → evaluator writes one `ACK` transition |
+| `alarm_comment`, `pfm_review`, `audit_log`, `review_signoff`, `exceedance_status`, `inspection_note` | append-only | `audit.app_extract` / `audit.event_log` / `audit.review_record` / `ops.exceedance_status_log` / `ops.surveillance_inspection` |
+| `manual_reading` | append-only | CSV → `/Volumes/<cat>/raw/landing/<dam>/readings/` (same Auto Loader path as ADAS) |
+| `report_draft` | mutable | `rpt.dssmr_draft` snapshot per content sha256; `rpt.dssmr` only while `draft` |
+| `onboarding_draft`, `onboarding_publication`, `app_user`, `dam_role` | app-owned | not extracted (UX state) |
+
+Ownership rules: SCHEMA_CONTRACT §7.2. Lakebase is never the system of record for a regulatory record.
+
+## 3. Engine interface (Python, for QA)
+| Module | Contract |
+|---|---|
+| `dam_safety.formulas.registry` | `get(formula_id, version)`; each formula carries `sources` and `test_vectors` (asserted by `tests/test_registry.py`) |
+| `dam_safety.qc` | `qa_flag` vocabulary + comma-joined `qa_reason` |
+| `dam_safety.alarms` | state machine of SCHEMA_CONTRACT §4 |
+| `dam_safety.inclinometer.*` | REPORT §6 module map; `corrections.AUDIT_FIELDS` == `ref.incl_correction` columns |
+| `dam_safety.inclinometer.qc.between_set_bias_qc` (QA-020) | `(installation, axis, suspect_survey_id, suspect, reference, reference_survey_id=None, params=BiasQCParams())` → `BiasQC` with `suspect_flag`, `za_proposed_c` (None unless `status='PROPOSED'`), evidence `n`, `mean_dD`, `sd`, `spread`, `equal_opposite`, `reference_survey_id`, plus `stable_zone_assumed`, `params_unverified`, `status`, `gates`, `qa_flag`. Proposes only; `bias_proposal_record` → `applied=false` correction row. Fields per SCHEMA_CONTRACT §5.5 |
+| `common.toa5` (App Dev, canonical) + `dam_safety.toa5_landing` | TOA5 → bronze `READING_SCHEMA` rows; the `dam_safety.toa5` shim was deleted 2026-11-02 (no callers) |
+
+## 4. App HTTP surface (owned by the App Developer; listed, not changed)
+`GET /api/health`, `/api/me`, `/api/portfolio`, `/api/dams/{dam_id}`, `/api/formulas`,
+`/api/dams/{dam_id}/instruments`, `/api/instruments/{id}`, `/api/instruments/{id}/timeseries`,
+`/api/instruments/{id}/incl/surveys`, `/api/instruments/{id}/incl/profile`, `/api/formulas/{formula_id}/{version}/check`,
+`GET /api/alarms`, `GET /api/alarms/{event_id}`, `POST /api/alarms/{event_id}/ack|close|comment`,
+`GET /api/dams/{dam_id}/dssmp`, `POST /api/dams/{dam_id}/pfms/{pfm_id}/review`,
+`GET|POST /api/dams/{dam_id}/reports`, `GET /api/dams/{dam_id}/reports/{report_id}`,
+`/api/onboarding/*` (steps, drafts, parse-csv, formulas/check, validate, golive), `/api/admin/*` (users, roles, audit).
+(Extracted from `app/backend/routers/*.py` by route decorator; request/response schemas are the app's.)
+
+## 5. Change rule
+Renames/removals → new contract version + App Developer and QA sign-off. Additive nullable columns → allowed,
+announced in SCHEMA_CONTRACT's change list.

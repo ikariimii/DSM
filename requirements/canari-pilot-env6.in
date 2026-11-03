@@ -1,0 +1,3 @@
+# Isolated, PAUSED pilot only (job dam_canari_pilot). Never installed in the core engine jobs or the app.
+# PyPI name is pycanari (imports as `canari`); the PyPI project `canari` is unrelated (GPLv3, 2019).
+pycanari==0.2.5

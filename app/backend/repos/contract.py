@@ -1,0 +1,331 @@
+"""Adapter: SCHEMA_CONTRACT v1.1 (data layer, /SCHEMA_CONTRACT.md) -> the app's internal row model.
+
+The routers, gate, reports and the demo seed all use one internal shape. The warehouse uses the
+contract's column names. These pure functions are the only place where the two meet, so a contract
+change is a change here plus a test. Nothing here computes an engineering value; values are passed
+through with their lineage, and missing or inconsistent lineage makes the display gate withhold them."""
+from __future__ import annotations
+
+from typing import Any
+
+# ---------------------------------------------------------------- §5.4 instrument types
+# Canonical ref.instrument_type vocabulary (sql/seed/ref_instrument_type_seed.sql). engine_formulas == ()
+# means the data layer has no engine formula for the type, so the app must not compute or display a
+# computed value for it (strain_gauge and others today).
+INSTRUMENT_TYPES: dict[str, dict] = {
+    "piezometer": {"units": ("m", "kPa"), "engine_formulas": ("VW_PIEZO", "STANDPIPE_DTW"),
+                   "legacy": ("VW_PIEZOMETER", "STANDPIPE", "PIEZOMETER", "OPEN_STANDPIPE")},
+    "reservoir_level": {"units": ("m",), "engine_formulas": ("LEVEL_DATUM",), "legacy": ("WATER_LEVEL", "LEVEL")},
+    "seepage_weir": {"units": ("L/s", "ft3/s"), "engine_formulas": ("WEIR_VNOTCH",),
+                     "legacy": ("SEEPAGE_WEIR", "WEIR", "SEEPAGE")},
+    "inclinometer": {"units": ("mm",), "engine_formulas": ("INCL_PROBE_2PASS",), "legacy": ("INCLINOMETER",)},
+    "crackmeter": {"units": ("mm",), "engine_formulas": ("VW_DISP_LIN",),
+                   "legacy": ("CRACKMETER", "JOINTMETER", "VW_DISPLACEMENT")},
+    "extensometer": {"units": ("mm",), "engine_formulas": ("VW_DISP_LIN",), "legacy": ("EXTENSOMETER",)},
+    "settlement": {"units": ("mm",), "engine_formulas": ("SETTLEMENT_DELTA",),
+                   "legacy": ("SETTLEMENT", "SURVEY_MONUMENT", "GNSS")},
+    "strain_gauge": {"units": ("microstrain",), "engine_formulas": (), "legacy": ("SG", "STRAIN_GAUGE", "STRAINMETER")},
+    "pressure_cell": {"units": ("kPa",), "engine_formulas": (), "legacy": ("PRESSURE_CELL", "STRESS_CELL")},
+    "load_cell": {"units": ("kN",), "engine_formulas": (), "legacy": ("LOAD_CELL",)},
+    "tiltmeter": {"units": ("arcsec", "mm/m"), "engine_formulas": (), "legacy": ("TILTMETER",)},
+    "plumbline": {"units": ("mm",), "engine_formulas": (), "legacy": ("PLUMBLINE", "PENDULUM")},
+    "accelerometer": {"units": ("g", "cm/s2"), "engine_formulas": (), "legacy": ("ACCELEROMETER", "STRONG_MOTION")},
+    "thermometer": {"units": ("degC",), "engine_formulas": (), "legacy": ("THERMISTOR", "TEMPERATURE")},
+}
+# legacy upper-case code -> (canonical type, default subtype)
+_LEGACY_SUBTYPE = {"VW_PIEZOMETER": "vibrating_wire", "STANDPIPE": "standpipe", "OPEN_STANDPIPE": "standpipe",
+                   "SURVEY_MONUMENT": "survey_monument", "VW_DISPLACEMENT": "vibrating_wire",
+                   "CRACKMETER": "vibrating_wire", "INCLINOMETER": "probe", "WEIR": "v_notch"}
+TYPE_MAP = {code: (t, _LEGACY_SUBTYPE.get(code)) for t, spec in INSTRUMENT_TYPES.items() for code in spec["legacy"]}
+
+
+def canonical_type(code: Any) -> tuple[str | None, str | None, bool]:
+    """-> (canonical type or lower-cased unknown code, default subtype, known)."""
+    typ = str(code or "").strip()
+    if not typ:
+        return None, None, False
+    if typ.lower() in INSTRUMENT_TYPES:
+        return typ.lower(), None, True
+    if typ.upper() in TYPE_MAP:
+        t, sub = TYPE_MAP[typ.upper()]
+        return t, sub, True
+    return typ.lower(), None, False
+
+
+def type_is_computable(instrument_type: str | None) -> bool:
+    spec = INSTRUMENT_TYPES.get(instrument_type or "")
+    return bool(spec and spec["engine_formulas"])
+
+
+def _num(v: Any) -> Any:
+    """MAP<STRING,STRING> params arrive as strings. Convert numbers and booleans; keep text."""
+    if not isinstance(v, str):
+        return v
+    low = v.strip().lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+# ---------------------------------------------------------------- ref.calibration
+CAL_COLUMNS_NOT_PARAMS = ("sign_mult", "offset")   # §10 Q3: columns on ref.calibration, never in params
+CAL_METHODS = ("linear", "poly")                     # §10 Q3
+# data-layer param spelling -> app formula spelling (the engine registry accepts both, §5.5)
+PARAM_ALIASES = {"top_el_m": "top_elev_m", "tip_el_m": "tip_elev_m", "sensor_el_m": "sensor_elev_m",
+                 "datum_el_m": "datum_elev_m"}
+
+
+def normalize_params(params: dict | None) -> dict:
+    p = {k: _num(v) for k, v in (params or {}).items()}
+    for el, app in PARAM_ALIASES.items():
+        if el in p and app not in p:
+            p[app] = p[el]
+    return p
+
+
+def calibration(row: dict) -> dict:
+    """sign_mult / offset are read ONLY from their columns (§10 Q3). A params key with either name is a
+    data error: it is dropped (never used) and reported in `params_ignored` + `calibration_issues`, and the
+    calibration does not count as approved for display (verify.Gate)."""
+    r = dict(row)
+    params = normalize_params(r.get("params"))
+    issues: list[str] = []
+    ignored = [k for k in CAL_COLUMNS_NOT_PARAMS if k in params]
+    for k in ignored:
+        params.pop(k)
+        issues.append(f"params.{k} ignored: {k} is a ref.calibration column (SCHEMA_CONTRACT §10 Q3)")
+    sm = r.get("sign_mult")
+    sm = 1 if sm is None else _num(sm)
+    if not (isinstance(sm, (int, float)) and not isinstance(sm, bool) and float(sm) in (1.0, -1.0)):
+        issues.append(f"sign_mult must be +1 or -1, got {r.get('sign_mult')!r}")
+        r["sign_mult"] = r.get("sign_mult")
+    else:
+        r["sign_mult"] = int(sm)
+    off = r.get("offset")
+    off = 0.0 if off is None else _num(off)
+    if isinstance(off, (int, float)) and not isinstance(off, bool):
+        r["offset"] = float(off)
+    else:
+        issues.append(f"offset must be numeric, got {r.get('offset')!r}")
+        r["offset"] = r.get("offset")
+    method = params.get("method", r.get("method"))
+    r["method"] = method if isinstance(method, str) else None
+    if r["method"] is not None and r["method"] not in CAL_METHODS:
+        issues.append(f"method must be one of {'|'.join(CAL_METHODS)}, got {r['method']!r}")
+    r["params"] = params
+    r["params_ignored"] = ignored
+    r["calibration_issues"] = issues
+    r.setdefault("certificate_uri", None)
+    r.pop("certificate", None)
+    return r
+
+
+def formula_inputs(cal: dict, **extra) -> dict:
+    """Inputs for an app formula call: params plus the sign_mult/offset COLUMNS (engine apply_formula order)."""
+    return {**(cal.get("params") or {}), "sign_mult": cal.get("sign_mult", 1), "offset": cal.get("offset", 0.0),
+            **extra}
+
+
+# ---------------------------------------------------------------- ref.instrument
+def instrument(row: dict) -> dict:
+    """Row from ref.instrument LEFT JOIN current calibration (formula_id/version) and ref.formula (output_unit)."""
+    r = dict(row)
+    src = r.get("instrument_type")
+    typ, sub, known = canonical_type(src)
+    r["source_instrument_type"] = src
+    r["instrument_type"] = typ
+    r["instrument_type_known"] = known
+    r["computable"] = type_is_computable(typ)
+    r["subtype"] = r.get("subtype") or sub
+    r.setdefault("tip_el_m", None)
+    r.setdefault("top_el_m", None)
+    r.setdefault("eng_unit", r.get("output_unit"))
+    r.setdefault("output_name", None)
+    r.setdefault("replaced_by", None)
+    r.setdefault("parent_id", None)
+    return r
+
+
+# ---------------------------------------------------------------- ref.threshold (§4, §10 Q7)
+# (limit_type, direction) -> app rule. The alarm machine evaluates magnitude/rate x upper/lower/abs
+# (dam_safety.alarms._exceeds, abs = |value| vs limit). cyclic is NOT evaluated (§10 Q7).
+_RULES = {("magnitude", "upper"): "value_above", ("magnitude", "lower"): "value_below",
+          ("magnitude", "abs"): "abs_above", ("rate", "upper"): "rate_above", ("rate", "lower"): "rate_below",
+          ("rate", "abs"): "rate_abs_above"}
+_LEGACY_RULES = {v: k for k, v in _RULES.items()}
+RULE_LABELS = {"value_above": "value > limit", "value_below": "value < limit", "abs_above": "|value| > limit",
+               "rate_above": "rate > limit per day", "rate_below": "rate < limit per day",
+               "rate_abs_above": "|rate| > limit per day"}
+NOT_EVALUATED = "not evaluated"
+
+
+def threshold(row: dict) -> dict:
+    """Canonical columns (limit_type, direction, value, pfm_id, required_actions) are the source; the legacy app
+    shape (rule/upper_limit/lower_limit/rate_limit_per_day/pfm_ids/response_action) is accepted on input only
+    when the canonical columns are absent (older demo/onboarding rows) and is always re-derived."""
+    r = dict(row)
+    lt = (r.get("limit_type") or "").strip().lower()
+    dr = (r.get("direction") or "").strip().lower()
+    v = r.get("value")
+    if not lt and r.get("rule") in _LEGACY_RULES:
+        lt, dr = _LEGACY_RULES[r["rule"]]
+        v = {"value_above": r.get("upper_limit"), "value_below": r.get("lower_limit")}.get(
+            r["rule"], r.get("rate_limit_per_day"))
+    if r.get("pfm_id") is None and r.get("pfm_ids"):
+        r["pfm_id"] = r["pfm_ids"][0]
+    if r.get("required_actions") is None and r.get("response_action") is not None:
+        r["required_actions"] = r["response_action"]
+    r.update(limit_type=lt or None, direction=dr or None, value=v)
+    rule = _RULES.get((lt, dr))
+    if lt == "cyclic":
+        r["rule"], r["evaluated"] = "cyclic", False
+        r["rule_label"] = f"cyclic {dr or ''} limit: {NOT_EVALUATED}".replace("  ", " ")
+    elif rule is None:
+        r["rule"], r["evaluated"] = f"unsupported:{lt}/{dr}", False
+        r["rule_label"] = f"{lt}/{dr}: {NOT_EVALUATED}"
+    else:
+        r["rule"], r["evaluated"], r["rule_label"] = rule, True, RULE_LABELS[rule]
+    r["upper_limit"] = v if r["rule"] == "value_above" else None
+    r["lower_limit"] = v if r["rule"] == "value_below" else None
+    r["abs_limit"] = v if r["rule"] == "abs_above" else None
+    r["rate_limit_per_day"] = v if r["rule"] in ("rate_above", "rate_below", "rate_abs_above") else None
+    r["pfm_ids"] = [r["pfm_id"]] if r.get("pfm_id") else []
+    r["response_action"] = r.get("required_actions")
+    return r
+
+
+# ---------------------------------------------------------------- ref.pfm (§5.4)
+PFM_FIELDS = ("pfm_id", "dam_id", "pfm_code", "description", "loading_condition", "ch17_disposition",
+              "legacy_ch14_category", "mechanism", "status", "is_general_health", "effective_from", "effective_to")
+
+
+def pfm(row: dict) -> dict:
+    """Row from ref.pfm with `instruments` = collect_set of current ref.pfm_instrument.instrument_id."""
+    r = dict(row)
+    for k in PFM_FIELDS:
+        r.setdefault(k, None)
+    r["instruments"] = sorted(r.get("instruments") or [])
+    # app-only DSSMP narrative fields (not in ref.pfm; shown only when the demo seed provides them)
+    r.setdefault("expected_behavior", None)
+    r.setdefault("monitoring_frequency", None)
+    r.pop("title", None)
+    r.pop("category", None)
+    return r
+
+
+# ---------------------------------------------------------------- inclinometers (§5.5)
+INCL_COLS = {"inc_a": "a_inc_mm", "inc_b": "b_inc_mm", "cum_a": "a_cum_mm", "cum_b": "b_cum_mm",
+             "resultant": "resultant_mm", "checksum_a": "a_chk", "checksum_b": "b_chk"}
+INCL_API = {v: k for k, v in INCL_COLS.items()}
+# ref.incl_correction audit fields, in contract order (§5.5; == dam_safety.inclinometer.corrections.AUDIT_FIELDS)
+INCL_CORRECTION_FIELDS = (
+    "record_id", "dam_id", "instrument_id", "survey_id", "axis", "correction_type", "parameter_name", "auto_value",
+    "detection_method", "detection_statistic", "override_value", "applied", "sign_convention", "depth_range",
+    "reason", "source_citation", "user", "timestamp_utc", "before_value", "after_value", "software_version",
+    "input_file_sha256", "superseded_by")
+CORRECTION_UNVERIFIED = "CORRECTION_UNVERIFIED"
+UNCORRECTED_NOTE = ("Uncorrected: no bias, depth, sensitivity or rotation correction is applied (SCHEMA_CONTRACT "
+                    "§5.5; the reduce job is not yet switched to dam_safety.inclinometer.engine).")
+
+
+def incl_row(row: dict) -> dict:
+    r = {INCL_COLS.get(k, k): v for k, v in row.items()}
+    reason = (r.get("qa_reason") or "").upper()
+    r["qc_checksum_ok"] = "CHECKSUM" not in {x.strip() for x in reason.split(",")}
+    ids = r.get("correction_record_ids") or []
+    r["correction_record_ids"] = list(ids)
+    # §5.5: until the reduce job uses the engine, values are uncorrected. A row that claims corrections cannot
+    # be presented as uncorrected, and the app cannot verify the corrections, so it is flagged for the gate.
+    r["correction_basis"] = "uncorrected" if not ids else "corrected_unverified"
+    # Bias proposals are suppressed until the QA-020 spec exists and the engine provides one (owner decision
+    # 2026-11-02). Drop the field even if a source column appears, so it can never reach the API or UI.
+    r.pop("proposed_bias", None)
+    return r
+
+
+def incl_api_row(row: dict) -> dict:
+    """Internal (gated) profile row -> contract column names for the API (§5.5: a_cum_mm -> cum_a, ...)."""
+    return {INCL_API.get(k, k): v for k, v in row.items()}
+
+
+def incl_correction(row: dict) -> dict:
+    """ref.incl_correction row -> exactly the 23 audit fields in contract order (+ review fields if present)."""
+    missing = [k for k in INCL_CORRECTION_FIELDS if k not in row]
+    out = {k: row.get(k) for k in INCL_CORRECTION_FIELDS}
+    for k in ("reviewed_by", "reviewed_utc"):
+        if k in row:
+            out[k] = row[k]
+    out["audit_complete"] = not missing
+    out["missing_audit_fields"] = missing
+    return out
+
+
+# ---------------------------------------------------------------- alarms (§4, §5 v1.1 lineage)
+EPISODE_LINEAGE = ("reading_id", "cal_version", "calib_id", "formula_version", "raise_reading_id",
+                   "raise_cal_version", "mixed_calibration")
+
+
+def alarm_event(row: dict) -> dict:
+    """Row from ops.alarm_episode LEFT JOIN ref.threshold (id + version) LEFT JOIN ref.calibration (calib_id, for
+    formula_id) LEFT JOIN ops.reading (reading_id, for qc_flag / erroneous mark).
+
+    ops.alarm_episode has no formula_id column (§5), so formula_id comes from the episode's calibration row,
+    and only when that row's formula_version equals the episode's formula_version; otherwise the lineage is
+    inconsistent and formula_id stays None, so the gate withholds the value."""
+    r = threshold({**row, "value": row.get("value_limit")})  # episode `value` is the measured value
+    r["limit"] = row.get("value_limit")
+    r["value"] = row.get("value")
+    for k in EPISODE_LINEAGE:
+        r[k] = row.get(k)
+    r["mixed_calibration"] = bool(row.get("mixed_calibration"))
+    fid, fver = row.get("cal_formula_id"), row.get("cal_formula_version")
+    ok = (row.get("calib_id") is not None and fid is not None and row.get("formula_version") is not None
+          and str(fver) == str(row.get("formula_version")))
+    r["formula_id"] = row.get("formula_id") if row.get("formula_id") is not None else (fid if ok else None)
+    r["lineage_issue"] = None if (ok or row.get("formula_id") is not None or row.get("calib_id") is None) else \
+        "calibration formula_version does not match the episode formula_version"
+    qc = row.get("reading_qc_flag", row.get("qa_flag"))
+    if row.get("reading_is_erroneous"):
+        qc = "BAD"
+    r["qa_flag"] = qc
+    r["qa_reason"] = row.get("reading_qc_reason", row.get("qa_reason"))
+    for k in ("cal_formula_id", "cal_formula_version", "reading_qc_flag", "reading_qc_reason", "reading_is_erroneous"):
+        r.pop(k, None)
+    r["message"] = (f"{r.get('instrument_id')} L{r.get('level')} {r.get('rule')} limit "
+                    f"{r.get('limit')} {r.get('unit') or ''} ({r.get('machine_state')})").strip()
+    return r
+
+
+# ---------------------------------------------------------------- readings
+def join_reasons(*parts: Any) -> str | None:
+    """§3: qa_reason is a comma-joined code list."""
+    out = [str(p) for p in parts if p]
+    return ",".join(out) if out else None
+
+
+def reading(row: dict) -> dict:
+    """Row from the FERC-canvas contract view ops.reading -> app reading model.
+    An engineer's erroneous mark (ops.reading_erroneous_mark) forces qa_flag BAD so the display
+    gate withholds the value; the mark reason is kept in qa_reason (comma-joined, §3)."""
+    r = dict(row)
+    r["ts_utc"] = r.pop("reading_ts", r.get("ts_utc"))
+    r["corrected_value"] = r.pop("value", r.get("corrected_value"))
+    r["corrected_unit"] = r.pop("unit", r.get("corrected_unit"))
+    r["qa_flag"] = r.pop("qc_flag", r.get("qa_flag"))
+    r["qa_reason"] = r.pop("qc_reason", r.get("qa_reason"))
+    if r.get("is_erroneous"):
+        r["qa_flag"] = "BAD"
+        r["qa_reason"] = join_reasons(r.get("qa_reason"), "ERRONEOUS_MARK", r.get("erroneous_reason"))
+    return r
+
+
+def formula(row: dict) -> dict:
+    r = dict(row)
+    r.setdefault("unit", r.get("output_unit"))
+    r.setdefault("output_name", r.get("reading_type"))
+    r.setdefault("required_params", [])
+    r.setdefault("inputs", [])
+    return r

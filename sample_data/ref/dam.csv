@@ -1,0 +1,6 @@
+dam_id,portfolio_id,name,hazard_potential,dam_type,timezone,datum,normal_pool_el_m,crest_el_m
+SYN-DAM-01,SYN-PORT,Synthetic Dam 1,High,EMBANKMENT,America/New_York,SYN-LOCAL,110.0000,116.0000
+SYN-DAM-02,SYN-PORT,Synthetic Dam 2,Significant,EMBANKMENT,America/New_York,SYN-LOCAL,120.0000,126.0000
+SYN-DAM-03,SYN-PORT,Synthetic Dam 3,High,CONCRETE_GRAVITY,America/New_York,SYN-LOCAL,130.0000,136.0000
+SYN-DAM-04,SYN-PORT,Synthetic Dam 4,Low,EMBANKMENT,America/New_York,SYN-LOCAL,140.0000,146.0000
+SYN-DAM-05,SYN-PORT,Synthetic Dam 5,Significant,ARCH,America/New_York,SYN-LOCAL,150.0000,156.0000

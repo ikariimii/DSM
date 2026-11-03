@@ -1,0 +1,8 @@
+# Top-level pins for the dam_interpretation job environment `ml` (serverless environment_version 6).
+# Adopted from docs/DEPENDENCY_PINS.md (App Developer proposal) after re-check on PyPI 2026-11-02.
+# numpy/pandas/scipy/numba/matplotlib are NOT pinned here: they come from the env-6 base.
+ioos-qc==3.0.0
+ruptures==1.1.10
+statsmodels==0.15.0
+pastas==2.0.1
+mlflow-skinny>=2.16

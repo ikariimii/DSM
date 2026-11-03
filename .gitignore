@@ -1,0 +1,66 @@
+# ---- Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.databricks/
+*.egg-info/
+build/
+dist/
+# the app ships its prebuilt UI (app/.gitignore; Databricks Apps does not run the npm build)
+!app/frontend/dist/
+
+# ---- QA agent workspace (not part of the shipped bundle)
+qa/*
+!qa/restricted_guard.py
+!qa/restricted_denylist.json
+!qa/test_restricted_guard.py
+!qa/reference_examples.py
+!qa/hooks/
+
+# ---- QA restricted-data guard (2026-11-02 18:58 EST, QA engineer; see QA.md). Copies of dam-refs or any
+# dataset tree must never be committed. Reading them by path is fine. Enforced by qa/restricted_guard.py
+# (pre-commit: qa/hooks/pre-commit) and tests/test_license_leak.py.
+dam-refs/
+**/dam-refs/
+datasets/
+**/datasets/
+qa_private/
+**/qa_private/
+.cache/
+*.GK
+*.gk
+*.tenv3
+*.xlsx
+*INTERNAL_ONLY*
+*RESTRICTED*
+.mypy_cache/
+.ruff_cache/
+
+# ---- LICENSING: internal-test-only datasets must NEVER enter this repo (owner decision 2026-11-02;
+# source of truth /workspace/dam-refs/datasets/_shared/manifest.csv; enforced by tests/test_license_leak.py)
+.internal_test_artifacts/
+testonly_restricted/
+**/icold_bw2022_themeA/
+**/icold_bw2022_themeC/
+**/enguri_piezometers/
+**/enguri_status_evidence/
+**/usbr_rise_monticello/
+**/kaniv_hpp_gnss/
+**/ngl_orvb_oroville/
+**/scedc_pacoima_24741/
+**/cesmd_dam_records/
+**/vendor_manual_samples/
+**/vendor_export_samples_vdv/
+**/mendeley_anchor_force_loss_RESTRICTED/
+*Theme_A_16th_ICOLD_BW*
+*ThemeA_data_fmt0*
+*Theme-C_embankment*
+*RISE_10785*
+enguri*.tar
+# user's inclinometer workbook + extracts and vendor-manual data (steering 9: internal-test-only)
+**/user_tool/
+*user_tool_surveys*
+*libreoffice_recalc_compare*
+*.mseed
+node_modules/

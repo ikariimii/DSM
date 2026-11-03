@@ -1,0 +1,9 @@
+# MLflow UC registered model placeholder. Training (interpretation job) registers versions and
+# moves the @Champion alias only after an engineer-approved validation (README 'Interpretation').
+resources:
+  registered_models:
+    dam_anomaly_scorer:
+      name: anomaly_scorer
+      catalog_name: ${var.catalog}
+      schema_name: ml
+      comment: "Per-sensor residual anomaly scorer (HST residual z-score). Alias @Champion = approved version. Placeholder - no version registered yet."

@@ -1,0 +1,6 @@
+structure_id,dam_id,name,structure_type
+SYN-DAM-01-ST1,SYN-DAM-01,Main section,EMBANKMENT
+SYN-DAM-02-ST1,SYN-DAM-02,Main section,EMBANKMENT
+SYN-DAM-03-ST1,SYN-DAM-03,Main section,CONCRETE_GRAVITY
+SYN-DAM-04-ST1,SYN-DAM-04,Main section,EMBANKMENT
+SYN-DAM-05-ST1,SYN-DAM-05,Main section,ARCH

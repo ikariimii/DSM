@@ -1,0 +1,69 @@
+# DDL job: applies sql/ddl/00..13 in order on a serverless SQL warehouse. Idempotent.
+resources:
+  jobs:
+    dam_uc_setup:
+      name: dam_uc_setup_${var.catalog}
+      description: Create/upgrade schemas, tables, constraints, row filters and gold views (sql/ddl)
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure: [ "${var.ops_email}" ]
+      tasks:
+        - task_key: ddl_00_catalog_schemas
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/00_catalog_schemas.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_01_ref_hierarchy
+          depends_on: [ { task_key: ddl_00_catalog_schemas } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/01_ref_hierarchy.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: seed_ref_instrument_type   # canonical instrument_type vocabulary (SCHEMA_CONTRACT §5.4)
+          depends_on: [ { task_key: ddl_01_ref_hierarchy } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/seed/ref_instrument_type_seed.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_02_ref_calibration_threshold
+          depends_on: [ { task_key: seed_ref_instrument_type } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/02_ref_calibration_threshold.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_03_ref_formula
+          depends_on: [ { task_key: ddl_02_ref_calibration_threshold } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/03_ref_formula.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: seed_ref_formula          # data layer owns the formula registry (SCHEMA_CONTRACT §9)
+          depends_on: [ { task_key: ddl_03_ref_formula } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/seed/ref_formula_seed.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_04_ref_dssmp_pfm_eap
+          depends_on: [ { task_key: seed_ref_formula } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/04_ref_dssmp_pfm_eap.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_05_raw
+          depends_on: [ { task_key: ddl_04_ref_dssmp_pfm_eap } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/05_raw.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_06_silver
+          depends_on: [ { task_key: ddl_05_raw } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/06_silver.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_07_ops
+          depends_on: [ { task_key: ddl_06_silver } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/07_ops.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_08_audit
+          depends_on: [ { task_key: ddl_07_ops } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/08_audit.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_09_rpt
+          depends_on: [ { task_key: ddl_08_audit } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/09_rpt.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_10_security
+          depends_on: [ { task_key: ddl_09_rpt } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/10_security.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_10a_row_filters      # security_mode switch: table (default) | abac, mutually exclusive
+          depends_on: [ { task_key: ddl_10_security } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: "../sql/ddl/10a_row_filters_${var.security_mode}.sql" }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_11_gold_views
+          depends_on: [ { task_key: ddl_10a_row_filters } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/11_gold_views.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_12_gold_interpretation
+          depends_on: [ { task_key: ddl_11_gold_views } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/12_gold_interpretation.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_13_ref_dataset_survey
+          depends_on: [ { task_key: ddl_12_gold_interpretation } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/13_ref_dataset_survey.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: seed_dataset_catalog
+          depends_on: [ { task_key: ddl_13_ref_dataset_survey } ]
+          environment_key: py
+          spark_python_task:
+            python_file: ../src/jobs/seed_dataset_catalog.py
+            parameters: [ "--catalog", "${var.catalog}" ]
+      environments:
+        - environment_key: py
+          spec: { environment_version: "6" }   # env 6 = Python 3.12.3 (verified, Databricks SME 2026-11-02); seed uses stdlib csv + Spark only

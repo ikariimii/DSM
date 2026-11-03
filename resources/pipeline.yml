@@ -1,0 +1,32 @@
+# Serverless Lakeflow Declarative Pipeline: raw (bronze) -> silver clean/quarantine -> gold MVs.
+# Triggered (not continuous) by job dam_ingest on file arrival. Owns raw.*, silver.reading_clean,
+# silver.reading_quarantine, silver.incl_survey and gold materialized views (SCHEMA_CONTRACT.md §3).
+resources:
+  pipelines:
+    dam_pipeline:
+      name: dam_pipeline_${var.catalog}
+      catalog: ${var.catalog}
+      schema: raw
+      serverless: true
+      continuous: false
+      channel: CURRENT
+      photon: true
+      root_path: ../src/pipelines
+      libraries:
+        - file: { path: ../src/pipelines/bronze.py }
+        - file: { path: ../src/pipelines/silver.py }
+        - file: { path: ../src/pipelines/gold.py }
+      # Runs as the runtime SP (member of dam-portfolio-all). Refreshes evaluate IS_MEMBER/CURRENT_USER as the pipeline
+      # owner/run_as (KB 03), so gold MVs are computed with that principal's visibility (all dams); readers are then
+      # filtered as themselves by row_filter= (table mode) or the ABAC policy (abac mode).
+      run_as:
+        service_principal_name: ${var.runtime_sp_app_id}
+      configuration:
+        dam.catalog: ${var.catalog}
+        dam.landing_path: /Volumes/${var.catalog}/raw/landing
+        dam.max_future_hours: "1"
+        dam.security_mode: ${var.security_mode}
+        dam.gap_factor: "2.0"
+      notifications:
+        - email_recipients: [ "${var.ops_email}" ]
+          alerts: [ on-update-failure, on-update-fatal-failure, on-flow-failure ]

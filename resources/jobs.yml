@@ -1,0 +1,124 @@
+# Processing jobs (serverless). Jobs own silver.reading_reduced, ops.* and audit.* (SCHEMA_CONTRACT.md §3).
+resources:
+  jobs:
+    dam_ingest:
+      name: dam_ingest_${var.catalog}
+      description: On file arrival in the landing volume - pipeline update, incremental reduction + QC, alarm state machine
+      max_concurrent_runs: 1
+      queue: { enabled: true }
+      trigger:
+        pause_status: UNPAUSED
+        file_arrival:
+          url: /Volumes/${var.catalog}/raw/landing/
+          min_time_between_triggers_seconds: 60
+      email_notifications:
+        on_failure: [ "${var.ops_email}" ]
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 900
+      tasks:
+        - task_key: pipeline
+          pipeline_task: { pipeline_id: "${resources.pipelines.dam_pipeline.id}", full_refresh: false }
+        - task_key: reduce_readings
+          depends_on: [ { task_key: pipeline } ]
+          environment_key: py
+          spark_python_task:
+            python_file: ../src/jobs/reduce_readings.py
+            parameters: [ "--catalog", "${var.catalog}" ]
+        - task_key: alarm_evaluator
+          depends_on: [ { task_key: reduce_readings } ]
+          environment_key: py
+          spark_python_task:
+            python_file: ../src/jobs/alarm_evaluator.py
+            parameters: [ "--catalog", "${var.catalog}" ]
+      environments:
+        - environment_key: py
+          spec: { environment_version: "2" }
+
+    # Data-freshness safety net: the pipeline + evaluator also run on a schedule so a silent logger
+    # (no file arrives -> no trigger) still updates gold.data_freshness for the stale-data alert.
+    dam_heartbeat:
+      name: dam_heartbeat_${var.catalog}
+      schedule:
+        quartz_cron_expression: "0 7/15 * * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: pipeline
+          pipeline_task: { pipeline_id: "${resources.pipelines.dam_pipeline.id}" }
+
+    dam_recompute:
+      name: dam_recompute_${var.catalog}
+      description: History recompute after a calibration/formula change (append-only, lineage in audit.recompute_log)
+      max_concurrent_runs: 1
+      parameters:
+        - { name: sensor_ids, default: "" }
+        - { name: before_ts, default: "" }
+        - { name: requested_by, default: system }
+        - { name: reason, default: calibration change }
+      tasks:
+        - task_key: recompute
+          environment_key: py
+          spark_python_task:
+            python_file: ../src/jobs/recompute_calibration.py
+            parameters: [ "--catalog", "${var.catalog}", "--sensor_ids", "{{job.parameters.sensor_ids}}",
+                          "--before_ts", "{{job.parameters.before_ts}}", "--requested_by", "{{job.parameters.requested_by}}",
+                          "--reason", "{{job.parameters.reason}}" ]
+        - task_key: alarm_replay
+          depends_on: [ { task_key: recompute } ]
+          environment_key: py
+          spark_python_task:
+            python_file: ../src/jobs/alarm_evaluator.py
+            parameters: [ "--catalog", "${var.catalog}", "--lookback_days", "3650" ]
+      environments:
+        - environment_key: py
+          spec: { environment_version: "2" }
+
+    dam_lakebase_extract:
+      name: dam_lakebase_extract_${var.catalog}
+      description: Lakebase app data (manual readings, sign-offs, acks, audit) -> landing volume / audit.app_extract
+      schedule:
+        quartz_cron_expression: "0 2/5 * * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: extract
+          environment_key: pg
+          spark_python_task:
+            python_file: ../src/jobs/lakebase_extract.py
+            parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
+                          "--lb_branch", "production", "--lb_endpoint", "primary" ]
+      environments:
+        - environment_key: pg
+          spec:
+            environment_version: "2"
+            dependencies: [ "psycopg[binary]>=3.1", "databricks-sdk>=0.60" ]
+
+    dam_interpretation:
+      name: dam_interpretation_${var.catalog}
+      description: Nightly HST fit, anomaly scoring, sensor-fault classification, PFM rules, draft commentary (requires_engineer_review)
+      schedule:
+        quartz_cron_expression: "0 30 3 * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: interpret
+          environment_key: ml
+          spark_python_task:
+            python_file: ../src/jobs/interpretation_run.py
+            parameters: [ "--catalog", "${var.catalog}" ]
+      # OSS pins adopted from docs/DEPENDENCY_PINS.md (App Developer). Env 6 = Python 3.12.3, numpy 2.3.4,
+      # pandas 2.3.3, scipy 1.16.3, numba 0.62.1 (docs.databricks.com .../environment-version/six). Base
+      # numpy/pandas/scipy are NOT re-pinned; the lock only adds packages and moves statsmodels 0.14.5 -> 0.15.0.
+      # Re-lock with tools/lock_requirements.sh. PyTOA5 is NOT used (GPL-3.0 igbpyutils): src/common/toa5.py.
+      environments:
+        - environment_key: ml
+          spec:
+            environment_version: "6"
+            dependencies:
+              - "-r ${workspace.file_path}/requirements/job-ml-env6.lock.txt"

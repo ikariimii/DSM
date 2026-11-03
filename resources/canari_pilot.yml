@@ -1,0 +1,33 @@
+# Isolated canari pilot (docs/DEPENDENCY_PINS.md, App Developer proposal adopted 2026-11-02).
+# Defined ONLY for the dev and test targets, so a prod deploy never contains it. PAUSED.
+# KNOWN BLOCKER (box check 2026-11-02): pytagi (pycanari dep) imports cutagi, which needs the system library
+# libmpi_cxx.so.40 (OpenMPI). Serverless cannot apt-install; the env check below reports this. UNVERIFIED on serverless.
+# (The job is defined inline under dev with a YAML anchor and reused under test; no non-DAB top-level keys.)
+targets:
+  dev:
+    resources:
+      jobs:
+        dam_canari_pilot: &canari_pilot
+          name: dam_canari_pilot_${var.catalog}
+          description: "PILOT ONLY - advisory/unverified. Environment check for pycanari 0.2.5; never surfaced in the app."
+          schedule:
+            quartz_cron_expression: "0 0 5 ? * SUN"
+            timezone_id: UTC
+            pause_status: PAUSED
+          max_concurrent_runs: 1
+          tasks:
+            - task_key: canari_env_check
+              environment_key: canari
+              spark_python_task:
+                python_file: ../src/jobs/canari_pilot.py
+                parameters: [ "--catalog", "${var.catalog}" ]
+          environments:
+            - environment_key: canari
+              spec:
+                environment_version: "6"
+                dependencies:
+                  - "-r ${workspace.file_path}/requirements/canari-pilot-env6.lock.txt"
+  test:
+    resources:
+      jobs:
+        dam_canari_pilot: *canari_pilot

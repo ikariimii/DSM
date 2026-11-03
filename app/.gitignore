@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+*.sqlite
+# frontend/dist is NOT ignored: Databricks Apps does not build frontend/ (package.json is not at
+# the app root), so the prebuilt bundle is deployed. Run `npm run build` before `bundle deploy`.

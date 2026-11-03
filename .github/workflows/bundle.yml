@@ -1,0 +1,84 @@
+# CI/CD for the bundle. Auth: GitHub OIDC -> Databricks workload identity federation for a
+# service principal (no long-lived tokens; KB rec 10). Deploys: dev on PR (validate only),
+# test on merge to main, prod on a manual, environment-protected dispatch.
+name: bundle
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Target to deploy (test|prod)
+        required: true
+        default: test
+
+permissions:
+  id-token: write      # OIDC
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # 3.11 = serverless env 2 (engine jobs), 3.12 = serverless env 6 (dam_interpretation). UNVERIFIED:
+      # env-2 Python minor taken from the KB/docs memory, not re-checked on a workspace.
+      matrix: { python: ["3.11", "3.12"] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: pip install -e ".[dev]"
+      # dam-refs is not available in CI: reference-data tests skip, the leak test still checks the
+      # catalog seed + bundle excludes; the full leak scan runs on the internal build box.
+      - run: python -m pytest -q
+      # Regenerated sample data must be byte-identical to the committed copy.
+      - run: python tools/generate_sample_data.py && git diff --exit-code -- sample_data
+
+  validate:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_AUTH_TYPE: github-oidc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+      - run: databricks bundle validate -t dev --var="warehouse_id=${{ vars.WAREHOUSE_ID }}" --var="ops_email=${{ vars.OPS_EMAIL }}"
+
+  deploy-test:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.target == 'test')
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: test
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_AUTH_TYPE: github-oidc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+      - run: databricks bundle deploy -t test --var="warehouse_id=${{ vars.WAREHOUSE_ID }}" --var="ops_email=${{ vars.OPS_EMAIL }}"
+      - run: databricks bundle run -t test dam_uc_setup
+
+  deploy-prod:
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'prod'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: prod          # protected: required reviewers (dam safety engineer + platform owner)
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_AUTH_TYPE: github-oidc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+      - run: >
+          databricks bundle deploy -t prod
+          --var="warehouse_id=${{ vars.WAREHOUSE_ID }}" --var="ops_email=${{ vars.OPS_EMAIL }}"
+          --var="service_principal_app_id=${{ vars.DATABRICKS_CLIENT_ID }}"
+          --var="ops_destination_id=${{ vars.OPS_DESTINATION_ID }}"
+          --var="life_safety_destination_id=${{ vars.LIFE_SAFETY_DESTINATION_ID }}"
+      - run: databricks bundle run -t prod dam_uc_setup

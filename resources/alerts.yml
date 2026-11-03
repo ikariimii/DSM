@@ -1,0 +1,81 @@
+# SQL alerts (v2) on gold - the ONLY notification mechanism (no SNS). Schedules are staggered
+# (different second/minute offsets) to stay well inside the per-workspace alert limits (KB rec 7): 250 concurrent
+# alert runs per workspace by default; runs over the cap are SKIPPED SILENTLY (KB 07). empty_result_state stays OK.
+# ACTION-level alarms ALSO page the independent life-safety destination; this is a monitoring
+# notification path, NOT the EAP life-safety path (see README 'Disagreements with the KB').
+resources:
+  alerts:
+    dam_action_level_unacked:
+      display_name: "[${var.catalog}] ACTION-level alarm unacknowledged"
+      warehouse_id: ${var.warehouse_id}
+      run_as:
+        service_principal_name: ${var.runtime_sp_app_id}   # member of dam-portfolio-all: counts must see every dam
+      query_text: |
+        SELECT count(*) AS n_unacked_action
+        FROM ${var.catalog}.gold.threshold_exceedances
+        WHERE level >= 2 AND unacknowledged
+      evaluation:
+        source: { name: n_unacked_action }
+        comparison_operator: GREATER_THAN
+        threshold: { value: { double_value: 0 } }
+        empty_result_state: OK
+        notification:
+          notify_on_ok: true
+          retrigger_seconds: 900
+          subscriptions:
+            - destination_id: ${var.life_safety_destination_id}
+            - user_email: ${var.ops_email}
+      schedule:
+        quartz_cron_schedule: "0 0/1 * * * ?"
+        timezone_id: UTC
+        pause_status: ${var.alert_paused}
+
+    dam_alert_level_new:
+      display_name: "[${var.catalog}] New ALERT-level exceedance"
+      warehouse_id: ${var.warehouse_id}
+      run_as:
+        service_principal_name: ${var.runtime_sp_app_id}   # member of dam-portfolio-all: counts must see every dam
+      query_text: |
+        SELECT count(*) AS n_new_alert
+        FROM ${var.catalog}.gold.threshold_exceedances
+        WHERE level = 1 AND unacknowledged AND updated_ts >= current_timestamp() - INTERVAL 30 MINUTES
+      evaluation:
+        source: { name: n_new_alert }
+        comparison_operator: GREATER_THAN
+        threshold: { value: { double_value: 0 } }
+        empty_result_state: OK
+        notification:
+          notify_on_ok: false
+          retrigger_seconds: 3600
+          subscriptions:
+            - destination_id: ${var.ops_destination_id}
+            - user_email: ${var.ops_email}
+      schedule:
+        quartz_cron_schedule: "20 1/5 * * * ?"
+        timezone_id: UTC
+        pause_status: ${var.alert_paused}
+
+    dam_data_stale:
+      display_name: "[${var.catalog}] Stale ADAS sensors"
+      warehouse_id: ${var.warehouse_id}
+      run_as:
+        service_principal_name: ${var.runtime_sp_app_id}   # member of dam-portfolio-all: counts must see every dam
+      query_text: |
+        SELECT count(*) AS n_stale
+        FROM ${var.catalog}.gold.data_freshness
+        WHERE is_stale
+      evaluation:
+        source: { name: n_stale }
+        comparison_operator: GREATER_THAN
+        threshold: { value: { double_value: 0 } }
+        empty_result_state: OK
+        notification:
+          notify_on_ok: true
+          retrigger_seconds: 21600
+          subscriptions:
+            - destination_id: ${var.ops_destination_id}
+            - user_email: ${var.ops_email}
+      schedule:
+        quartz_cron_schedule: "40 3/15 * * * ?"
+        timezone_id: UTC
+        pause_status: ${var.alert_paused}

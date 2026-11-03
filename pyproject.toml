@@ -1,0 +1,16 @@
+[project]
+name = "dam-safety"
+version = "0.1.0"
+description = "Dam safety monitoring on Databricks (formula engine, QC, alarms, interpretation)"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pandas"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyyaml>=6"]
+spark = ["pyspark>=3.5"]
+lakebase = ["psycopg[binary]>=3.1", "databricks-sdk>=0.60"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tools"]
+norecursedirs = ["qa", ".venv", "app", ".internal_test_artifacts"]

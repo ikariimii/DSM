@@ -1,0 +1,23 @@
+# Databricks Apps runtime config for the dam safety app.
+# Resources referenced by valueFrom are declared on the app in resources/dam_safety_app.yml
+# (bundle) - never hard-code IDs here. The `postgres` resource injects PGHOST/PGPORT/PGDATABASE/
+# PGUSER/PGSSLMODE automatically. Values set in the bundle's app.config.env override these.
+command:
+  - uvicorn
+  - --factory
+  - backend.main:create_app
+  - --host
+  - 0.0.0.0
+  - --port
+  - $DATABRICKS_APP_PORT
+env:
+  - name: DEMO_MODE              # QA-001: never true in a deployed app
+    value: "false"
+  - name: SQL_OBO                # SQL warehouse queried on behalf of the user (UC row filters apply)
+    value: "true"
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DAM_CATALOG            # per-target catalog; overridden by the bundle (dam_dev|dam_test|dam_prod)
+    value: dam_dev
+  - name: STATE_SCHEMA           # Lakebase schema owned by backend/repos/state.py
+    value: dam_app

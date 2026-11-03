@@ -1,0 +1,34 @@
+# Lakebase Autoscaling (postgres_projects) for the app's transactional state. One project per target.
+# The project implicitly creates branch 'production' + endpoint 'primary' + database databricks_postgres;
+# we adopt them with replace_existing to size them (docs: oltp/projects/dabs-typical-project).
+# prod: 2-8 CU, no_suspension (HA requires it). dev/test: 0.5-2 CU with scale-to-zero.
+# HA: endpoint `group` map, min = max (must currently be equal); 1 = HA off; prod 2 (primary + 1 secondary in another
+# AZ). HA forbids scale-to-zero, so prod also sets no_suspension (KB 05, Databricks SME 2026-11-02).
+# Auth: w.postgres.generate_database_credential(endpoint=...) -> 1 h token, minted per new connection.
+resources:
+  postgres_projects:
+    dam_lakebase:
+      project_id: dam-safety-${bundle.target}
+      display_name: Dam safety app (${bundle.target})
+      pg_version: 17
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: ${var.lb_min_cu}
+        autoscaling_limit_max_cu: ${var.lb_max_cu}
+  postgres_branches:
+    dam_lakebase_production:
+      branch_id: production
+      parent: ${resources.postgres_projects.dam_lakebase.name}
+      is_protected: true
+      replace_existing: true
+  postgres_endpoints:
+    dam_lakebase_primary:
+      endpoint_id: primary
+      parent: ${resources.postgres_branches.dam_lakebase_production.name}
+      endpoint_type: ENDPOINT_TYPE_READ_WRITE
+      autoscaling_limit_min_cu: ${var.lb_min_cu}
+      autoscaling_limit_max_cu: ${var.lb_max_cu}
+      no_suspension: ${var.lb_no_suspension}
+      group:
+        min: ${var.lb_ha_nodes}
+        max: ${var.lb_ha_nodes}
+      replace_existing: true
