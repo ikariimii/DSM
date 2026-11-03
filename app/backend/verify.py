@@ -2,7 +2,8 @@
 verified the formula version that produced it AND the calibration used is
 approved (not retired, no calibration_issues) AND the reading is not QC-flagged BAD/MISSING
 AND, for inclinometer rows with calib_id NULL, the formula is (INCL_PROBE_2PASS, 1.0.0) verified and the
-installation_version matches a ref.incl_installation row (§5.5 v1.4) AND, for inclinometer rows, the value is uncorrected (corrections the app cannot verify are withheld) AND, for
+installation_version equals the effective_from of the single ref.incl_installation row valid at survey time
+(effective_from <= survey_ts < effective_to, §5.5 v1.5) AND, for inclinometer rows, the value is uncorrected (corrections the app cannot verify are withheld) AND, for
 alarm events, the v1.1 lineage (calib_id + formula_id/version) is present and consistent. Otherwise the value is withheld
 (set to None) and `display_status` explains why. Raw values, units, calibration
 version and QC flags are always passed through so the user can see what exists."""
@@ -45,10 +46,19 @@ class Gate:
     def __init__(self, formulas: Iterable[dict], calibrations: Iterable[dict],
                  not_computable: Iterable[str] = (), installations: Iterable[dict] = ()):
         self.not_computable = set(not_computable)
-        # §5.5 v1.4: (instrument_id, effective_from) of every ref.incl_installation SCD2 row; an inclinometer row
-        # with calib_id NULL counts as "constants approved" only when its installation_version equals one of them
-        self.installations = {(i.get("instrument_id"), ts_key(i.get("effective_from"))) for i in installations
-                              if ts_key(i.get("effective_from")) is not None}
+        # §5.5 v1.5: ref.incl_installation SCD2 rows as instrument_id -> [(effective_from, effective_to|None)].
+        # An inclinometer row with calib_id NULL counts as "constants approved" only when exactly one row covers its
+        # survey time (half-open) and installation_version equals that row's effective_from.
+        self.installations: dict[str, list[tuple[str, str | None]]] = {}
+        for i in installations:
+            f = ts_key(i.get("effective_from"))
+            if f is None:
+                continue
+            to_raw = i.get("effective_to")
+            to = ts_key(to_raw) if to_raw not in (None, "") else None
+            if to_raw not in (None, "") and to is None:
+                continue                                   # unparseable end: never approves anything
+            self.installations.setdefault(i.get("instrument_id"), []).append((f, to))
         self.verified = {(f["formula_id"], str(f["formula_version"])) for f in formulas if f.get("verified")}
         # retired calibrations (superseded corrections) and calibrations with data issues (e.g. sign_mult in params,
         # contract.calibration) never count as approved
@@ -79,14 +89,22 @@ class Gate:
         return fid is not None and ver is not None and (fid, str(ver)) in self.verified
 
     def installation_approved(self, row: dict) -> bool:
-        """§5.5 v1.4 approval when calib_id is NULL: (formula_id, formula_version) == (INCL_PROBE_2PASS, 1.0.0)
-        joins a verified ref.formula row AND installation_version == a ref.incl_installation.effective_from for
-        that instrument. The calibration-approved clause does not apply."""
+        """§5.5 v1.5 approval when calib_id is NULL: (formula_id, formula_version) == (INCL_PROBE_2PASS, 1.0.0)
+        joins a verified ref.formula row AND exactly one ref.incl_installation row of the instrument satisfies
+        effective_from <= survey_ts < effective_to (NULL = open) AND installation_version == its effective_from.
+        No covering row (or overlapping rows) -> not approved (engine batch.installation_row_at: no row, no
+        reduction). The calibration-approved clause does not apply. Survey time is survey_ts (profile rows) or
+        event_ts (alarm episodes)."""
         fid, ver = row.get("formula_id"), row.get("formula_version")
         if (fid, str(ver)) != INCL_FORMULA or not self.formula_verified(fid, ver):
             return False
         key = ts_key(row.get("installation_version"))
-        return key is not None and (row.get("instrument_id"), key) in self.installations
+        at = ts_key(row.get("survey_ts") if row.get("survey_ts") is not None else row.get("event_ts"))
+        if key is None or at is None:
+            return False
+        cover = [(f, to) for f, to in self.installations.get(row.get("instrument_id"), [])
+                 if f <= at and (to is None or at < to)]
+        return len(cover) == 1 and cover[0][0] == key
 
     def apply(self, row: dict, keys: tuple[str, ...] = COMPUTED_KEYS) -> dict:
         st = self.status(row)
@@ -108,7 +126,22 @@ class Gate:
             st = NO_ENGINE_FORMULA
         elif ev.get("lineage_issue"):
             st = LINEAGE_INCONSISTENT
-        elif ev.get("calib_id") is None or fid is None or ver is None:
+        elif fid is None or ver is None:
+            st = LINEAGE_INCOMPLETE
+        elif ev.get("calib_id") is None and (fid, str(ver)) == INCL_FORMULA:
+            # §5.5 v1.5 inclinometer episode (calib_id NULL): approved via installation_version at event_ts; an
+            # episode without installation_version (ops.alarm_episode lacks it today) stays withheld
+            if ev.get("installation_version") is None:
+                st = LINEAGE_INCOMPLETE
+            elif not self.installation_approved(ev):
+                st = UNAPPROVED_INSTALLATION
+            elif (ev.get("qa_flag") or "").upper() in ("BAD", "MISSING"):
+                st = QC_BAD if (ev.get("qa_flag") or "").upper() == "BAD" else MISSING
+            elif ev.get("value") is None:
+                st = MISSING
+            else:
+                st = SHOWN
+        elif ev.get("calib_id") is None:
             st = LINEAGE_INCOMPLETE
         elif (fid, str(ver)) not in self.verified:
             st = UNVERIFIED_FORMULA

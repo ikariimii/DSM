@@ -125,8 +125,14 @@ def test_alarm_episode_with_lineage_is_shown():
                              "reading_qc_flag": "OK"})
     assert legacy["formula_id"] is None and g.apply_event(legacy)["display_status"] == "LINEAGE_INCOMPLETE"
     assert ct.alarm_event({**row, "qa_flag": None, "reading_qc_flag": "BAD"})["qa_flag"] is None
-    err = ct.alarm_event({**row, "reading_is_erroneous": True})
-    assert err["qa_flag"] == "BAD" and "ERRONEOUS_MARK" in err["qa_reason"]
+    # v1.5: the erroneous mark is read from ops.alarm_episode (erroneous_mark/_reason/_marked_by/_marked_ts),
+    # never from ops.reading; a legacy reading_is_erroneous column is ignored
+    assert ct.alarm_event({**row, "reading_is_erroneous": True})["qa_flag"] == "OK"
+    err = ct.alarm_event({**row, "erroneous_mark": True, "erroneous_reason": "probe fault",
+                          "erroneous_marked_by": "eng@x", "erroneous_marked_ts": "2026-11-02T00:00:00Z"})
+    assert err["qa_flag"] == "BAD" and "ERRONEOUS_MARK" in err["qa_reason"] and "probe fault" in err["qa_reason"]
+    assert (err["erroneous_mark"], err["erroneous_marked_by"]) == (True, "eng@x")
+    assert ct.alarm_event({**row, "erroneous_mark": False})["qa_flag"] == "OK"
     assert g.apply_event(err)["display_status"] == "QC_BAD"
     assert g.apply_event(ct.alarm_event({**row, "qa_flag": "MISSING"}))["display_status"] == "MISSING"
     assert g.apply_event(ct.alarm_event({**row, "qa_flag": "BAD"}))["display_status"] == "QC_BAD"
@@ -148,7 +154,7 @@ def test_sql_alarm_query_has_no_formula_or_qc_join():
     sql.t = lambda layer, name: f"{layer}.{name}"
     q = sql._alarm_sql("TRUE")
     assert "ref.calibration" not in q and "qc_flag" not in q and "cal_formula" not in q
-    assert "ops.alarm_episode e" in q and "r.is_erroneous" in q
+    assert "ops.alarm_episode e" in q and "ops.reading" not in q and "is_erroneous" not in q
 
 
 def test_retired_calibration_is_not_approved():

@@ -45,10 +45,23 @@ def _iso(d: datetime | None) -> str | None:
     return d.isoformat().replace("+00:00", "Z") if d else None
 
 
+def installation_at(rows: list[dict], instrument_id: str, at: str) -> dict | None:
+    """ref.incl_installation row valid at `at` (effective_from <= at < effective_to, NULL = open), as the engine's
+    batch.installation_row_at: None when no row covers it; ValueError when rows overlap."""
+    from .verify import ts_key
+    t = ts_key(at)
+    hit = [r for r in rows if r["instrument_id"] == instrument_id and ts_key(r["effective_from"]) <= t
+           and (r.get("effective_to") in (None, "") or t < ts_key(r["effective_to"]))]
+    if len(hit) > 1:
+        raise ValueError(f"overlapping ref.incl_installation rows for {instrument_id} at {at}")
+    return hit[0] if hit else None
+
+
 def build() -> dict:
     rnd = random.Random(20261102)
     sites, structures, instruments, calibrations, readings = [], [], [], [], []
     thresholds, pfms, alarm_events, incl_surveys = [], [], [], []
+    incl_installations: list[dict] = []   # §5.5 v1.5 ref.incl_installation (SCD2, half-open)
 
     for d in DAMS:
         dam = dict(d)
@@ -200,6 +213,14 @@ def build() -> dict:
             add_inst(iid, "inclinometer", "probe_metric", "INCL_PROBE_2PASS", "mm", "a_cum_mm", station=150.0, offset=-30.0,
                      params={"L_mm": 500.0, "K": 25000.0, "stable_from_m": 24.0, "chk_tol": 12.0,
                              "a_axis_azimuth_deg": 160.0})
+            # §5.5 v1.5: probe constants live in ref.incl_installation (SCD2); a re-survey of the casing on day 180
+            # opens a second version with the same constants (the survey on day 180 falls in the second, half-open)
+            for f, to, az in ((_ts(0), _ts(180), 160.0), (_ts(180), None, 160.0)):
+                incl_installations.append(dict(instrument_id=iid, dam_id=did, system="probe", probe_L_m=0.5,
+                                               probe_K=25000.0, raw_unit="digits", casing_depth_m=30.0,
+                                               depth_reference="top_of_casing", a0_azimuth_deg=az, sign_mult_A=1,
+                                               sign_mult_B=1, baseline_survey_id=f"{iid}-S00", spiral_survey_id=None,
+                                               stable_zone_top_m=24.0, effective_from=_iso(f), effective_to=_iso(to)))
             depths = [round(0.5 * k, 1) for k in range(1, 61)]   # 0.5..30.0 m
             prof_a = {z: rnd.gauss(0, 300) for z in depths}       # casing as-built inclination, reading units
             prof_b = {z: rnd.gauss(0, 300) for z in depths}
@@ -325,7 +346,8 @@ def build() -> dict:
                 n += 1
                 active = episode(event_id=f"EV-{n:05d}", dam_id=t["dam_id"], instrument_id=t["instrument_id"],
                                  sensor_id=r["sensor_id"], threshold_id=t["threshold_id"], reading_id=r["reading_id"],
-                                 value=r["corrected_value"], calib_id=r["calib_id"], event_ts=r["ts_utc"],
+                                 value=r["corrected_value"], metric_value=r["corrected_value"],
+                                 calib_id=r["calib_id"], event_ts=r["ts_utc"],
                                  cleared_ts=None, cal_version=r["cal_version"], formula_id=r["formula_id"],
                                  formula_version=r["formula_version"], qa_flag=r["qa_flag"], qa_reason=r["qa_reason"],
                                  message=f"{t['instrument_id']} {t['output_name']} {r['corrected_value']:.2f} {t['unit']} "
@@ -348,21 +370,28 @@ def build() -> dict:
         for s in sv[1:]:
             prof = fx.reduce_inclinometer_profile(s["rows"], baseline, cp["L_mm"], cp["K"])
             peak = max(abs(r["a_cum_mm"]) for r in prof)
+            inst_row = installation_at(incl_installations, iid, s["survey_ts"])
             for t in [ct.threshold(t) for t in thresholds if t["instrument_id"] == iid]:
-                if peak > t["upper_limit"] and t["level"] not in fired:
+                if inst_row is not None and peak > t["upper_limit"] and t["level"] not in fired:
                     fired.add(t["level"])
                     n += 1
                     alarm_events.append(episode(
                         event_id=f"EV-{n:05d}", dam_id=inst["dam_id"], instrument_id=iid, sensor_id=iid,
-                        threshold_id=t["threshold_id"], reading_id=f"{s['survey_id']}-PEAK-A", value=peak,
-                        event_ts=s["survey_ts"], cleared_ts=None, cal_version=1, calib_id=f"{iid}-C1",
+                        # v1.5 demo CSVs: reading_id is the real survey reading id (the survey), calib_id NULL and
+                        # installation_version = effective_from of the ref.incl_installation row at survey time
+                        threshold_id=t["threshold_id"], reading_id=s["survey_id"], value=peak, metric_value=peak,
+                        event_ts=s["survey_ts"], cleared_ts=None, cal_version=None, calib_id=None,
+                        installation_version=inst_row["effective_from"],
                         formula_id="INCL_PROBE_2PASS", formula_version="1.0.0", qa_flag="OK", qa_reason=None,
                         message=f"{iid} cumulative A displacement {peak:.1f} mm > L{t['level']} limit {t['upper_limit']:.1f} mm"))
     # a no-data (watchdog) event
     n += 1
     alarm_events.append(dict(event_id=f"EV-{n:05d}", dam_id="PHR", instrument_id="PHR-PZ-3", sensor_id="PHR-PZ-3",
                              threshold_id=None, threshold_version=None, level=1, limit_type=None, direction=None,
-                             rule="no_data", rule_label="no data > 48 h", evaluated=True, value=None, limit=None,
+                             # app-display-only watchdog (no reading, so no metric_value/reading_id): an episode,
+                             # not a state transition, so QA-035 (contract.check_transition) does not apply to it
+                             rule="no_data", rule_label="no data > 48 h", evaluated=True, value=None,
+                             metric_value=None, limit=None,
                              unit=None, event_ts=_iso(_ts(DAYS - 3)), cleared_ts=None, machine_state="ALERT_UNACK",
                              pfm_id="PHR-PFM-02", pfm_ids=["PHR-PFM-02"], required_actions=None, reading_id=None,
                              raise_reading_id=None, raise_cal_version=None, mixed_calibration=False, lineage_issue=None,
@@ -378,7 +407,7 @@ def build() -> dict:
                              n_test_vectors=len(vr["results"])))
     return dict(sites=sites, structures=structures, instruments=instruments, calibrations=calibrations,
                 readings=readings, thresholds=thresholds, pfms=pfms, alarm_events=alarm_events,
-                incl_surveys=incl_surveys, formulas=formulas)
+                incl_surveys=incl_surveys, incl_installations=incl_installations, formulas=formulas)
 
 
 SEED_USERS = [

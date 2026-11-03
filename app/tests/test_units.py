@@ -578,14 +578,45 @@ def test_prod_app_wiring(monkeypatch):
         main.create_app(Settings(demo_mode=False, warehouse_id=""))
 
 
-def test_mock_incl_profile_without_calibration_in_force():
+def test_mock_incl_profile_without_installation_in_force():
+    """v1.5 §5.5: constants come from the ref.incl_installation row valid at survey time; none -> no reduction."""
     d = seed.build()
-    for cal in d["calibrations"]:
-        if cal["instrument_id"] == "CRD-IN-1":
-            cal["effective_from"] = "2999-01-01T00:00:00Z"
+    for row in d["incl_installations"]:
+        if row["instrument_id"] == "CRD-IN-1":
+            row["effective_from"] = "2999-01-01T00:00:00Z"
     m = an_mod.MockAnalytics(d)
     sid = m.incl_surveys("CRD-IN-1")[-1]["survey_id"]
-    assert m.incl_profile("CRD-IN-1", sid) == []  # never reduce with a calibration that was not in force
+    assert m.incl_profile("CRD-IN-1", sid) == []  # never reduce with constants that were not in force
+    d2 = seed.build()
+    d2["incl_installations"].append({**d2["incl_installations"][0], "effective_to": None})   # overlap
+    assert an_mod.MockAnalytics(d2).incl_profile("CRD-IN-1", sid) == []
+
+
+def test_seed_v15_incl_lineage_and_alarm_rows():
+    """v1.5 demo CSV shape: calib_id NULL + installation_version (row at survey time), real reading_ids,
+    metric_value filled on every reading-driven episode."""
+    d = seed.build()
+    m = an_mod.MockAnalytics(d)
+    sv = m.incl_surveys("CRD-IN-1")
+    rows = d["incl_installations"]
+    for s in sv:
+        prof = m.incl_profile("CRD-IN-1", s["survey_id"])
+        want = seed.installation_at(rows, "CRD-IN-1", s["survey_ts"])["effective_from"]
+        assert prof and {(r["calib_id"], r["cal_version"], r["installation_version"]) for r in prof} == \
+            {(None, None, want)}
+    # the survey on the SCD2 boundary is reduced with the second (half-open) version
+    edge = [s for s in sv if s["survey_ts"] == rows[1]["effective_from"] and rows[1]["instrument_id"] == "CRD-IN-1"]
+    assert edge and m.incl_profile("CRD-IN-1", edge[0]["survey_id"])[0]["installation_version"] == rows[1]["effective_from"]
+    survey_ids = {s["survey_id"] for s in d["incl_surveys"]}
+    reading_ids = {r["reading_id"] for r in d["readings"]}
+    for e in d["alarm_events"]:
+        if e["rule"] == "no_data":
+            continue
+        assert e["metric_value"] == e["value"] is not None and "PEAK" not in e["reading_id"]
+        if e["formula_id"] == "INCL_PROBE_2PASS":
+            assert e["calib_id"] is None and e["reading_id"] in survey_ids and e["installation_version"]
+        else:
+            assert e["reading_id"] in reading_ids
 
 
 def test_incl_reduction_against_dmm_demo_hole45():

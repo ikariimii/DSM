@@ -297,12 +297,21 @@ def incl_row(row: dict) -> dict:
     return r
 
 
+# SCHEMA_CONTRACT §5.5 v1.5 naming: the stored detection_statistic key stays ZA/ZB (engine), the contract/API field
+# is lowercase za/zb. Same map as the engine's dam_safety.inclinometer.qc.API_FIELD_MAP (asserted equal in the tests);
+# no API payload carries ZA.
+API_FIELD_MAP = {"ZA": "za", "ZB": "zb"}
+ZA_UNIT = "reading units (za/zb; D' = D + za)"   # == engine qc.ZA_UNIT
+
+
 def _parse_statistic(s) -> dict:
+    """'k=v;k=v' (ref.incl_correction.detection_statistic) -> dict with API field names (ZA -> za), as the engine's
+    qc.parse_detection_statistic."""
     out = {}
     for part in str(s or "").split(";"):
         if "=" in part:
             k, v = part.split("=", 1)
-            out[k.strip()] = v.strip()
+            out[API_FIELD_MAP.get(k.strip(), k.strip())] = v.strip()
     return out
 
 
@@ -327,9 +336,9 @@ class DataIntegrityError(ValueError):
     """A stored record violates the contract (QA-036): e.g. ref.incl_correction applied=true without an independent
     review, which ck_incl_correction_applied_reviewed (02 DDL, v1.5) makes unstorable. Never mapped to a status."""
 
-    def __init__(self, code: str, record_id):
-        super().__init__(f"{code}: ref.incl_correction {record_id}")
-        self.code, self.record_id = code, record_id
+    def __init__(self, code: str, record_id, table: str = "ref.incl_correction"):
+        super().__init__(f"{code}: {table} {record_id}")
+        self.code, self.record_id, self.table = code, record_id, table
 
 
 def _reviewed(rec: dict) -> bool:
@@ -337,15 +346,45 @@ def _reviewed(rec: dict) -> bool:
     return bool(rb) and rb != rec.get("user") and bool(rec.get("reviewed_utc"))
 
 
+APPROVAL_INCONSISTENT = "APPROVAL_STATUS_INCONSISTENT"
+UNKNOWN_APPROVAL_STATUS = "UNKNOWN_APPROVAL_STATUS"
+# gold.incl_correction_status columns (v1.5) carried through incl_correction() next to the stored audit fields
+GOLD_STATUS_FIELDS = ("approval_status", "approved_by", "approved_utc", "review_rationale", "review_signature_hash")
+
+
 def approval_status(rec: dict) -> str:
-    """api_contract §4.1 / SCHEMA_CONTRACT §5.5: superseded (superseded_by set) > approved (applied AND reviewed_by
-    set AND reviewed_by != user AND reviewed_utc set) > proposed (applied=false). Anything else is not a status: an
-    applied record without that review raises DataIntegrityError (QA-036) instead of being given an invented status."""
-    if rec.get("applied") is True and not _reviewed(rec):
+    """api_contract §4.1 / SCHEMA_CONTRACT §5.5.1 (v1.5). The status comes from gold.incl_correction_status
+    (`approval_status`: superseded > approved > unreviewed_applied > proposed) when the row was read from that view;
+    a row without it (demo data) is derived with the same rule. Only proposed / approved / superseded are ever
+    returned. `unreviewed_applied` is the contract's defensive status; the app does not serve it: it raises
+    DataIntegrityError (QA-036), so the record's values are withheld. Also raised for any applied row whose own review
+    columns are incomplete (reviewed_by set and != user, reviewed_utc set, review_id set: ck_incl_correction_applied_
+    reviewed), whatever the view says, and for a view status that contradicts the row."""
+    applied = rec.get("applied") is True
+    if applied and not (_reviewed(rec) and rec.get("review_id")):
         raise DataIntegrityError(APPLIED_WITHOUT_REVIEW, rec.get("record_id"))
+    gold = rec.get("approval_status")
+    if gold is not None:
+        if gold == "unreviewed_applied":
+            raise DataIntegrityError(APPLIED_WITHOUT_REVIEW, rec.get("record_id"))
+        if gold not in APPROVAL_STATUSES:
+            raise DataIntegrityError(UNKNOWN_APPROVAL_STATUS, rec.get("record_id"))
+        if (gold == "approved" and (not applied or not rec.get("approved_by"))) or (gold == "proposed" and applied):
+            raise DataIntegrityError(APPROVAL_INCONSISTENT, rec.get("record_id"))
+        return gold
     if rec.get("superseded_by"):
         return "superseded"
-    return "approved" if rec.get("applied") is True else "proposed"
+    return "approved" if applied else "proposed"
+
+
+def derive_superseded(rows: list[dict]) -> list[dict]:
+    """v1.5 append-only versions, as gold.incl_correction_status derives it: superseded_by = the legacy column, else
+    the newest later row whose `supersedes` names this record_id. Used where the view is not available (demo)."""
+    nxt: dict = {}
+    for r in sorted(rows, key=lambda r: (str(r.get("timestamp_utc") or ""), str(r.get("record_id")))):
+        if r.get("supersedes"):
+            nxt[r["supersedes"]] = r.get("record_id")
+    return [dict(r, superseded_by=r.get("superseded_by") or nxt.get(r.get("record_id"))) for r in rows]
 
 
 def bias_proposal(rec: dict) -> dict:
@@ -359,11 +398,11 @@ def bias_proposal(rec: dict) -> dict:
     except DataIntegrityError as e:
         log.error("data integrity: %s", e)
         appr, integrity = None, e.code
-    za = _f(st.get("ZA"))
+    za = _f(st.get("za"))
     out = {
         "record_id": rec.get("record_id"), "axis": (rec.get("axis") or "").upper() or None,
         "za": za if za is not None else _f(rec.get("auto_value")),
-        "za_unit": "reading units (ZA/ZB; D' = D + ZA)",
+        "za_unit": ZA_UNIT,
         "abs_dD": _f(st.get("abs_dD")), "abs_bs": _f(st.get("abs_bs")),
         "crosscheck_verdict": st.get("crosscheck_verdict"),
         "crosscheck_diff": _f(st.get("crosscheck_diff")), "crosscheck_tol": _f(st.get("crosscheck_tol")),
@@ -373,10 +412,15 @@ def bias_proposal(rec: dict) -> dict:
         "user": rec.get("user"),
         "reviewed_by": rec.get("reviewed_by"), "reviewed_utc": rec.get("reviewed_utc"),
         "timestamp_utc": rec.get("timestamp_utc"),
+        # v1.5 versioning + approval (gold.incl_correction_status); approver fields are the view's, never the app's
+        "supersedes": rec.get("supersedes"), "review_id": rec.get("review_id"),
+        "superseded_by": rec.get("superseded_by"),
+        **{k: rec.get(k) for k in GOLD_STATUS_FIELDS[1:]},
         "evidence": st, "display_status": "UNVERIFIED", "applied_by_app": False,
     }
     if integrity:
-        out.update({k: None for k in ("za", "abs_dD", "abs_bs", "crosscheck_diff", "crosscheck_tol")},
+        out.update({k: None for k in ("za", "abs_dD", "abs_bs", "crosscheck_diff", "crosscheck_tol",
+                                      *GOLD_STATUS_FIELDS[1:])},
                    evidence={}, display_status="DATA_INTEGRITY_ERROR")
     return out
 
@@ -416,7 +460,7 @@ def bias_qc(rows: list[dict], proposals: list[dict]) -> dict:
             "suspect_flag": f"BIAS_CS_SHIFT_{ax}" in codes,
             "status": status,                       # None = the engine reported no QA-020 code for this axis
             "proposed_c": float(c) if c is not None and shown else None,
-            "proposed_c_unit": "reading units (ZA/ZB; D' = D + ZA)",
+            "proposed_c_unit": ZA_UNIT,
             "proposal_record_id": p.get("record_id") if shown else None,
             "evidence": _parse_statistic(p.get("detection_statistic")) if shown else {},
             "ranking": "SUSPECT" if status == "SUSPECT_CROSSCHECK" else ("OK" if status == "PROPOSED" else None),
@@ -437,7 +481,7 @@ def incl_correction(row: dict) -> dict:
     """ref.incl_correction row -> exactly the 23 audit fields in contract order (+ review / v1.5 fields if present)."""
     missing = [k for k in INCL_CORRECTION_FIELDS if k not in row]
     out = {k: row.get(k) for k in INCL_CORRECTION_FIELDS}
-    for k in ("reviewed_by", "reviewed_utc", "supersedes", "review_id"):   # review / v1.5 versioning columns
+    for k in ("reviewed_by", "reviewed_utc", "supersedes", "review_id", *GOLD_STATUS_FIELDS):   # review / v1.5 columns
         if k in row:
             out[k] = row[k]
     out["audit_complete"] = not missing
@@ -450,12 +494,17 @@ EPISODE_LINEAGE = ("reading_id", "cal_version", "calib_id", "formula_version", "
                    "raise_cal_version", "mixed_calibration")
 
 
+ERRONEOUS_FIELDS = ("erroneous_mark", "erroneous_reason", "erroneous_marked_by", "erroneous_marked_ts")
+
+
 def alarm_event(row: dict) -> dict:
-    """Row from ops.alarm_episode LEFT JOIN ref.threshold (id + version) LEFT JOIN ops.reading (reading_id, only
-    for the engineer's erroneous mark).
+    """Row from ops.alarm_episode LEFT JOIN ref.threshold (id + version).
 
     §4/§5 v1.4: the episode itself carries formula_id, formula_version and qa_flag (no app-side join). Its value
-    is never NULL for a reading-driven episode; a NULL is still withheld by the gate (defensive)."""
+    is never NULL for a reading-driven episode; a NULL is still withheld by the gate (defensive).
+    §4 v1.5: the engineer's erroneous mark comes from the episode's own erroneous_mark / erroneous_reason /
+    erroneous_marked_by / erroneous_marked_ts (latest ops.reading_erroneous_mark of its reading); the app no longer
+    reads ops.reading for it. A marked episode is forced to qa_flag BAD so the gate withholds its value."""
     r = threshold({**row, "value": row.get("value_limit")})  # episode `value` is the measured value
     r["limit"] = row.get("value_limit")
     r["value"] = row.get("value")
@@ -464,16 +513,33 @@ def alarm_event(row: dict) -> dict:
     r["mixed_calibration"] = bool(row.get("mixed_calibration"))
     r["formula_id"] = row.get("formula_id")
     r["lineage_issue"] = None
-    qc = row.get("qa_flag")
-    if row.get("reading_is_erroneous"):
-        qc = "BAD"
-    r["qa_flag"] = qc
-    r["qa_reason"] = (join_reasons(row.get("qa_reason"), "ERRONEOUS_MARK") if row.get("reading_is_erroneous")
+    marked = row.get("erroneous_mark") is True
+    r["erroneous_mark"] = marked
+    for k in ERRONEOUS_FIELDS[1:]:
+        r[k] = row.get(k)
+    r["qa_flag"] = "BAD" if marked else row.get("qa_flag")
+    r["qa_reason"] = (join_reasons(row.get("qa_reason"), "ERRONEOUS_MARK", row.get("erroneous_reason")) if marked
                       else row.get("qa_reason"))
-    r.pop("reading_is_erroneous", None)
     r["message"] = (f"{r.get('instrument_id')} L{r.get('level')} {r.get('rule')} limit "
                     f"{r.get('limit')} {r.get('unit') or ''} ({r.get('machine_state')})").strip()
     return r
+
+
+# ---------------------------------------------------------------- alarm transitions (§4 v1.5, QA-035)
+TRANSITION_REQUIRED = ("value", "metric_value", "reading_id")
+
+
+def check_transition(t: dict) -> dict:
+    """QA-035 (SCHEMA_CONTRACT §4 v1.5): every non-ACK ops.alarm_transition, including a manual or app-originated
+    one, must carry value, metric_value and reading_id (CHECK ck_alarm_transition_value). The app writes no
+    transitions today (an ack is Lakebase alarm_ack, turned into the ACK transition by the evaluator); any future
+    app-originated transition must pass through this guard before it is written."""
+    if str(t.get("event") or "").upper() != "ACK":
+        missing = [k for k in TRANSITION_REQUIRED if t.get(k) is None or t.get(k) == ""]
+        if missing:
+            raise DataIntegrityError(f"TRANSITION_MISSING_{'_'.join(m.upper() for m in missing)}",
+                                     t.get("transition_id"), "ops.alarm_transition")
+    return t
 
 
 # ---------------------------------------------------------------- readings

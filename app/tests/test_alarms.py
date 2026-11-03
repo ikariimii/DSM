@@ -66,3 +66,12 @@ def test_unverified_alarm_value_withheld(c):
         calib_id="STC-PZ-3-C1", formula_id="VW_PIEZO", formula_version="1.0.0", qa_flag="OK", message="t"))
     a = c.get("/api/alarms/EV-T1", user=DSO).json()
     assert a["value"] is None and a["display_status"] == "UNAPPROVED_CALIBRATION" and a["state"] == "open"
+
+
+def test_incl_alarm_gated_by_installation_version(rc):
+    """v1.5: inclinometer episodes have calib_id NULL; approved via installation_version (row valid at event_ts)."""
+    al = [a for a in rc.get("/api/alarms?dam_id=CRD").json()["alarms"] if a["instrument_id"] == "CRD-IN-1"]
+    assert al and all(a["calib_id"] is None and a["installation_version"] for a in al)
+    assert all(a["display_status"] == "VERIFIED" and a["value"] is not None and a["metric_value"] is not None
+               for a in al)
+    assert all("PEAK" not in a["reading_id"] for a in al)

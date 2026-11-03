@@ -12,7 +12,8 @@ INCL_F = [{"formula_id": "INCL_PROBE_2PASS", "formula_version": "1.0.0", "verifi
 INST = [{"instrument_id": "IN1", "effective_from": "2026-01-01T00:00:00Z", "effective_to": "2026-06-01T00:00:00Z"},
         {"instrument_id": "IN1", "effective_from": "2026-06-01T00:00:00Z", "effective_to": None}]
 ROW = {"instrument_id": "IN1", "calib_id": None, "formula_id": "INCL_PROBE_2PASS", "formula_version": "1.0.0",
-       "installation_version": "2026-06-01T00:00:00Z", "qa_flag": "OK", "correction_basis": "uncorrected"}
+       "installation_version": "2026-06-01T00:00:00Z", "survey_ts": "2026-07-01T00:00:00Z", "qa_flag": "OK",
+       "correction_basis": "uncorrected"}
 
 
 def test_ts_key_normalizes_formats():
@@ -26,7 +27,8 @@ def test_ts_key_normalizes_formats():
 def test_incl_approved_when_formula_verified_and_installation_matches():
     g = Gate(INCL_F, [], (), INST)
     assert g.status(dict(ROW)) == "VERIFIED"
-    assert g.status({**ROW, "installation_version": "2026-01-01T00:00:00Z"}) == "VERIFIED"   # older SCD2 row
+    assert g.status({**ROW, "installation_version": "2026-01-01T00:00:00Z",
+                     "survey_ts": "2026-03-01T00:00:00Z"}) == "VERIFIED"                  # older SCD2 row
     assert g.installation_approved(dict(ROW))
 
 
@@ -35,6 +37,13 @@ def test_incl_approved_when_formula_verified_and_installation_matches():
     ({"installation_version": None}, "UNAPPROVED_INSTALLATION"),                     # legacy row, no lineage
     ({"installation_version": "garbage"}, "UNAPPROVED_INSTALLATION"),
     ({"instrument_id": "IN2"}, "UNAPPROVED_INSTALLATION"),                           # another instrument's row
+    # v1.5 half-open: the version must be the row valid at survey time, not just any row of the instrument
+    ({"installation_version": "2026-01-01T00:00:00Z"}, "UNAPPROVED_INSTALLATION"),   # survey 07-01: row 2 valid
+    ({"installation_version": "2026-01-01T00:00:00Z", "survey_ts": "2026-06-01T00:00:00Z"},
+     "UNAPPROVED_INSTALLATION"),                                                       # effective_to exclusive
+    ({"installation_version": "2026-01-01T00:00:00Z", "survey_ts": "2025-12-31T23:59:59Z"},
+     "UNAPPROVED_INSTALLATION"),                                                       # before any row: no reduce
+    ({"survey_ts": None}, "UNAPPROVED_INSTALLATION"),
     ({"formula_version": "1.0.0+QA021-v1"}, "UNVERIFIED_FORMULA"),                   # v1.3 writer value
     ({"formula_id": None}, "UNVERIFIED_FORMULA"),
     ({"qa_flag": "BAD"}, "QC_BAD"),
@@ -66,19 +75,75 @@ def _rec(rid, verdict, status, ts, **kw):
             "superseded_by": None, "timestamp_utc": ts, "user": "qa", **kw}
 
 
+OK_REVIEW = dict(applied=True, reviewed_by="rev", reviewed_utc="2026-11-02T00:00:00Z", review_id="RV1")
+
+
+def test_installation_boundaries_and_overlap():
+    g = Gate(INCL_F, [], (), INST)
+    assert g.status({**ROW, "survey_ts": "2026-06-01T00:00:00Z"}) == "VERIFIED"         # effective_from inclusive
+    assert g.status({**ROW, "installation_version": "2026-01-01T00:00:00Z",
+                     "survey_ts": "2026-05-31T23:59:59Z"}) == "VERIFIED"
+    over = Gate(INCL_F, [], (), INST + [{"instrument_id": "IN1", "effective_from": "2026-05-01T00:00:00Z",
+                                          "effective_to": None}])
+    assert over.status(dict(ROW)) == "UNAPPROVED_INSTALLATION"                            # overlap: never approve
+    bad_to = Gate(INCL_F, [], (), [{"instrument_id": "IN1", "effective_from": "2026-06-01T00:00:00Z",
+                                    "effective_to": "garbage"}])
+    assert bad_to.status(dict(ROW)) == "UNAPPROVED_INSTALLATION"
+
+
+def test_incl_alarm_episode_gated_by_installation_at_event_ts():
+    g = Gate(INCL_F, [], (), INST)
+    ev = {"event_id": "E", "instrument_id": "IN1", "calib_id": None, "formula_id": "INCL_PROBE_2PASS",
+          "formula_version": "1.0.0", "installation_version": "2026-06-01T00:00:00Z",
+          "event_ts": "2026-07-01T00:00:00Z", "value": 25.0, "qa_flag": "OK", "level": 3, "rule": "value_above"}
+    assert g.apply_event(dict(ev))["display_status"] == "VERIFIED"
+    for ch, st in (({"installation_version": None}, "LINEAGE_INCOMPLETE"),        # SQL episode today: withheld
+                   ({"installation_version": "2026-01-01T00:00:00Z"}, "UNAPPROVED_INSTALLATION"),
+                   ({"qa_flag": "BAD"}, "QC_BAD"), ({"qa_flag": "MISSING"}, "MISSING"), ({"value": None}, "MISSING")):
+        out = g.apply_event({**ev, **ch})
+        assert out["display_status"] == st and out["value"] is None and out["verified"] is False
+
+
 def test_approval_status():
     assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t")) == "proposed"
-    ok = dict(applied=True, reviewed_by="rev", reviewed_utc="2026-11-02T00:00:00Z")
-    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **ok)) == "approved"
-    # QA-036: an applied record without an independent review is not given an invented status; it is a
-    # data-integrity error (ck_incl_correction_applied_reviewed makes it unstorable)
-    bad = [{**ok, "reviewed_by": "qa"}, {**ok, "reviewed_utc": None}, dict(applied=True),
-           dict(applied=True, superseded_by="b")]
+    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **OK_REVIEW)) == "approved"
+    # QA-036 / v1.5: an applied record without an independent review (incl. review_id -> audit.review_record) is
+    # not given an invented status; it is a data-integrity error (ck_incl_correction_applied_reviewed)
+    bad = [{**OK_REVIEW, "reviewed_by": "qa"}, {**OK_REVIEW, "reviewed_utc": None}, {**OK_REVIEW, "review_id": None},
+           dict(applied=True), dict(applied=True, superseded_by="b")]
     for kw in bad:
         with pytest.raises(ct.DataIntegrityError) as e:
             ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **kw))
         assert e.value.code == "APPLIED_WITHOUT_VALID_REVIEW" and e.value.record_id == "a"
-    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", superseded_by="b", **ok)) == "superseded"
+    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", superseded_by="b", **OK_REVIEW)) == "superseded"
+
+
+def test_approval_status_from_gold_view():
+    """v1.5 §5.5.1: gold.incl_correction_status.approval_status is used as is (after the row checks)."""
+    gold = dict(OK_REVIEW, approval_status="approved", approved_by="rev", approved_utc="2026-11-02T00:00:00Z")
+    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **gold)) == "approved"
+    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", approval_status="proposed")) == "proposed"
+    assert ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", approval_status="superseded")) == "superseded"
+    for kw, code in ((dict(approval_status="unreviewed_applied"), "APPLIED_WITHOUT_VALID_REVIEW"),   # never served
+                     ({**OK_REVIEW, "approval_status": "unreviewed_applied"}, "APPLIED_WITHOUT_VALID_REVIEW"),
+                     (dict(approval_status="approved"), "APPROVAL_STATUS_INCONSISTENT"),           # not applied
+                     ({**OK_REVIEW, "approval_status": "approved"}, "APPROVAL_STATUS_INCONSISTENT"),  # no approver
+                     ({**OK_REVIEW, "approval_status": "proposed"}, "APPROVAL_STATUS_INCONSISTENT"),
+                     (dict(approval_status="pending"), "UNKNOWN_APPROVAL_STATUS")):
+        with pytest.raises(ct.DataIntegrityError) as e:
+            ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **kw))
+        assert e.value.code == code
+    p = ct.bias_proposal(_rec("U", "AGREE", "PROPOSED", "t", approval_status="unreviewed_applied"))
+    assert p["approval_status"] is None and p["display_status"] == "DATA_INTEGRITY_ERROR" and p["za"] is None
+
+
+def test_derive_superseded_from_append_only_rows():
+    rows = [{"record_id": "A", "timestamp_utc": "2026-11-01"}, {"record_id": "B", "supersedes": "A",
+                                                                "timestamp_utc": "2026-11-02"},
+            {"record_id": "C", "supersedes": "A", "timestamp_utc": "2026-11-03"}]
+    out = {r["record_id"]: r["superseded_by"] for r in ct.derive_superseded(rows)}
+    assert out == {"A": "C", "B": None, "C": None}
+    assert ct.derive_superseded([{"record_id": "A", "superseded_by": "L"}])[0]["superseded_by"] == "L"
 
 
 def test_approval_statuses_are_exactly_the_api_contract_values():
@@ -87,9 +152,8 @@ def test_approval_statuses_are_exactly_the_api_contract_values():
     doc = (Path(__file__).resolve().parents[2] / "docs" / "api_contract.md").read_text()
     line = next(x for x in doc.splitlines() if "`approval_status`" in x)
     assert set(ct.APPROVAL_STATUSES) <= set(re.findall(r"`([a-z_]+)`", line))
-    ok = dict(applied=True, reviewed_by="rev", reviewed_utc="2026-11-02T00:00:00Z")
     got = {ct.approval_status(_rec("a", "AGREE", "PROPOSED", "t", **kw))
-           for kw in ({}, ok, {"superseded_by": "b"}, {**ok, "superseded_by": "b"})}
+           for kw in ({}, OK_REVIEW, {"superseded_by": "b"}, {**OK_REVIEW, "superseded_by": "b"})}
     assert got == set(ct.APPROVAL_STATUSES)
 
 
@@ -128,8 +192,7 @@ def test_bias_proposals_fields_and_agree_first():
 
 def test_bias_qc_summary_keeps_only_open_proposal_and_lists_all():
     recs = [_rec("A2", "AGREE", "PROPOSED", "2026-11-02T00:00:00Z"),
-            _rec("AP", "AGREE", "PROPOSED", "2026-11-05T00:00:00Z", applied=True, reviewed_by="rev",
-                 reviewed_utc="2026-11-05T00:00:00Z")]
+            _rec("AP", "AGREE", "PROPOSED", "2026-11-05T00:00:00Z", **OK_REVIEW)]
     a = ct.bias_qc([{"qa_reason": "BIAS_PROPOSED_A"}], recs)["axes"]["A"]
     assert a["proposal_record_id"] == "A2" and a["proposed_c"] == -6.0 and a["applied"] is False
     assert [(p["record_id"], p["approval_status"]) for p in a["proposals"]] == [("AP", "approved"), ("A2", "proposed")]
@@ -227,4 +290,4 @@ def test_correction_reads_mock_and_sql():
     seen = []
     s.q = lambda sql, p=None: seen.append((sql, p)) or [{"record_id": "R1"}]
     assert s.incl_corrections([]) == [] and not seen
-    assert [c["record_id"] for c in s.incl_corrections(["R1"])] == ["R1"] and "ref.incl_correction" in seen[0][0]
+    assert [c["record_id"] for c in s.incl_corrections(["R1"])] == ["R1"] and "gold.incl_correction_status" in seen[0][0]

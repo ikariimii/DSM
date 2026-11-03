@@ -13,9 +13,14 @@ LEVEL_NAMES = {0: "Normal", 1: "Verify", 2: "Evaluate", 3: "Act"}
 
 def gate_for(an, dam_id: str, installations: list[dict] | None = None) -> Gate:
     """Gate for one dam. Instruments whose §5.4 type has no engine formula are never shown computed values.
-    `installations`: ref.incl_installation rows for inclinometer approval when calib_id is NULL (§5.5 v1.4)."""
-    blocked = [i["instrument_id"] for i in an.instruments(dam_id) if not i.get("computable", True)]
-    return Gate(an.formulas(), an.calibrations_for_dam(dam_id), blocked, installations or [])
+    `installations`: ref.incl_installation rows for inclinometer approval when calib_id is NULL (§5.5 v1.5);
+    when omitted, the rows of every inclinometer of the dam are loaded (alarm episodes use them too)."""
+    insts = an.instruments(dam_id)
+    blocked = [i["instrument_id"] for i in insts if not i.get("computable", True)]
+    if installations is None:
+        installations = [r for i in insts if i.get("instrument_type") == "inclinometer"
+                         for r in an.incl_installations(i["instrument_id"])]
+    return Gate(an.formulas(), an.calibrations_for_dam(dam_id), blocked, installations)
 
 
 def site_or_404(an, dam_id: str) -> dict:

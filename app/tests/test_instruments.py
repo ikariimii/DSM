@@ -65,7 +65,7 @@ def test_incl_surveys_and_profile(rc):
     r = rc.get(f"/api/instruments/CRD-IN-1/incl/profile?survey_ids={ids}").json()
     assert len(r["profiles"]) == 2
     p = r["profiles"][-1]
-    assert p["unit"] == "mm" and p["cal_version"] == 1 and p["bias_applied"] is False
+    assert p["unit"] == "mm" and p["cal_version"] is None and p["bias_applied"] is False
     # bias proposal suppressed from API output (QA-020 owner decision): not at profile level, not in any row
     assert all("proposed_bias" not in q and all("proposed_bias" not in x for x in q["rows"]) for q in r["profiles"])
     assert set(p["display_status"]) == {"VERIFIED"}
