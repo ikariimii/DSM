@@ -20,9 +20,10 @@ export default function InstrumentDetail() {
           <table className="kv"><tbody>
             <tr><td>Structure</td><td>{i.structure_id}</td></tr>
             <tr><td>Station / offset</td><td>{i.station_m ?? "—"} m / {i.offset_m ?? "—"} m</td></tr>
-            <tr><td>Tip / top elevation</td><td>{i.tip_elev_m ?? "—"} m / {i.top_elev_m ?? "—"} m</td></tr>
+            <tr><td>Tip / top elevation</td><td>{i.tip_el_m ?? "—"} m / {i.top_el_m ?? "—"} m</td></tr>
             <tr><td>Output</td><td>{i.output_name} [{i.eng_unit}]</td></tr>
             <tr><td>Installed</td><td>{i.install_date || "—"} · {i.status}</td></tr>
+            {i.computable === false && <tr><td>Computation</td><td><span className="badge warn">type has no engine formula — values withheld</span></td></tr>}
           </tbody></table>
         </Card>
         <Card title="Formula">
@@ -37,15 +38,17 @@ export default function InstrumentDetail() {
         </Card>
       </div>
       <Card title="Calibration history">
-        <table><thead><tr><th>Calib</th><th>Version</th><th>Effective (UTC)</th><th>Method</th><th>Parameters</th><th>Approval</th><th>Certificate</th></tr></thead><tbody>
+        <table><thead><tr><th>Calib</th><th>Version</th><th>Effective (UTC)</th><th>Method</th><th>sign_mult / offset</th><th>Parameters</th><th>Approval</th><th>Certificate</th></tr></thead><tbody>
           {data.calibrations.map((c: any) => (
             <tr key={c.calib_id}>
-              <td>{c.calib_id}</td><td>v{c.cal_version} {c.is_current && <span className="badge ok">current</span>}</td>
+              <td>{c.calib_id}</td><td>v{c.cal_version} {c.is_current && <span className="badge ok">current</span>}{c.is_retired && <span className="badge warn">retired</span>}</td>
               <td>{utc(c.effective_from)} → {c.effective_to ? utc(c.effective_to) : "now"}</td>
               <td>{c.method || "—"}</td>
+              <td>{c.sign_mult ?? 1} / {c.offset ?? 0} {i.eng_unit}</td>
               <td><code>{Object.entries(c.params || {}).map(([k, v]) => `${k}=${v}`).join(", ")}</code></td>
-              <td>{c.approved_by ? <span className="badge ok">{c.approved_by} {utc(c.approved_at)}</span> : <span className="badge warn">NOT APPROVED — values withheld</span>}</td>
-              <td>{c.certificate || "—"}</td>
+              <td>{c.approved_by ? <span className="badge ok">{c.approved_by} {utc(c.approved_at)}</span> : <span className="badge warn">NOT APPROVED — values withheld</span>}
+                {(c.calibration_issues || []).length > 0 && <div className="badge warn" title="values withheld">calibration issues: {c.calibration_issues.join("; ")}</div>}</td>
+              <td>{c.certificate_uri || "—"}</td>
             </tr>
           ))}
         </tbody></table>
@@ -55,9 +58,10 @@ export default function InstrumentDetail() {
         <table><tbody>
           {data.thresholds.map((t: any) => (
             <tr key={t.threshold_id}>
-              <td>L{t.level}</td><td>{t.rule}</td>
-              <td>{t.upper_limit ?? t.lower_limit ?? t.rate_limit_per_day} {t.unit}{t.rule === "rate_above" ? "/day" : ""}</td>
-              <td>{(t.pfm_ids || []).join(", ")}</td><td>{t.response_action}</td>
+              <td>L{t.level}</td><td>{t.limit_type} / {t.direction}</td>
+              <td>{t.rule_label} {t.evaluated ? null : <span className="badge warn">not evaluated</span>}</td>
+              <td>{t.value} {t.unit}</td>
+              <td>{t.pfm_id || "—"}</td><td>{t.required_actions}</td>
             </tr>
           ))}
         </tbody></table>
@@ -121,10 +125,11 @@ function TimeSeries({ id }: { id: string }) {
             <Legend />
             <Line dataKey="ok" name={`verified, QC OK (${unit})`} stroke="#0b5cad" dot={false} connectNulls={false} isAnimationActive={false} />
             <Scatter dataKey="suspect" name={`verified, QC SUSPECT (${unit})`} fill="#d97706" isAnimationActive={false} />
-            {data.thresholds.filter((t: any) => t.unit === unit && t.rule !== "rate_above").map((t: any) => (
-              <ReferenceLine key={t.threshold_id} y={t.upper_limit ?? t.lower_limit} stroke={["", "#c9a400", "#e8590c", "#c92a2a"][t.level] || "#c92a2a"}
-                             strokeDasharray="6 3" label={{ value: `L${t.level} ${t.upper_limit ?? t.lower_limit} ${t.unit}`, position: "right", fontSize: 11 }} />
-            ))}
+            {data.thresholds.filter((t: any) => t.unit === unit && t.evaluated && t.limit_type === "magnitude").flatMap((t: any) =>
+              (t.direction === "abs" ? [t.value, -t.value] : [t.value]).map((y: number) => (
+                <ReferenceLine key={`${t.threshold_id}:${y}`} y={y} stroke={["", "#c9a400", "#e8590c", "#c92a2a"][t.level] || "#c92a2a"}
+                               strokeDasharray="6 3" label={{ value: `L${t.level} ${t.direction === "abs" ? "|x| " : ""}${y} ${t.unit}`, position: "right", fontSize: 11 }} />
+              )))}
             {calChanges.map((c) => (
               <ReferenceLine key={c.t} x={c.t} stroke="#6b7a89" strokeDasharray="2 2" label={{ value: `cal v${c.v}`, position: "top", fontSize: 11 }} />
             ))}
@@ -173,7 +178,7 @@ function InclinometerView({ id }: { id: string }) {
   const { data, error } = useApi<any>(chosen.length ? `/api/instruments/${id}/incl/profile?survey_ids=${chosen.join(",")}` : null);
   const series = useMemo(() => (data?.profiles || []).map((p: any) => ({
     ...p,
-    pts: p.rows.map((r: any) => ({ depth: r.depth_m, cum: r[`${axis}_cum_mm`], status: r.display_status, chk: r.qc_checksum_ok })),
+    pts: p.rows.map((r: any) => ({ depth: r.depth_m, cum: r[`cum_${axis}`], status: r.display_status, chk: r.qc_checksum_ok })),
   })), [data, axis]);
   return (
     <Card title="Inclinometer profile — cumulative displacement (mm) vs depth (m)" right={
@@ -195,6 +200,13 @@ function InclinometerView({ id }: { id: string }) {
           <b>{p.survey_id}</b> {utc(p.survey_ts)} · unit {p.unit} · cal {p.calib_id} v{p.cal_version} · {p.formula_id} v{p.formula_version}
           <Counts obj={p.display_status} /> <Counts obj={p.qa_flag} />
           {p.rows.some((r: any) => r.qc_checksum_ok === false) && <span className="badge warn">checksum outliers</span>}
+          {(p.correction_basis || []).map((b: string) => <span key={b} className="badge muted">{b}</span>)}
+          {(p.corrections || []).length > 0 && <span className="badge warn">{p.corrections.length} correction record(s) — affected depths withheld (unverified)</span>}
+          {(p.qa_reasons || []).map((q: any) => (
+            <span key={q.code} className={q.severity === "BAD" ? "badge bad" : q.severity === "SUSPECT" || q.severity === "MISSING" ? "badge warn" : "badge muted"}
+                  title={q.label || "code not in app vocabulary (shown verbatim)"}>{q.code}</span>
+          ))}
+          <BiasQc bq={p.bias_qc} />
         </div>
       ))}
       <ResponsiveContainer width="100%" height={520}>
@@ -211,7 +223,32 @@ function InclinometerView({ id }: { id: string }) {
           ))}
         </LineChart>
       </ResponsiveContainer>
-      <div className="muted">Withheld depths (unverified/unapproved/QC BAD) are gaps. Bias corrections are proposals only and are never auto-applied.</div>
+      {data?.profiles?.[0]?.correction_note && <div className="notice">{data.profiles[0].correction_note}</div>}
+      <div className="muted">Withheld depths (unverified/unapproved/QC BAD/unverified correction) are gaps. Values are uncorrected: no bias correction is applied. Engine QA-020 bias proposals are shown UNVERIFIED and are never applied.</div>
     </Card>
+  );
+}
+
+/** Engine QA-020 between-set bias QC (SCHEMA_CONTRACT §5.5 v1.2). Display only: UNVERIFIED, never applied. */
+function BiasQc({ bq }: { bq?: any }) {
+  if (!bq) return null;
+  const axes = Object.entries(bq.axes || {}).filter(([, a]: any) => a.suspect_flag || a.status);
+  if (!axes.length && !bq.stable_zone_assumed) return null;
+  return (
+    <div className="notice">
+      <b>QA-020 bias QC (engine) — UNVERIFIED, never applied</b>
+      {axes.map(([ax, a]: any) => (
+        <div key={ax}>
+          Axis {ax}: {a.suspect_flag && <span className="badge warn">suspect: checksum shift vs reference (investigate)</span>}{" "}
+          {a.status && <span className={a.status === "BAD_RESURVEY" ? "badge bad" : "badge warn"}>{a.status}{a.status === "SUSPECT_CROSSCHECK" ? " (review; no proposal)" : ""}</span>}{" "}
+          {a.status === "PROPOSED" && (a.proposed_c !== null
+            ? <span><span className="badge warn">UNVERIFIED</span> proposed c = {fmt(a.proposed_c, 2)} {a.proposed_c_unit} · record {a.proposal_record_id} · <b>not applied</b>
+                {a.evidence?.n && <span className="muted"> · n={a.evidence.n} sd={a.evidence.sd}{a.evidence.se ? ` se=${a.evidence.se}` : ""} reference {a.evidence.reference_survey_id}{a.evidence.stable_zone_top_m ? ` · stable zone from ${a.evidence.stable_zone_top_m} m` : ""}{a.evidence.params_unverified === "True" ? " · params UNVERIFIED" : ""}</span>}</span>
+            : <span className="muted">proposed c not recorded in ref.incl_correction — hidden</span>)}
+        </div>
+      ))}
+      {bq.stable_zone_assumed && <div><span className="badge muted">STABLE_ZONE_ASSUMED</span> stable zone not set; bottom intervals assumed</div>}
+      <div className="muted">{bq.note}</div>
+    </div>
   );
 }

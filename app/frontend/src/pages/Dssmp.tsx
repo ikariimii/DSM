@@ -17,9 +17,15 @@ export default function Dssmp() {
         <div className="notice">Instruments not tied to any PFM (justify or link in the DSSMP): {data.untied_instruments.join(", ")}</div>
       )}
       {data.pfms.map((p: any) => (
-        <Card key={p.pfm_id} title={`${p.pfm_id} — ${p.title}`} right={<span className="badge muted">category {p.category}</span>}>
+        <Card key={p.pfm_id} title={`${p.pfm_id} — ${p.pfm_code || ""}`} right={<span className="row">
+          <span className="badge muted">Ch.17 {p.ch17_disposition || "n/a"}</span>
+          <span className="badge muted">legacy Ch.14 category {p.legacy_ch14_category || "n/a"}</span>
+          {p.status && p.status !== "ACTIVE" && <span className="badge warn">{p.status}</span>}</span>}>
           <p>{p.description}</p>
           <table className="kv"><tbody>
+            <tr><td>Loading condition</td><td>{p.loading_condition || "—"}</td></tr>
+            <tr><td>Mechanism</td><td>{p.mechanism || "—"}{p.is_general_health ? " (general health)" : ""}</td></tr>
+            <tr><td>Effective</td><td>{utc(p.effective_from)} → {p.effective_to ? utc(p.effective_to) : "now"}</td></tr>
             <tr><td>Expected behaviour</td><td>{p.expected_behavior || "—"}</td></tr>
             <tr><td>Monitoring frequency</td><td>{p.monitoring_frequency || "—"}</td></tr>
           </tbody></table>
@@ -33,7 +39,7 @@ export default function Dssmp() {
                   <td>{l.latest ? <><Value value={l.latest.corrected_value ?? l.latest.eng_value} unit={l.latest.corrected_unit || l.latest.eng_unit}
                                              status={l.latest.display_status} calVersion={l.latest.cal_version} qa={l.latest.qa_flag} qaReason={l.latest.qa_reason} />
                     <div className="muted">{utc(l.latest.ts_utc)}</div></> : "—"}</td>
-                  <td>{l.thresholds.map((t: any) => <div key={t.threshold_id}>L{t.level} {t.rule} {t.upper_limit ?? t.lower_limit ?? t.rate_limit_per_day} {t.unit}</div>)}
+                  <td>{l.thresholds.map((t: any) => <div key={t.threshold_id}>L{t.level} {t.rule_label} {t.value} {t.unit}{t.evaluated === false && <span className="badge warn">not evaluated</span>}</div>)}
                     {l.thresholds.length === 0 && <span className="badge warn">none</span>}</td>
                 </tr>
               ))}

@@ -68,7 +68,7 @@ export default function Dam({ me }: { me: Me }) {
         <table><tbody>
           {data.alarms.filter((a: any) => a.state !== "closed").map((a: any) => (
             <tr key={a.event_id}><td><LevelBadge level={a.level} name={a.level_name} /></td><td>{a.instrument_id}</td>
-              <td>{a.display_status === "VERIFIED" ? a.message : <>{a.instrument_id} {a.rule} L{a.level} <StatusBadge status={a.display_status} /></>}</td>
+              <td>{a.display_status === "VERIFIED" ? a.message : <>{a.instrument_id} {a.rule_label || a.rule} L{a.level} <StatusBadge status={a.display_status} /></>}</td>
               <td>{a.state}</td><td>{utc(a.event_ts)}</td></tr>
           ))}
         </tbody></table>

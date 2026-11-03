@@ -79,25 +79,27 @@ function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit:
               { key: "instrument_type", type: "select", options: types }, { key: "subtype" },
               { key: "formula_id", type: "select", options: fnames }, { key: "formula_version" },
               { key: "eng_unit" }, { key: "output_name" }, { key: "station_m", type: "number" }, { key: "offset_m", type: "number" },
-              { key: "tip_elev_m", type: "number" }, { key: "top_elev_m", type: "number" }, { key: "install_date", type: "date" }]} />
+              { key: "tip_el_m", type: "number" }, { key: "top_el_m", type: "number" }, { key: "install_date", type: "date" }]} />
             <div className="muted">Allowed units by type: {Object.entries(meta.type_units).map(([k, v]: any) => `${k}: ${v.join("/")}`).join(" · ")}</div>
           </>
         )}
         {name === "calibrations" && (
           <>
-            <div className="muted">Params as JSON, e.g. {`{"method":"linear","G":0.1795,"sign_mult":-1,"R0":9082,"K":0.13,"T0":12,"tip_elev_m":266}`}. Store |G| and use sign_mult −1 for a negative manufacturer gauge factor. Required params per formula: {meta.formulas.map((f: any) => `${f.formula_id}: ${f.required_params.join(",") || "—"}`).join(" · ")}</div>
+            <div className="muted">Params as JSON, e.g. {`{"G":0.1795,"R0":9082,"K":0.13,"T0":12,"tip_el_m":266}`}. sign_mult, offset and method are calibration fields, not params (SCHEMA_CONTRACT §10 Q3). Store |G| and set sign_mult −1 for a negative manufacturer gauge factor. Required params per formula: {meta.formulas.map((f: any) => `${f.formula_id}: ${f.required_params.join(",") || "—"}`).join(" · ")}</div>
             <Rows value={data.calibrations || []} onSave={save} disabled={readOnly} cols={[
               { key: "instrument_id", type: "select", options: instIds }, { key: "cal_version", type: "number" },
               { key: "effective_from", label: "effective_from (UTC)" }, { key: "method", type: "select", options: ["linear", "poly"] },
-              { key: "params", type: "json" }, { key: "certificate" }, { key: "approved_by" }, { key: "approved_at" }]} />
+              { key: "sign_mult", type: "select", options: ["1", "-1"] }, { key: "offset", type: "number" },
+              { key: "params", type: "json" }, { key: "certificate_uri" }, { key: "approved_by" }, { key: "approved_at" }]} />
           </>
         )}
         {name === "formulas" && <FormulaCheck draftId={draftId} checks={data.formulas?.checks} onDone={reload} disabled={readOnly} />}
         {name === "thresholds" && <Rows value={data.thresholds || []} onSave={save} disabled={readOnly} cols={[
           { key: "instrument_id", type: "select", options: instIds }, { key: "level", type: "select", options: ["1", "2", "3"] },
-          { key: "rule", type: "select", options: ["value_above", "value_below", "rate_above"] },
-          { key: "upper_limit", type: "number" }, { key: "lower_limit", type: "number" }, { key: "rate_limit_per_day", type: "number" },
-          { key: "unit" }, { key: "pfm_ids", type: "json" }, { key: "response_action" }]} />}
+          { key: "limit_type", type: "select", options: ["magnitude", "rate", "cyclic"] },
+          { key: "direction", type: "select", options: ["upper", "lower", "abs"] }, { key: "value", type: "number" },
+          { key: "unit" }, { key: "pfm_id" }, { key: "required_actions" }]} />}
+        {name === "thresholds" && <div className="muted">Cyclic limits are stored but not evaluated by the alarm machine; abs limits are evaluated as |value| &gt; limit.</div>}
         {name === "data_sources" && <Rows value={data.data_sources || []} onSave={save} disabled={readOnly} cols={[
           { key: "instrument_id", type: "select", options: instIds }, { key: "source_type", type: "select", options: meta.source_types },
           { key: "path" }, { key: "table" }, { key: "column" }, { key: "raw_unit" }]} />}

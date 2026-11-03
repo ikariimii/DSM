@@ -7,6 +7,10 @@ export const STATUS_TEXT: Record<string, string> = {
   UNAPPROVED_CALIBRATION: "withheld: calibration not approved",
   QC_BAD: "withheld: QC flag BAD",
   MISSING: "withheld: reading missing",
+  CORRECTION_UNVERIFIED: "withheld: correction record not verified",
+  LINEAGE_INCOMPLETE: "withheld: alarm lineage incomplete",
+  LINEAGE_INCONSISTENT: "withheld: alarm lineage inconsistent with the reading",
+  NO_ENGINE_FORMULA: "withheld: instrument type has no engine formula",
 };
 
 export function fmt(v: number | null | undefined, digits = 3): string {

@@ -39,9 +39,14 @@ export default function Alarms() {
                   <td><Link to={`/dams/${a.dam_id}`}>{a.dam_id}</Link> / <Link to={`/instruments/${a.instrument_id}`}>{a.instrument_id}</Link></td>
                   <td>
                     {a.message}
-                    <div>value {a.value === null ? <span className="withheld">withheld</span> : <b>{fmt(a.value)} {a.unit}</b>} · limit {a.limit ?? "—"} {a.unit}</div>
+                    <div>value {a.value === null ? <span className="withheld">withheld</span> : <b>{fmt(a.value)} {a.unit}</b>} · limit {a.limit ?? "—"} {a.unit} · {a.rule_label || a.rule}
+                      {a.evaluated === false && <span className="badge warn">not evaluated</span>}</div>
                   </td>
-                  <td>cal {a.calib_id || "—"} v{a.cal_version ?? "—"} · {a.formula_id || "—"} v{a.formula_version || "—"}<div><QcBadge flag={a.qa_flag} /> <StatusBadge status={a.display_status} /></div></td>
+                  <td>reading {a.reading_id || "—"} · cal {a.calib_id || "—"} v{a.cal_version ?? "—"} · {a.formula_id || "—"} v{a.formula_version || "—"}
+                    {a.raise_reading_id && a.raise_reading_id !== a.reading_id && <div className="muted">raised on {a.raise_reading_id} (cal v{a.raise_cal_version ?? "—"})</div>}
+                    {a.mixed_calibration && <div className="badge warn">mixed calibration across episode</div>}
+                    {a.lineage_issue && <div className="badge warn">{a.lineage_issue}</div>}
+                    <div><QcBadge flag={a.qa_flag} reason={a.qa_reason} /> <StatusBadge status={a.display_status} /></div></td>
                   <td>{utc(a.event_ts)}{a.cleared_ts && <div className="muted">cleared {utc(a.cleared_ts)}</div>}</td>
                   <td>{a.state}{a.acknowledged_by && <div className="muted">ack {a.acknowledged_by}</div>}{a.closed_by && <div className="muted">closed {a.closed_by}</div>}</td>
                   <td><button className="secondary" onClick={() => setOpen(open === a.event_id ? null : a.event_id)}>{open === a.event_id ? "hide" : "details"}</button></td>
@@ -77,8 +82,9 @@ function AlarmDetail({ id, onChange }: { id: string; onChange: () => void }) {
   if (!data) return <Loading error={error} />;
   return (
     <div>
-      {data.pfm_ids?.length > 0 && <div>Linked PFMs: {data.pfm_ids.join(", ")}</div>}
-      {data.response_action && <div>Required action: <b>{data.response_action}</b></div>}
+      {data.pfm_id && <div>Linked PFM: {data.pfm_id}</div>}
+      {data.required_actions && <div>Required actions: <b>{data.required_actions}</b></div>}
+      {data.machine_state && <div className="muted">Evaluator state: {data.machine_state} (acknowledgements are recorded as ALARM_ACK in audit.event_log by the extract job; the evaluator records the transition)</div>}
       <h4>Comments</h4>
       {(data.comments || []).map((c: any) => <div key={c.id}><span className="muted">{utc(c.created_at)} {c.author}:</span> {c.body}</div>)}
       {(data.comments || []).length === 0 && <div className="muted">none</div>}
