@@ -59,7 +59,7 @@ def test_gate_incl_keys_and_events():
     assert g.apply_event(dict(base))["value"] == 9.0
     assert g.apply_event({**base, "calib_id": "C2"})["display_status"] == "UNAPPROVED_CALIBRATION"
     # no calibration lineage on the event -> withheld (accuracy over speed)
-    assert g.apply_event({**base, "calib_id": None})["display_status"] == "UNAPPROVED_CALIBRATION"
+    assert g.apply_event({**base, "calib_id": None})["display_status"] == "LINEAGE_INCOMPLETE"
     e = g.apply_event({**base, "qa_flag": "BAD", "message": "X 9.0 mm > L1 limit 8.0 mm", "level": 1,
                        "rule": "value_above", "instrument_id": "X"})
     assert e["value"] is None and e["display_status"] == "QC_BAD"
@@ -523,13 +523,13 @@ def test_sql_analytics_obo_and_queries(sql):
     assert any(r[1].get("lim") == 5 and r[1]["start"] is None for r in rec)
 
 
-def test_sql_analytics_service_principal_fallback(sql):
+def test_sql_analytics_requires_user_token(sql):
+    """§6 / §7.3: gold is read only on behalf of the signed-in user; no service-principal fallback."""
+    from fastapi import HTTPException
     rec, kw = sql
-    an_mod.SqlAnalytics(Settings(demo_mode=False, warehouse_id="w", sql_on_behalf_of_user=False), "tok").sites()
-    assert "access_token" not in kw and callable(kw["credentials_provider"])
-    kw.clear()
-    an_mod.SqlAnalytics(Settings(demo_mode=False, warehouse_id="w"), None).sites()
-    assert "credentials_provider" in kw
+    with pytest.raises(HTTPException) as e:
+        an_mod.SqlAnalytics(Settings(demo_mode=False, warehouse_id="w"), None).sites()
+    assert e.value.status_code == 401 and "credentials_provider" not in kw
 
 
 def test_mock_analytics_edges():
@@ -632,12 +632,21 @@ def test_onboarding_sign_mult_checks():
     draft = {"instruments": [{"instrument_id": "X-PZ-1", "structure_id": "S", "instrument_type": "piezometer",
                               "formula_id": "VW_PIEZO", "formula_version": "1.0.0", "eng_unit": "m"}],
              "calibrations": [{"instrument_id": "X-PZ-1", "cal_version": 1,
-                               "params": {"method": "linear", "G": -0.18, "sign_mult": 3, "R0": 1, "T0": 1, "K": 0,
+                               "sign_mult": 3, "offset": "x",
+                               "params": {"method": "linear", "G": -0.18, "R0": 1, "T0": 1, "K": 0,
                                           "tip_elev_m": 1}}]}
     msgs = [i["message"] for i in ob.validate(draft, set(), fx.formula_catalog() if hasattr(fx, "formula_catalog") else [])
             if i["step"] == "calibrations"]
     assert any("sign_mult must be +1 or -1" in m for m in msgs)
     assert any("store |G| with sign_mult -1" in m for m in msgs)
+    assert any("offset must be numeric" in m for m in msgs)
+    # §10 Q3: sign_mult / offset in params is an error; method must be linear|poly
+    draft["calibrations"][0].update(sign_mult=-1, offset=0, params={"method": "cubic", "G": 0.18, "sign_mult": -1,
+                                                                     "offset": 1, "R0": 1, "T0": 1, "K": 0})
+    msgs = [i["message"] for i in ob.validate(draft, set()) if i["step"] == "calibrations"]
+    assert any("sign_mult belongs in the calibration's sign_mult field" in m for m in msgs)
+    assert any("offset belongs in the calibration's offset field" in m for m in msgs)
+    assert any("method must be one of linear|poly" in m for m in msgs)
 
 
 def test_contract_reading_maps_ferc_view_and_erroneous_mark():
@@ -647,6 +656,6 @@ def test_contract_reading_maps_ferc_view_and_erroneous_mark():
     assert (r["ts_utc"], r["corrected_value"], r["corrected_unit"], r["qa_flag"]) == ("t", 1.0, "kPa", "OK")
     r = ct.reading({"reading_ts": "t", "value": 1.0, "unit": "kPa", "qc_flag": "SUSPECT", "qc_reason": "SPIKE",
                     "is_erroneous": True, "erroneous_reason": "probe swap"})
-    assert r["qa_flag"] == "BAD" and r["qa_reason"] == "SPIKE;ERRONEOUS_MARK;probe swap"
+    assert r["qa_flag"] == "BAD" and r["qa_reason"] == "SPIKE,ERRONEOUS_MARK,probe swap"   # §3 comma-joined
 
 

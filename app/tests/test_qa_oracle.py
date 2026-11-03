@@ -128,8 +128,10 @@ def test_not_displayed_really_absent():
 
 
 def fx_types():
+    # types the app can compute: §5.4 types with a non-empty engine_formulas list (others are listed, never computed)
     from backend import onboarding as ob
-    return ob.TYPE_UNITS.keys()
+    from backend.repos import contract as ct
+    return [t for t in ob.TYPE_UNITS if ct.type_is_computable(t)]
 
 
 def test_private_inclinometer_cases_by_path():

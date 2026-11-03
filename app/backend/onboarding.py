@@ -10,6 +10,7 @@ import re
 from datetime import datetime, timezone
 
 from . import formulas as fx
+from .repos import contract as ct
 from .repos.state import ROLE_RANK
 
 STEPS = ("details", "structures", "instruments", "calibrations", "formulas", "thresholds",
@@ -19,15 +20,23 @@ HAZARD = ("High", "Significant", "Low")
 ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,31}$")
 DAM_RE = re.compile(r"^[A-Z0-9]{2,8}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-# allowed display units per instrument type (must match the formula's output unit family)
+# allowed display units per instrument type: the §5.4 ref.instrument_type vocabulary (SCHEMA_CONTRACT v1.1).
+# Kept as a literal: the root test tests/test_instrument_vocab.py parses it with ast.literal_eval, and
+# app/tests/test_onboarding.py::test_type_units_match_contract_vocab keeps it equal to ct.INSTRUMENT_TYPES.
 TYPE_UNITS = {
     "piezometer": {"m", "kPa"}, "reservoir_level": {"m"}, "seepage_weir": {"L/s", "ft3/s"},
-    "inclinometer": {"mm"}, "crackmeter": {"mm"}, "settlement": {"mm"}, "extensometer": {"mm"},
+    "inclinometer": {"mm"}, "crackmeter": {"mm"}, "extensometer": {"mm"}, "settlement": {"mm"},
+    "strain_gauge": {"microstrain"}, "pressure_cell": {"kPa"}, "load_cell": {"kN"},
+    "tiltmeter": {"arcsec", "mm/m"}, "plumbline": {"mm"}, "accelerometer": {"cm/s2", "g"}, "thermometer": {"degC"},
 }
+# ref.instrument spelling (§5) is tip_el_m / top_el_m; the older app spelling is accepted on import and renamed
 CSV_COLUMNS = ("instrument_id", "structure_id", "instrument_type", "subtype", "formula_id", "formula_version",
-               "eng_unit", "output_name", "station_m", "offset_m", "tip_elev_m", "top_elev_m", "install_date")
+               "eng_unit", "output_name", "station_m", "offset_m", "tip_el_m", "top_el_m", "install_date")
+CSV_ALIASES = {"tip_elev_m": "tip_el_m", "top_elev_m": "top_el_m"}
 CSV_REQUIRED = ("instrument_id", "structure_id", "instrument_type", "formula_id", "formula_version", "eng_unit")
-CSV_FLOATS = ("station_m", "offset_m", "tip_elev_m", "top_elev_m")
+CSV_FLOATS = ("station_m", "offset_m", "tip_el_m", "top_el_m")
+LIMIT_TYPES = ("magnitude", "rate", "cyclic")      # §4 ref.threshold.limit_type
+DIRECTIONS = ("upper", "lower", "abs")              # §4 ref.threshold.direction
 METHOD_FORMULAS = ("VW_PIEZO",)  # linear (G) or polynomial (A, B) per calibration 'method'
 SOURCE_TYPES = ("logger_file", "manual", "api", "survey_file")
 
@@ -47,7 +56,7 @@ def parse_instrument_csv(text: str, max_rows: int = 5000) -> dict:
     issues: list[dict] = []
     rows: list[dict] = []
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
-    header = [h.strip() for h in (reader.fieldnames or [])]
+    header = [CSV_ALIASES.get(h.strip(), h.strip()) for h in (reader.fieldnames or [])]
     missing = [c for c in CSV_REQUIRED if c not in header]
     if missing:
         return {"rows": [], "issues": [issue("instruments", "error", f"missing columns: {', '.join(missing)}")]}
@@ -59,7 +68,8 @@ def parse_instrument_csv(text: str, max_rows: int = 5000) -> dict:
         if n - 1 > max_rows:
             issues.append(issue("instruments", "error", f"more than {max_rows} rows"))
             break
-        r = {k.strip(): (v or "").strip() for k, v in raw.items() if k and k.strip() in CSV_COLUMNS}
+        r = {CSV_ALIASES.get(k.strip(), k.strip()): (v or "").strip() for k, v in raw.items()
+             if k and CSV_ALIASES.get(k.strip(), k.strip()) in CSV_COLUMNS}
         ref = f"line {n}"
         bad = False
         for c in CSV_REQUIRED:
@@ -143,7 +153,11 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
             out.append(issue("instruments", "error", f"unknown structure_id {i.get('structure_id')}", ref))
         allowed = TYPE_UNITS.get(i.get("instrument_type"))
         if allowed is None:
-            out.append(issue("instruments", "error", f"unsupported instrument_type {i.get('instrument_type')}", ref))
+            out.append(issue("instruments", "error", f"unsupported instrument_type {i.get('instrument_type')} "
+                             "(not in ref.instrument_type, SCHEMA_CONTRACT §5.4)", ref))
+        elif not ct.type_is_computable(i["instrument_type"]):
+            out.append(issue("instruments", "error", f"{i['instrument_type']} has no engine formula "
+                             "(ref.instrument_type.engine_formulas is empty), so the app cannot compute it", ref))
         elif i.get("eng_unit") not in allowed:
             out.append(issue("instruments", "error",
                              f"unit {i.get('eng_unit')!r} not valid for {i['instrument_type']} ({sorted(allowed)})", ref))
@@ -160,17 +174,26 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
             continue
         f = fx.get_formula(i.get("formula_id"), str(i.get("formula_version")))
         for c in mine:
-            params = c.get("params") or {}
+            params = ct.normalize_params(c.get("params"))
+            for k in ct.CAL_COLUMNS_NOT_PARAMS:   # §10 Q3: calibration columns, never params
+                if k in params:
+                    out.append(issue("calibrations", "error",
+                                     f"{k} belongs in the calibration's {k} field, not in params (SCHEMA_CONTRACT §10 Q3)",
+                                     ref))
+            method = c.get("method") or params.get("method")
+            if method is not None and method not in ct.CAL_METHODS:
+                out.append(issue("calibrations", "error", f"method must be one of {'|'.join(ct.CAL_METHODS)}", ref))
+            try:
+                fx.check_sign_mult(c.get("sign_mult", 1) if c.get("sign_mult") is not None else 1)
+            except ValueError as e:
+                out.append(issue("calibrations", "error", str(e), ref))
+            if c.get("offset") not in (None, "") and not _isnum(c.get("offset")):
+                out.append(issue("calibrations", "error", "offset must be numeric", ref))
             req = list(f.required_params if f else [])
             if f is not None and f.formula_id in METHOD_FORMULAS:
-                req += ["A", "B"] if params.get("method") == "poly" else ["G"]
-            if f is not None and f.formula_id in METHOD_FORMULAS:
-                try:
-                    fx.check_sign_mult(params.get("sign_mult", 1))
-                except ValueError as e:
-                    out.append(issue("calibrations", "error", str(e), ref))
+                req += ["A", "B"] if method == "poly" else ["G"]
                 g = params.get("G")
-                if params.get("method") != "poly" and _isnum(g) and float(g) < 0:
+                if method != "poly" and _isnum(g) and float(g) < 0:
                     out.append(issue("calibrations", "warning",
                                      "G is negative: store |G| with sign_mult -1 (CONVENTIONS.md)", ref))
             for p in req:
@@ -186,7 +209,7 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
             if not c.get("approved_by"):
                 out.append(issue("calibrations", "warning",
                                  "calibration not approved: computed values will be withheld until approved", ref))
-            if not c.get("certificate"):
+            if not c.get("certificate_uri"):
                 out.append(issue("calibrations", "warning", "no calibration certificate reference", ref))
         if len({c.get("cal_version") for c in mine}) != len(mine):
             out.append(issue("calibrations", "error", "duplicate cal_version", ref))
@@ -203,7 +226,7 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
         if app is not None and not app["verified"] and f"{fid}:{ver}" in fcheck and fcheck[f"{fid}:{ver}"].get("verified"):
             out.append(issue("formulas", "error", f"{fid} v{ver}: stored check disagrees with re-run", fid))
 
-    ths = draft.get("thresholds") or []
+    ths = [_canonical_threshold(t) for t in draft.get("thresholds") or []]
     by_inst: dict[str, list[dict]] = {}
     for t in ths:
         ref = t.get("instrument_id")
@@ -216,29 +239,32 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
                              f"threshold unit {t.get('unit')!r} differs from instrument unit {inst.get('eng_unit')!r}", ref))
         if t.get("level") not in (1, 2, 3):
             out.append(issue("thresholds", "error", "level must be 1, 2 or 3", ref))
-        if t.get("rule") not in ("value_above", "value_below", "rate_above"):
-            out.append(issue("thresholds", "error", f"unsupported rule {t.get('rule')}", ref))
-        lim = t.get("upper_limit") if t.get("rule") != "value_below" else t.get("lower_limit")
-        if t.get("rule") == "rate_above":
-            lim = t.get("rate_limit_per_day")
-        try:
-            float(lim)
-        except (TypeError, ValueError):
-            out.append(issue("thresholds", "error", "limit must be numeric", ref))
+        if t.get("limit_type") not in LIMIT_TYPES:
+            out.append(issue("thresholds", "error", f"limit_type must be one of {'|'.join(LIMIT_TYPES)}", ref))
+        if t.get("direction") not in DIRECTIONS:
+            out.append(issue("thresholds", "error", f"direction must be one of {'|'.join(DIRECTIONS)}", ref))
+        if not _isnum(t.get("value")):
+            out.append(issue("thresholds", "error", "limit value must be numeric", ref))
             continue
-        if not t.get("response_action"):
-            out.append(issue("thresholds", "warning", f"L{t.get('level')} has no response action", ref))
+        if t.get("limit_type") == "cyclic":
+            out.append(issue("thresholds", "warning",
+                             f"L{t.get('level')} cyclic limit is not evaluated by the alarm machine (§10 Q7)", ref))
+        if t.get("direction") == "abs" and float(t["value"]) < 0:
+            out.append(issue("thresholds", "error", "abs limit must be >= 0", ref))
+        if not t.get("required_actions"):
+            out.append(issue("thresholds", "warning", f"L{t.get('level')} has no required actions", ref))
         by_inst.setdefault(ref, []).append(t)
     for ref, lst in by_inst.items():
-        for rule in ("value_above", "value_below"):
-            key = "upper_limit" if rule == "value_above" else "lower_limit"
-            lv = sorted((t["level"], float(t[key])) for t in lst if t.get("rule") == rule)
-            vals = [v for _, v in lv]
-            ordered = vals == sorted(vals) if rule == "value_above" else vals == sorted(vals, reverse=True)
-            if not ordered:
-                out.append(issue("thresholds", "error", f"{rule} limits are not monotonic by level", ref))
-            if len({lv_[0] for lv_ in lv}) != len(lv):
-                out.append(issue("thresholds", "error", f"duplicate {rule} level", ref))
+        for lt in ("magnitude", "rate"):
+            for dr in DIRECTIONS:
+                lv = sorted((t["level"], float(t["value"])) for t in lst
+                            if t.get("limit_type") == lt and t.get("direction") == dr)
+                vals = [v for _, v in lv]
+                ordered = vals == sorted(vals, reverse=True) if dr == "lower" else vals == sorted(vals)
+                if not ordered:
+                    out.append(issue("thresholds", "error", f"{lt} {dr} limits are not monotonic by level", ref))
+                if len({lv_[0] for lv_ in lv}) != len(lv):
+                    out.append(issue("thresholds", "error", f"duplicate {lt} {dr} level", ref))
     for i in insts:
         if i["instrument_id"] not in by_inst:
             out.append(issue("thresholds", "warning", "no thresholds defined", i["instrument_id"]))
@@ -284,7 +310,8 @@ def golive_payload(draft: dict) -> dict:
     site["lat"], site["lon"] = float(site["lat"]), float(site["lon"])
     site["status"] = "ACTIVE"
     structures = [{**s, "dam_id": did} for s in draft.get("structures") or []]
-    instruments = [{**i, "dam_id": did, "formula_version": str(i["formula_version"]), "status": "ACTIVE",
+    instruments = [{**{CSV_ALIASES.get(k, k): v for k, v in i.items()}, "dam_id": did,
+                    "formula_version": str(i["formula_version"]), "status": "ACTIVE",
                     "parent_id": None, "replaced_by": None} for i in draft.get("instruments") or []]
     calibrations = []
     for c in draft.get("calibrations") or []:
@@ -293,26 +320,45 @@ def golive_payload(draft: dict) -> dict:
         calibrations.append({"calib_id": c.get("calib_id") or f"{c['instrument_id']}-C{v}",
                              "instrument_id": c["instrument_id"], "sensor_id": c["instrument_id"], "cal_version": v,
                              "effective_from": c["effective_from"], "effective_to": None, "is_current": True,
+                             "is_retired": False,
                              "formula_id": inst["formula_id"], "formula_version": inst["formula_version"],
                              "params": {k: float(x) if isinstance(x, (int, float, str)) and _isnum(x) else x
                                         for k, x in (c.get("params") or {}).items()},
-                             "method": c.get("method"), "certificate": c.get("certificate"),
+                             "sign_mult": int(float(c["sign_mult"])) if c.get("sign_mult") not in (None, "") else 1,
+                             "offset": _f(c.get("offset")) or 0.0,
+                             "method": c.get("method") or (c.get("params") or {}).get("method"),
+                             "certificate_uri": c.get("certificate_uri"),
                              "approved_by": c.get("approved_by"), "approved_at": c.get("approved_at")})
     thresholds = []
-    for n, t in enumerate(draft.get("thresholds") or [], start=1):
+    for n, t in enumerate(map(_canonical_threshold, draft.get("thresholds") or []), start=1):
         inst = next(i for i in instruments if i["instrument_id"] == t["instrument_id"])
+        # canonical ref.threshold columns (SCHEMA_CONTRACT v1.1 §4)
         thresholds.append({"threshold_id": t.get("threshold_id") or f"{t['instrument_id']}-T{t['level']}-{n}",
-                           "instrument_id": t["instrument_id"], "dam_id": did, "output_name": inst.get("output_name"),
-                           "level": int(t["level"]), "rule": t["rule"],
-                           "upper_limit": _f(t.get("upper_limit")), "lower_limit": _f(t.get("lower_limit")),
-                           "rate_limit_per_day": _f(t.get("rate_limit_per_day")), "unit": t["unit"],
+                           "threshold_version": 1, "instrument_id": t["instrument_id"], "dam_id": did,
+                           "output_name": inst.get("output_name"), "level": int(t["level"]),
+                           "limit_type": t["limit_type"], "direction": t["direction"], "value": _f(t["value"]),
+                           "unit": t["unit"],
                            "effective_from": t.get("effective_from") or datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z"),
-                           "effective_to": None, "pfm_ids": t.get("pfm_ids") or [],
-                           "response_action": t.get("response_action")})
+                           "effective_to": None, "is_current": True, "pfm_id": t.get("pfm_id"),
+                           "required_actions": t.get("required_actions")})
     return {"dam_id": did, "sites": [site], "structures": structures, "instruments": instruments,
             "calibrations": calibrations, "thresholds": thresholds, "pfms": [],
             "data_source_map": [{**m, "dam_id": did} for m in draft.get("data_sources") or []],
             "users": draft.get("users") or []}
+
+
+def _canonical_threshold(t: dict) -> dict:
+    """Draft threshold -> canonical §4 fields. Legacy drafts (rule/upper_limit/...) are converted by the contract
+    adapter; canonical drafts pass through unchanged (limit_type/direction lower-cased)."""
+    t = dict(t)
+    if not t.get("limit_type") and t.get("rule"):
+        c = ct.threshold(t)
+        t.update(limit_type=c["limit_type"], direction=c["direction"], value=c["value"], pfm_id=c.get("pfm_id"),
+                 required_actions=c.get("required_actions"))
+    for k in ("limit_type", "direction"):
+        if isinstance(t.get(k), str):
+            t[k] = t[k].strip().lower()
+    return t
 
 
 def _isnum(x) -> bool:
