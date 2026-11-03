@@ -289,3 +289,197 @@ INFO notes:
 
 **Rerun:**
 - `cd /workspace/dam-safety-app && app/.venv/bin/python -m pytest -q -p no:cacheprovider qa/test_toa5_adversarial.py qa/test_inclinometer_bias_rules.py qa/test_restricted_guard.py`
+
+## 2026-11-02 19:55 EST: Fix verification (QA-016..022, QA-003/009/014, bundle_config), QA-021 sign convention, QA-020 thresholds, T16
+Snapshot 19:49:45 EST; other agents were editing during the run, so counts are for that time.
+
+**Reruns:** verify.py **75 PASS / 0 FAIL** (SOURCE 38, CONST 10, SYNTHETIC 6, RULE 4, USERTOOL 17, plus INFO). qa/ **115 passed, 2 xfailed** (both strict, see below). app/ **190 passed** (the 6 v1.1-migration failures seen at 19:4x are gone). root tests/ **322 passed, 3 failed, 1 skipped**. testonly_restricted/ 5 passed. tests/test_bundle_config.py 15 passed. Guard rebuilt 19:38 (98 files, 58 names); scan **0 hits**.
+
+**Root failures (open):**
+- `test_license_leak::test_catalog_seed_in_sync_with_manifests`: `sql/seed/dataset_catalog.csv` is missing DS-INC-M2007-DMM-BIASSHIFT. Re-run tools/dataset_catalog.py (Data Architect).
+- `test_license_leak::test_sync_excludes_cover_gitignore_licensing_patterns`: `node_modules/` is in .gitignore but not in the sync excludes (DA / App Dev).
+- `test_instrument_vocab::test_app_onboarding_types_and_units_are_in_vocab`: `ast.literal_eval` fails on a DictComp at line 24 of the app constant it parses, so the test needs updating for the new app code (App Dev / DA).
+
+### QA-021 sign convention: NOT CLOSED
+The procedures/ and inclinometers/ copies are now byte-identical (19:44:57). The new §5 paragraph defines Δ = suspect − reference, bs = Δ0+Δ180 and ZA = −bs (= −ΔD when the cross-check agrees). That is consistent with §7.1 line 171, verify.py T16 (`ZA = -dD`) and the engine's numeric output (T16a engine ZA −6.875; synthetic +6 gives ZA −6). The app has no ZA function. But mixed wording remains, and per the brief that is a defect:
+1. §5 row line 115 still opens "Add c digits to A0 (GTILT `ZA=c` …)" and ends "Never set c just to make…". `c` is no longer defined.
+2. §7.1 intro line 166: "The ZA sign is QA-021 and is not settled here." This is stale.
+3. §7.1(v) line 171: "|c| ≤ 25". It should be |ZA| (= |ΔD|).
+4. `bs` has two definitions: line 115 bs = Δ0+Δ180 (the checksum change), and line 171 "= bs = BSE/(N×C)" (a D-profile quantity, Mikkelsen p6). In the DMM example they differ: −7.94 vs −5.31.
+5. §5 line 115 says the worked example "matches verify T6e". It does not. T6e is the synthetic dataset (4.00 mm corrected, raw 5.20, 20 intervals); the worked example is 50 intervals with 3.0/0.0/6.0 mm.
+6. verify.py T15c text "sign of the entered value is QA-021" and T15e text "Procedure sec.5 sizes c = d(0-pass)+d(180-pass)" are stale.
+7. The engine uses the opposite naming: `qc.py` mean_dD = D_reference − D_suspect, `za_proposed_c` "ZA/ZB = c, D' = D + c"; `corrections.py` docstring "D' = D + c, c = FULL value added to A0 [procedure §5.1]" (there is no §5.1). The numbers agree; the names do not.
+- The QA test file had the same problem (Δ = ref − suspect, ZA = c). It is fixed in this entry.
+
+**Mikkelsen 2003 p7 (page image /tmp/mk03p7-07.png): VERIFIED as quoted.** "progressively negative indication of displacements, 20 mm by 1998"; "the last data set being corrected −22"; "a total positive displacement of 5 mm"; "12 −34 = −22, a correction value"; "generally less than 25 units". The inference that removing a negative bias moves the profile positive (ZA = −bs) is consistent with p6, where BSE = −10 mm is the *error*. Caveat (INFO): p7 itself calls −22 "a correction value" and says the set was "corrected −22", which on its face reads as ZA = −22. So the source wording is ambiguous, and Mikkelsen's subtraction direction for 12/−34 is unstated. The procedure already marks this UNVERIFIED, and ΔD would be 46.
+
+**T6e / §5 worked example: arithmetic VERIFIED independently** with app `inc_deviation` (L 500 mm, K 25000, ref A0 500/A180 −480, suspect A0 506, 50 intervals): raw top 3.000 mm, ZA −6 gives 0.000 mm, ZA +6 gives 6.000 mm. verify T6e itself (4.00 = 4.00, raw 5.20) also reproduced in qa/. These are two different cases (defect 5 above).
+
+**GTILT <1% quote:** VERIFIED at PDF p45 [printed p6-11] (earlier entry). §5/§7 AND wording is present.
+
+### T16 (Inclinometer Specialist §5 implementation): VERIFIED, with an open item
+- T16a +7 bias: ΔD 6.875, bs 7.125, tol 2.625: CORRECT, ZA −6.875.
+- T16b Mikkelsen 2007 DMM A: ΔD −5.3125, bs −7.9375, SE 0.7456, tol max(2.0, 3·SE) = 2.2369, diff 2.625: SUSPECT. Inputs checked cell by cell against the PDF p16 image.
+- T16c S3: no correction.
+- **Open (engineering judgment, production blocker): QA-024.** The T16b verdict depends on the UNVERIFIED tolerance. It flips to CORRECT at tol_abs ≥ 2.625 or tol_k > 3.5205 (exact; the procedure's "≥2.63 / ≥3.52" is imprecise, because tol_k = 3.52 still gives SUSPECT). It needs a sourced value or explicit Geotech-lead sign-off before production.
+- **New QA-023 (Medium, Inclinometer Specialist):** engine `qc.between_set_bias_qc` has no §5 cross-check (gate iv uses equal_opposite_ratio 0.5). It returns PROPOSED ZA +5.3125 on the DMM case, where §5/T16b say SUSPECT. Strict xfail `test_c_dmm_engine_does_not_propose`.
+
+### QA-020 thresholds (§7.1): test updated, item stays OPEN (app)
+- `qa/test_inclinometer_bias_rules.py` was rewritten (backup /tmp/test_inclinometer_bias_rules.pre1950.py). It uses one convention (Δ = suspect − reference, ΔD = mean(Δ0−Δ180), bs = mean(Δ0+Δ180), ZA = −ΔD) and the §7.1 parameters (CHK 10/20, SD ≤ 8/16, |ΔD| ≥ 3·SD/√n, n ≥ 5, |ZA| ≤ 25, cross-check max(2.0, 3·SE)). The reference is the baseline: workbook S1 vs suspect S3, and synthetic "0" vs "2".
+- The old QA "spread ≤ 2" conflicts with the source: the DMM example SDs are 2.983 (A) and 4.544 (B) (verify T15d, reproduced).
+- S1/S3 result: |Δ mean CS| 90, so SUSPECT. Bottom-5 fallback zone SD 33.3 > 8, so NO_PROPOSAL. The engine agrees (SUSPECT, NO_PROPOSAL).
+- Strict xfail `test_a_s3_app_flags_between_set_suspect` now uses that real baseline/suspect pair. The positive control passes and the app returns no between-set flag.
+
+### USERTOOL relabel (CONVENTIONS.md: the workbook is AI-made, layout reference only)
+- qa/ bias tests use workbook readings only as real input, never `wb_*` result columns. The docstring now says so.
+- `testonly_restricted/test_inclinometer_usertool.py` compared the engine against workbook values with the docstring "vs the user's workbook worked values". It is relabelled "REGRESSION checks … does NOT verify either" (backup /tmp/test_inclinometer_usertool.pre1955.py).
+- tests/test_inclinometer_geotech_answers.py (workbook *import profile*) is layout-only. OK.
+- **Open (DA):** `docs/VERIFICATION.md` line 13 lists "internal workbook values in testonly_restricted/" in the §1 VERIFIED table. Move it to a regression-only row.
+- verify.py keeps USERTOOL as a separate class and states "Only [SOURCE] cases are verification". OK.
+
+### Item 2 / item 3 status (from the 19:4x checks, unchanged)
+- **QA-017 and QA-019: CLOSED.**
+- **QA-018:** reader CLOSED; the landing residual (`toa5_landing.py` ignores warnings, no dedup) stays OPEN with the DA.
+- **QA-016:** docs CLOSED; manuals not in dam-refs (INFO).
+- **QA-022:** doc CLOSED; harness `/workspace/oss-review/verify/verify_pins.py` still aborts (owner unassigned).
+- The adversarial diff against /tmp/test_toa5_adversarial.orig.py shows no assertion weakened beyond the strict-reject default. proposed_bias suppression is confirmed in the API, contract and frontend.
+- **QA-003: NOT CLOSED.** Catalogs and the 7 schemas agree; audit.review_record, rpt.dssmr and rpt.dssmr_draft exist. But SCHEMA_CONTRACT is still "PROPOSED v1.1", says "all additive except qa_reason" while its tables carry renames (tip_el_m, certificate_uri, cum_a), contains v1.2 sections, and has no App Dev or QA sign-off.
+- **QA-014: CLOSED.** Enforced at ingestion (tools/dataset_catalog.py and seed job).
+- **QA-009: CLOSED.** LF only, added_by present; "unknown" attribution is INFO.
+- **bundle_config: CLOSED** (15 passed).
+- `00_catalog_schemas.sql` comment cites a non-existent resources/uc.yml (INFO).
+
+### Defects added
+| ID | Sev | Owner | Finding |
+|---|---|---|---|
+| QA-023 | Medium | Inclinometer Specialist | Engine proposes ZA on the DMM case where §5 requires SUSPECT (no cross-check tolerance in qc.py) |
+| QA-024 | High (prod blocker) | Geotech lead | T16b verdict rests on the UNVERIFIED max(2.0, 3·SE) tolerance; flips at tol_abs ≥ 2.625 / tol_k > 3.5205 |
+| QA-025 | Low | Geotech lead | Mixed sign wording, items 1-6 above (c, "not settled", two bs definitions, wrong T6e cross-ref, verify T15c/T15e text) |
+| QA-026 | Low | Inclinometer Specialist | Engine naming dD = ref − suspect, `za_proposed_c`, "D' = D + c", "§5.1" |
+| QA-027 | Low | Data Architect | Stale dataset seed; node_modules/ sync exclude; VERIFICATION.md lists workbook tests as VERIFIED |
+| QA-028 | Low | App Dev / DA | test_instrument_vocab literal_eval breaks on the new DictComp |
+
+Rerun: `cd /workspace/dam-safety-app && app/.venv/bin/python -m pytest -q -p no:cacheprovider qa/ && .venv/bin/python -m pytest -q -p no:cacheprovider tests/ testonly_restricted/ && (cd app && .venv/bin/python -m pytest -q -p no:cacheprovider) && (cd /workspace/dam-refs/inclinometers && /workspace/dam-safety-app/.venv/bin/python verify.py | tail -1) && python3 qa/restricted_guard.py scan`
+
+## 2026-11-02 20:05 EST: Pre-commit hook review, git history scan, QA-020 against the engine, node_modules, §5 ruling update
+
+**Pre-commit hook (Genie edit, in commit ca3f854): WEAKENED the guard. Fixed in the working tree, not committed.**
+Genie's line 5 drops `qa/(restricted_guard.py|restricted_denylist.json|test_restricted_guard.py)` from the staged list
+before BOTH the name check and the content scan, using an unescaped regex. In a throwaway clone (/tmp/hookverify, origin
+removed, never pushed) I planted test copies of restricted data. Genie's hook ALLOWED three of them:
+- DMM rows in qa/test_restricted_guard.py
+- workbook rows in qa/restricted_guard.py
+- DMM rows in the lookalike qa/restricted_guardXpy (the regex dot matches any character)
+
+Proposed hook (/tmp/pre-commit.proposed, now in qa/hooks/pre-commit; Genie's version backed up at /tmp/pre-commit.genie1945):
+- The content scan still covers every staged file.
+- Only the three exact paths (escaped and anchored) are exempt from the name/path check.
+- Clean edits to the guard files pass, which was Genie's intended false-positive fix.
+- A clean file such as docs/restricted_notes.md is still blocked by the name check. That is deliberate and conservative.
+
+**QA-029 (guard gap, found while testing; fixed in qa/restricted_guard.py, uncommitted, backup /tmp/restricted_guard.pre2000.py).**
+- Low-precision integer rows (workbook, DMM) were caught only by exact-line text hashes. The same rows evaded the guard in every file once reformatted: `# `-prefixed, tab-separated, or as a markdown table.
+- Fix: add a separator-independent per-line number-sequence hash (num_lines.u64 in the cache; at least 6 numbers, at least 3 distinct non-zero).
+- Result: all 6 reformatted probes are caught, the repo still shows 0 false positives, and test_restricted_guard passes 5/5.
+- Remaining gap: dropping or reordering columns still evades the guard.
+
+Matrix with the proposed hook plus the QA-029 guard:
+
+| Plant | Result |
+|---|---|
+| Renamed exact copy | BLOCKED |
+| Workbook rows in .md | BLOCKED |
+| `# `-prefixed rows in .py | BLOCKED |
+| DMM markdown table | BLOCKED |
+| datasets/ path | BLOCKED |
+| DMM rows in qa/test_restricted_guard.py | BLOCKED |
+| Workbook rows in qa/restricted_guard.py | BLOCKED |
+| qa/restricted_guardXpy | BLOCKED |
+| Clean guard and denylist edits | allowed |
+| Clean README edit | allowed |
+
+With Genie's hook and the same guard, the qa/test_restricted_guard.py, qa/restricted_guard.py and qa/restricted_guardXpy plants are still ALLOWED.
+
+**Git history: no restricted data was ever committed.**
+- History: 1 commit (ca3f854), and refs main = origin/main = ca3f854 (local tracking ref).
+- The remote itself could not be read: `git ls-remote` needs credentials, and the GitHub app has no access to ikariimii/DSM. Nothing was pushed by QA.
+- The guard (with QA-029) reports 0 hits on all of these:
+  - the HEAD tree (209 files)
+  - every reachable blob (207, via rev-list --all --objects)
+  - the full `git log -p --all` dump and its added lines
+  - the 2 unreachable local blobs
+- No history path matches dam-refs, datasets, testonly_restricted, qa_private, user_tool, mikkelsen, vendor_manual or .xlsx.
+- INFO: the committed qa/restricted_denylist.json holds restricted-file basenames and sha256 values only, no data.
+
+**node_modules: CLOSED (QA-027b).**
+- It is ignored by .gitignore:66 and app/.gitignore:6, and 0 tracked files contain node_modules.
+- databricks.yml sync.exclude now lists `app/frontend/node_modules/**` and `node_modules/**`.
+- test_sync_excludes_cover_gitignore_licensing_patterns passes. No databricks CLI is on the box, so `bundle validate` was not run.
+
+**QA-020 against the engine (qa/test_inclinometer_bias_rules.py; backup /tmp/test_inclinometer_bias_rules.pre2005.py).**
+- BiasQCParams defaults equal the §7.1 values, and `require_sign_agreement` has been removed (asserted absent or False).
+- Real pair S1 baseline vs S3, both ways round: suspect_flag and qa_flag SUSPECT, NO_PROPOSAL, and the Δ mean checksum flips sign exactly.
+- App path (batch.reduce_instrument → qa_reason → contract.bias_qc), each PROPOSED and applied=False:
+
+| Case | ZA |
+|---|---|
+| Synthetic +6 on A0 | −6 |
+| Swapped pair | +6 |
+| A180-only +6 | +6 |
+
+- between_set_bias_qc never changes reduced data:
+  - The reduced columns are identical with and without a proposal.
+  - Top cum_a stays at the raw 5.20 mm, with no correction_record_ids.
+  - Engine inputs are unmodified (deep-copy check).
+- The old app xfail (reduce_inclinometer_profile has no between-set flag) is replaced by the batch/contract path test.
+
+**§5 ruling update (lead, 2026-11-02): no sign gate; ZA = −ΔD always, on A0; never auto-applied; the tolerance only ranks.**
+- A180-only δ = +6 gives ΔD −6, bs +6, verdict AGREE, ZA +6, and a stable-zone result of 0.0 mm. ZA = −bs would double the error. No gate rejects it, in either the engine or the QA helper.
+- DMM: the engine gives SUSPECT_CROSSCHECK with verdict SUSPECT, proposes ZA +5.3125 (= verify T16b), and reports |ΔD| 5.3125 and |bs| 7.9375.
+  - The QA helper agrees, and its ZA is unchanged when the tolerance flips the rank.
+- **QA-023 CLOSED.** Its strict xfail XPASSed at about 20:00; it is now a passing test.
+- **QA-032 (QA's own helper, FIXED).** The helper accepted significance at |ΔD| ≥ 3·SE; the procedure and the engine say strict >. It is now strict >. No current test case sits exactly on the boundary.
+- **QA-030 (new, Medium, App Dev). Strict xfail.**
+  - contract.bias_qc returns proposed_c, proposal_record_id and evidence only when status == PROPOSED.
+  - A SUSPECT_CROSSCHECK proposal therefore reaches the API without the ZA, record id or magnitudes the reviewer must approve.
+  - The contract.py:252 label still reads "review, no proposal".
+  - Reproduced end to end: synthetic +6 on A0 plus a common +2 gives ΔD 6 and bs 10, and the API shows proposed_c None.
+- QA-024 (T16b tolerance) stays open, but its impact is now ranking only, not whether data are corrected. The lead decides whether it is still a production blocker (the engine comment says yes).
+
+**QA-021: NOT CLOSED. The sign convention now agrees across §5 (procedures/ copy), verify.py (76/76, T15c/T15e wording fixed, T16d added), the engine (ΔD = suspect − reference, ZA = −ΔD) and the app.** Residuals, documentation only:
+1. dam-refs/inclinometers/inclinometers.md has diverged from procedures/inclinometers.md: its header says 75 PASS and its row 174 lacks the no-sign-gate and never-auto-applied ruling.
+2. The §5 worked example still says "matches verify T6e". T6e is a different case (4.00 mm corrected, raw 5.20).
+3. Line 171 still defines `bs = BSE/(N×C)`, a second, D-based meaning of bs.
+
+QA-026 (corrections.py:9 "c = FULL value added to A0") stays open, Low.
+
+**Also closed this run:**
+- QA-027a: the seed now includes DS-INC-M2007-DMM-BIASSHIFT.
+- QA-028: test_instrument_vocab passes.
+
+QA-027c (docs/VERIFICATION.md:13 lists workbook values in the VERIFIED table without the regression-only label) stays open.
+
+**New in-flight failure (root):** tests/test_inclinometer_bias_qc.py::test_contract_docs_and_ddl_expose_fields.
+- The engine added `abs_dD`, `abs_bs` and `crosscheck_verdict`; SCHEMA_CONTRACT.md does not document them yet and still lists the removed `sign_agree`.
+- Owner: Data Architect / Inclinometer Specialist.
+
+**Reruns at 19:59 EST:**
+
+| Suite | Result |
+|---|---|
+| qa/ | 124 passed, 1 xfailed (QA-030) |
+| testonly_restricted | 7 passed |
+| tests/ | 328 passed, 1 failed (above), 1 skipped |
+| app | 193 passed |
+| verify.py | 76/76 |
+| Guard | 0 hits |
+
+| ID | Sev | Owner | Status |
+|---|---|---|---|
+| QA-029 | High | QA → Genie to commit | Fixed in working tree: guard missed reformatted low-precision rows |
+| QA-033 | High | Genie | Hook weakening in ca3f854; fixed in working tree, needs commit |
+| QA-030 | Medium | App Dev | Open (strict xfail) |
+| QA-032 | Low | QA | Fixed |
+| QA-023 | n/a | n/a | Closed |
+| QA-027b | n/a | n/a | Closed |
+| QA-028 | n/a | n/a | Closed |

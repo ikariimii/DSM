@@ -132,7 +132,8 @@ def test_spiral_kept_in_enum_never_applied_info_flag():
     assert C.info_flags(inst) == ("SPIRAL_NOT_APPLIED",)
     assert C.info_flags(plain) == () and C.info_flags(plain, [stored]) == ("SPIRAL_NOT_APPLIED",)
     q = qc.survey_qc("S2", "A", {0.0: 0.0, 0.5: 0.0})
-    reason = C.merge_qa_reason(";".join(q.reasons), C.info_flags(inst))
+    reason = C.merge_qa_reason(",".join(q.reasons), C.info_flags(inst))
+    assert C.merge_qa_reason("CHECKSUM", C.info_flags(inst)) == "CHECKSUM,SPIRAL_NOT_APPLIED"   # comma (contract §3)
     assert reason.endswith("SPIRAL_NOT_APPLIED") and q.flag == "OK"        # info only, severity unchanged
     assert C.merge_qa_reason(reason, C.info_flags(inst)) == reason
     rows = reduce_survey({(0.0, "A"): 1.0}, {(0.0, "A"): 0.0}, METRIC, "A")

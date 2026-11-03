@@ -157,19 +157,37 @@ effective_from, effective_to`; bridge `ref.pfm_instrument`.
     checksum flag). Per survey × axis, against a reference set (default `baseline_survey_id`, user-overridable) over the
     stable zone (`ref.incl_installation.stable_zone_top_m`, required; NULL → bottom 5 intervals and
     `stable_zone_assumed=true`; never auto-detected). Output `BiasQC`: `suspect_flag` (|Δ mean checksum| > 10 A / 20 B;
-    investigate only), `za_proposed_c` (c = BSE/(N·C) = mean ΔD with ΔD = D_reference − D_suspect; ZA/ZB = c, so
-    D′ = D + c), evidence `n`, `mean_dD`, `sd` (sample SD of ΔD), `spread` (max − min of ΔD, evidence only),
-    `equal_opposite`, `reference_survey_id`, plus `stable_zone_assumed`, `params_unverified` (always true for the
-    defaults), `status` (`NO_PROPOSAL | PROPOSED | BAD_RESURVEY`), `gates`, `qa_flag`. `za_proposed_c` is set only when
-    all gates pass: n ≥ 5; |mean ΔD| ≥ 3·SD/√n; SD ≤ 8 A / 16 B; not equal-and-opposite; |c| ≤ 25 (else
-    `BAD_RESURVEY`, `qa_flag=BAD`). The engine **proposes only**: `qc.bias_proposal_record` writes an `applied=false`
+    investigate only), `za_proposed_c` (**QA-021**, procedure §5 lead ruling 2026-11-02: every Δ = suspect − reference;
+    ΔD = mean(ΔA0 − ΔA180) over the stable zone; ZA/ZB = −ΔD, so D′ = D + ZA), evidence `n`, `mean_dD` (= ΔD, sign
+    flipped vs QA-020 v1), `sd` (sample SD of per-depth ΔD), `se` (SD/√n), `spread` (max − min, evidence only),
+    `mean_cs_change` (bs = mean(ΔA0 + ΔA180)), `crosscheck_diff` (||ΔD| − |bs||), `crosscheck_tol`
+    (max(2.0, 3·SE), UNVERIFIED), `sign_agree`, `reference_survey_id`, plus `stable_zone_assumed`, `params_unverified`
+    (always true for the defaults), `rule` (`QA021-v1`), `status` (`NO_PROPOSAL | PROPOSED | SUSPECT_CROSSCHECK |
+    BAD_RESURVEY`), `gates`, `qa_flag`. Gates: (i) n ≥ 5; (ii) |ΔD| > 3·SE; (iii) SD ≤ 8 A / 16 B — fail → `NO_PROPOSAL`;
+    (iv) cross-check ||ΔD| − |bs|| ≤ max(2.0, 3·SE); (v) sign(ΔD) = sign(bs) (QA addition, not in the procedure) —
+    fail → `SUSPECT_CROSSCHECK` (`qa_flag=SUSPECT`, no ZA); (vi) |ZA| ≤ 25 else `BAD_RESURVEY` (`qa_flag=BAD`).
+    The QA-020 v1 `equal_opposite` 0.5 ratio is removed (superseded by the §5 cross-check). The engine **proposes
+    only**: `qc.bias_proposal_record` writes an `applied=false`
     `ref.incl_correction` row (`detection_method='between_set_bias_qc'`, evidence in `detection_statistic`); applying
     is a separate reviewed row. All thresholds are configurable `BiasQCParams` (UNVERIFIED engineering judgment).
-- **Q9 answer:** today `silver.incl_reduced.diff_a/diff_b` are UNcorrected (un-halved A0−A180). v1.1 adds nullable
+- **Q9 answer:** `silver.incl_reduced.diff_a/diff_b` are un-halved A0−A180. v1.1 adds nullable
   `depth_reference` (`top_of_casing` | `from_bottom_label`), `baseline_survey_id`, `correction_record_ids ARRAY<STRING>`; when `correction_record_ids` is
-  non-empty, `diff_*`/`inc_*`/`cum_*` are post-correction values. Until the reduce job is switched to
-  `dam_safety.inclinometer.engine` (PENDING — no job writes `silver.incl_reduced` yet), the app must treat
-  incl values as uncorrected and say so. v1.2 adds nullable `raw_depth_label`.
+  non-empty, `diff_*`/`inc_*`/`cum_*` are post-correction values (only applied, non-superseded, and for rotation
+  reviewed records, in apply order). v1.2 adds nullable `raw_depth_label` (label as received).
+  - **v1.3 writer (2026-11-02):** job `src/jobs/reduce_inclinometers.py` (task `reduce_inclinometers` in
+    `dam_ingest`, after `pipeline`) with pure-Python core `dam_safety.inclinometer.batch.reduce_instrument`. It
+    appends rows (new `recompute_batch_id` per run; current row per (`survey_id`,`depth_m`) = latest `reduced_ts`).
+    Target surveys: never reduced, or a correction record newer than the last reduce, or a newer installation row,
+    or `--full_recompute true`. `formula_id='INCL_PROBE_2PASS'`, `formula_version='1.0.0+QA021-v1'` (bias-rule
+    version; hook `batch.DEFAULT_BIAS_RULE`; a survey whose latest row has another `formula_version` is re-reduced). `fixed_end='bottom'`, `calib_id` NULL.
+  - **qa_flag / qa_reason (comma-joined)** per row = worst of the reading flag (`BAD:TEXT`, `BAD:RANGE`,
+    `MISSING:PASS`), survey checksum QC (`MEAN_CS_GT_100_A`, `INDIVIDUAL_CS_A`, …), QA-020 (`BIAS_CS_SHIFT_A`,
+    `BIAS_PROPOSED_A` → SUSPECT, `BIAS_CROSSCHECK_A` → SUSPECT, `BIAS_BAD_RESURVEY_A` → BAD, `STABLE_ZONE_ASSUMED`), `CORRECTION_RECORD_INVALID`
+    (stored record failed validation, skipped → SUSPECT), `CORRECTION_ERROR:<type>` (BAD, no values) and info
+    `SPIRAL_NOT_APPLIED`. A proposal is never applied; when an applied bias record exists for that survey/axis the
+    proposal code is suppressed.
+  - Not deployed; the Spark wrapper is UNTESTED (no pyspark/Java on the build box). Until rows exist in a
+    workspace the app must still treat incl values as uncorrected and say so.
 - The user's own workbook and vendor-manual values are **internal-test-only**: tests live in gitignored,
   sync-excluded `testonly_restricted/` and read `/workspace/dam-refs/...` in place.
 

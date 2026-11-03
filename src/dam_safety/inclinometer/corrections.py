@@ -85,6 +85,9 @@ class CorrectionRecord:
                                  "(reviewed_by != user, reviewed_utc) [TRB-EC129 PDF p44]")
             if self.applied and self.axis not in ROTATION_IMPLEMENTED_AXES:
                 raise ValueError("B-axis rotation correction is UNVERIFIED (Mikkelsen 2003 eq 10); store with applied=False")
+        if self.correction_type == "bias" and self.applied and not self.reviewed:
+            raise ValueError("a bias correction is never auto-applied: applied=True needs reviewer approval "
+                             "(reviewed_by != user, reviewed_utc) [procedure §5 lead ruling 2026-11-02]")
         if self.correction_type == "spiral" and self.applied:
             raise ValueError("spiral correction is deferred: never mark a survey spiral-corrected (REPORT E2)")
 
@@ -105,7 +108,7 @@ def active(records, instrument_id, survey_id):
     """Applied, not superseded, for this survey."""
     return [r for r in records if r.instrument_id == instrument_id and r.survey_id == survey_id
             and r.applied and r.superseded_by is None
-            and (r.correction_type != "rotation" or r.reviewed) and r.correction_type != "spiral"]
+            and (r.correction_type not in ("rotation", "bias") or r.reviewed) and r.correction_type != "spiral"]
 
 
 def info_flags(installation, records=()) -> tuple[str, ...]:
@@ -118,8 +121,9 @@ def info_flags(installation, records=()) -> tuple[str, ...]:
 
 
 def merge_qa_reason(qa_reason: str, codes) -> str:
-    parts = [p for p in (qa_reason or "").split(";") if p]
-    return ";".join(parts + [c for c in codes if c not in parts])
+    """Comma-joined, as SCHEMA_CONTRACT §3 (`qa_reason` is comma-joined everywhere)."""
+    parts = [p for p in (qa_reason or "").split(",") if p]
+    return ",".join(parts + [c for c in codes if c not in parts])
 
 
 def _in_range(depth, rng):

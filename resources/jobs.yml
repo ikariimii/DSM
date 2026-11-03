@@ -27,6 +27,14 @@ resources:
           spark_python_task:
             python_file: ../src/jobs/reduce_readings.py
             parameters: [ "--catalog", "${var.catalog}" ]
+        - task_key: reduce_inclinometers
+          # silver.incl_survey -> silver.incl_reduced (src/dam_safety/inclinometer/batch.py core; QA-020 flags,
+          # QA-021 bias-rule hook batch.DEFAULT_BIAS_RULE). Spark wrapper UNTESTED (VERIFICATION INC-WIRE).
+          depends_on: [ { task_key: pipeline } ]
+          environment_key: py
+          spark_python_task:
+            python_file: ../src/jobs/reduce_inclinometers.py
+            parameters: [ "--catalog", "${var.catalog}", "--full_recompute", "false" ]
         - task_key: alarm_evaluator
           depends_on: [ { task_key: reduce_readings } ]
           environment_key: py

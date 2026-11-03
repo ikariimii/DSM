@@ -67,6 +67,13 @@ def windows(line):
     for i in range(len(toks) - W + 1):
         w = toks[i:i + W]
         if not trivial(w, raws[i:i + W]): yield h(' '.join(w))
+def numseq(line):
+    # QA-029: separator-independent row fingerprint. The full sequence of numbers on a line (>= 6 numbers, >= 3 distinct
+    # non-zero), so a pasted row still hits after '# ' / indent / tab / markdown-table reformatting, including
+    # low-precision integer rows (e.g. 12 -8) that windows() treats as trivial. Dropping or reordering columns evades it.
+    toks = [n for n in (norm_num(t) for t in NUM.findall(line)) if n is not None]
+    if len(toks) >= 6 and len({v for v in toks if float(v) != 0}) >= 3: return h('N:' + ' '.join(toks))
+    return None
 def norm_text(line):
     s = re.sub(r'\s+', ' ', line).strip().lower()
     return s if len(s) >= 40 and re.search(r'[a-z]{3}', s) else None
@@ -126,7 +133,7 @@ def restricted_paths():
 
 def build():
     files, info = restricted_paths()
-    shas, names, wins, lines = set(), set(), set(), set()
+    shas, names, wins, lines, nseq = set(), set(), set(), set(), set()
     for p in files:
         if os.path.getsize(p) >= MIN_SHA_BYTES: shas.add(sha256(p))
         if os.path.splitext(p)[1].lower() in NO_CONTENT or os.path.basename(p).lower() in ('sha256sums', 'license'): continue
@@ -138,15 +145,17 @@ def build():
             fw.update(windows(l))
             t = norm_text(l)
             if t: lines.add(h(t))
+            q = numseq(l)
+            if q is not None: nseq.add(q)
         if len(fw) > BIG: fw = {w for w in fw if w % 16 == 0}
         wins |= fw
     json.dump({'note': 'hashes and file names only; no restricted data. Rebuild: python qa/restricted_guard.py build',
                'restricted_datasets': info, 'n_files': len(files), 'sha256': sorted(shas), 'basenames': sorted(names)},
               open(FP, 'w'), indent=1)
     os.makedirs(CACHE, exist_ok=True)
-    for name, st in (('num_windows.u64', wins), ('text_lines.u64', lines)):
+    for name, st in (('num_windows.u64', wins), ('text_lines.u64', lines), ('num_lines.u64', nseq)):
         a = array.array('Q', sorted(st)); open(os.path.join(CACHE, name), 'wb').write(a.tobytes())
-    print('denylist: %d files, %d names -> %s; content cache: %d windows, %d text lines -> %s' % (len(files), len(names), FP, len(wins), len(lines), CACHE))
+    print('denylist: %d files, %d names -> %s; content cache: %d windows, %d text lines, %d number rows -> %s' % (len(files), len(names), FP, len(wins), len(lines), len(nseq), CACHE))
 
 def load_cache(name):
     a = array.array('Q'); a.frombytes(open(os.path.join(CACHE, name), 'rb').read()); return set(a)
@@ -164,6 +173,8 @@ def scan(paths=None, min_windows=3):
     have_cache = os.path.exists(os.path.join(CACHE, 'num_windows.u64'))
     wins = load_cache('num_windows.u64') if have_cache else set()
     tl = load_cache('text_lines.u64') if have_cache else set()
+    nl = load_cache('num_lines.u64') if have_cache and os.path.exists(os.path.join(CACHE, 'num_lines.u64')) else set()
+    if have_cache and not nl: print('NOTE: no num_lines cache (built before QA-029): run build to enable row-sequence checks')
     if not have_cache: print('NOTE: no content cache at %s (dam-refs absent?): hash/name/path checks only' % CACHE)
     hits = []
     for p in (paths or list(repo_files())):
@@ -173,14 +184,16 @@ def scan(paths=None, min_windows=3):
         if os.path.basename(p).lower() in names: hits.append((rel, 'basename of a restricted file'))
         if os.path.getsize(p) >= MIN_SHA_BYTES and sha256(p) in shas: hits.append((rel, 'exact copy of a restricted file')); continue
         if not have_cache: continue
-        nw, nt, ex = 0, 0, []
+        nw, nt, nq, ex = 0, 0, 0, []
         for i, l in enumerate(text_lines(p), 1):
             k = [w for w in windows(l) if w in wins]
             if k: nw += 1; ex.append(i)
             t = norm_text(l)
             if t and h(t) in tl: nt += 1; ex.append(i)
-        if nw >= min_windows or nt >= 1:
-            hits.append((rel, 'content derived from restricted data: %d numeric-row lines, %d text lines (e.g. lines %s)' % (nw, nt, ex[:8])))
+            q = numseq(l)
+            if q is not None and q in nl: nq += 1; ex.append(i)
+        if nw >= min_windows or nt >= 1 or nq >= 1:
+            hits.append((rel, 'content derived from restricted data: %d numeric-row lines, %d text lines, %d number rows (e.g. lines %s)' % (nw, nt, nq, sorted(set(ex))[:8])))
     return hits
 
 if __name__ == '__main__':

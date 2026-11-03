@@ -76,5 +76,10 @@ CREATE TABLE IF NOT EXISTS silver.incl_reduced (
   depth_reference       STRING COMMENT 'source label convention: top_of_casing | from_bottom_label (same literals as ref.incl_installation)',
   baseline_survey_id    STRING COMMENT 'baseline the inc/cum change is relative to (ref.incl_installation)',
   correction_record_ids ARRAY<STRING> COMMENT 'ref.incl_correction.record_id applied, in apply order',
-  raw_depth_label       STRING COMMENT 'depth label exactly as in the source file (workbook: ft from bottom)'
+  raw_depth_label       STRING COMMENT 'depth label exactly as in the source file (workbook: ft from bottom)',
+  -- SCHEMA_CONTRACT v1.4 (additive, nullable): inclinometer lineage. calib_id is NULL for inclinometers; approval is
+  -- formula_id/formula_version -> ref.formula.verified plus the ref.incl_installation row named here (§5.5).
+  qc_rule_version       STRING COMMENT 'between-set bias QC rule (dam_safety.inclinometer.qc.BIAS_RULE, e.g. QA021-v2)',
+  installation_version  TIMESTAMP COMMENT 'ref.incl_installation.effective_from of the SCD2 row used (probe L/K, sign_mult, baseline)',
+  probe_constants       STRING COMMENT 'L_m;K;raw_unit;system;sign_mult_A;sign_mult_B as used, e.g. L_m=0.5;K=25000.0;...'
 ) TBLPROPERTIES (delta.appendOnly = true);

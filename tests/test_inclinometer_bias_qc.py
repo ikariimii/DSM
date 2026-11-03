@@ -1,11 +1,14 @@
-"""QA-020 between-set bias QC (procedure §7.1): suspect flag, ZA proposal gates (i)-(v), reference set, stable zone.
+"""QA-020/QA-021 between-set bias QC (procedure §5 lead ruling 2026-11-02 + §7.1): suspect flag, ZA = −ΔD proposal
+gates (i)-(v) incl. the magnitude-only §5 cross-check (no sign gate; it ranks proposals AGREE/SUSPECT), reference
+set, stable zone, review-only proposals.
 All data SYNTHETIC. Parameters are configurable UNVERIFIED engineering judgment (params_unverified)."""
 import os
 import re
 
 import pytest
 
-from dam_safety.inclinometer import qc
+from dam_safety.inclinometer import corrections as C, qc
+from dam_safety.inclinometer.reduction import reduce_survey, top_cum_change_mm
 from dam_safety.inclinometer.installation import Installation, Probe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,8 +43,11 @@ def gate(q, name):
 def test_clean_one_pass_bias_is_proposed_never_applied():
     q = run(shifted(-6.0, noise=0.5))
     assert q.status == "PROPOSED" and q.qa_flag == "SUSPECT" and all(p for _, p in q.gates)
-    assert q.n == 6 and q.za_proposed_c == pytest.approx(6.0) and q.mean_dD == pytest.approx(6.0)
-    # c = BSE/(N·C) and sign Δ = reference − suspect: D_suspect + c recovers D_reference
+    assert q.n == 6 and q.za_proposed_c == pytest.approx(6.0) and q.mean_dD == pytest.approx(-6.0)
+    assert q.mean_cs_change == pytest.approx(-6.0) and q.crosscheck_diff == pytest.approx(0.0)
+    assert q.abs_dD == pytest.approx(6.0) and q.abs_bs == pytest.approx(6.0) and q.crosscheck_verdict == "AGREE"
+    assert q.rule == "QA021-v2" and q.requires_review
+    # §5: Δ = suspect − reference, ZA = −ΔD; D_suspect + ZA recovers D_reference; BSE = Σ(−ΔD)·C = n·ZA·C
     C = P.L_m / (2 * P.K) * 1000
     assert q.bse_mm == pytest.approx(6.0 * 6 * C) and q.za_proposed_c == pytest.approx(q.bse_mm / (q.n * C))
     s, r = shifted(-6.0, noise=0.5), ref_set()
@@ -50,6 +56,8 @@ def test_clean_one_pass_bias_is_proposed_never_applied():
     rec = qc.bias_proposal_record(q, "R1", "D1", "I1", "eng", "2026-11-02T00:00:00Z")
     assert rec.applied is False and rec.correction_type == "bias" and rec.auto_value == pytest.approx(6.0)
     assert "params_unverified=True" in rec.detection_statistic and "reference_survey_id=S0" in rec.detection_statistic
+    for x in ("ZA=6.0000", "abs_dD=6.0000", "abs_bs=6.0000", "crosscheck_verdict=AGREE", "requires_review=True"):
+        assert x in rec.detection_statistic, x
 
 
 def test_suspect_flag_threshold_per_axis_investigate_only():
@@ -78,10 +86,61 @@ def test_gate_iii_spread():
     assert qc.between_set_bias_qc(inst(), "B", "S5", shifted(-20.0, noise=12.0), ref_set()).status == "PROPOSED"
 
 
-def test_gate_iv_equal_and_opposite_is_movement_not_bias():
+def passes(d0=0.0, d180=0.0, noise=0.0):
+    """Stable zone (>= 7.0): ΔA0 = d0 (± alternating noise), ΔA180 = d180."""
+    out = {}
+    for k, (d, (a, b)) in enumerate(ref_set().items()):
+        e = noise if k % 2 else -noise
+        out[d] = (a + d0 + e, b + d180) if d >= 7.0 else (a, b)
+    return out
+
+
+def test_gate_iv_movement_in_stable_zone_ranks_suspect():
+    # real movement r: ΔA0 = +r, ΔA180 = −r -> ΔD = 2r, bs = 0 -> ||ΔD|−|bs|| = 6 > 2 -> SUSPECT verdict (§5).
+    # SUSPECT is a review flag that ranks the proposal, not a rejection: ZA = −ΔD is still shown, never applied.
     q = run(shifted(move=3.0))
-    assert q.equal_opposite is True and q.mean_cs_change == pytest.approx(0.0)
-    assert not gate(q, "not_equal_opposite") and q.status == "NO_PROPOSAL" and not q.suspect_flag
+    assert q.mean_dD == pytest.approx(6.0) and q.mean_cs_change == pytest.approx(0.0)
+    assert not gate(q, "crosscheck") and q.crosscheck_verdict == "SUSPECT"
+    assert q.status == "SUSPECT_CROSSCHECK" and q.qa_flag == "SUSPECT" and not q.suspect_flag
+    assert q.za_proposed_c == pytest.approx(-6.0) and (q.abs_dD, q.abs_bs) == (pytest.approx(6.0), pytest.approx(0.0))
+    rec = qc.bias_proposal_record(q, "R2", "D1", "I1", "eng", "2026-11-02T00:00:00Z")
+    assert rec.applied is False and "crosscheck_verdict=SUSPECT" in rec.detection_statistic
+
+
+def test_gate_iv_dmm_like_disagreement_is_suspect_and_tolerance_configurable():
+    # synthetic DMM-shaped case: both passes moved, ΔD = −5, bs = −8 -> diff 3 > max(2.0, 3·SE=0) -> SUSPECT
+    q = run(passes(d0=-6.5, d180=-1.5))
+    assert q.mean_dD == pytest.approx(-5.0) and q.mean_cs_change == pytest.approx(-8.0)
+    assert q.crosscheck_diff == pytest.approx(3.0) and q.crosscheck_tol == pytest.approx(2.0)
+    assert q.status == "SUSPECT_CROSSCHECK" and q.crosscheck_verdict == "SUSPECT" and q.za_proposed_c == pytest.approx(5.0)
+    assert run(passes(d0=-6.5, d180=-1.5), params=qc.BiasQCParams(crosscheck_tol_abs=3.0)).status == "PROPOSED"
+    # tolerance = max(abs, k·SE): with scatter the SE term governs
+    q2 = run(passes(d0=-6.5, d180=-1.5, noise=4.0))
+    assert q2.crosscheck_tol == pytest.approx(3 * q2.se) and q2.crosscheck_tol > 2.0
+
+
+def test_a180_only_shift_is_proposed_and_corrects_to_zero():
+    # Lead/Specialist ruling 2026-11-02 (§5): ZA = −ΔD always, applied to A0; never −bs; magnitude-only cross-check.
+    # A180-only shift δ = +6 (ΔA0 = 0, ΔA180 = +6): ΔD = −6, bs = +6, ZA = +6, corrected result 0.0 mm.
+    s = passes(d180=6.0)
+    q = run(s)
+    assert q.mean_dD == pytest.approx(-6.0) and q.mean_cs_change == pytest.approx(6.0)
+    assert gate(q, "crosscheck") and q.crosscheck_diff == pytest.approx(0.0) and q.crosscheck_verdict == "AGREE"
+    assert q.status == "PROPOSED" and q.za_proposed_c == pytest.approx(6.0) == pytest.approx(-q.mean_dD)
+    assert "sign_agree" not in dict(q.gates) and not hasattr(qc.BiasQCParams(), "require_sign_agreement")
+    # apply ZA to A0 over the stable zone via a reviewer-approved record -> 0.0 mm change vs the reference
+    zone = [d for d in s if d >= 7.0]
+    D = {(d, "A"): s[d][0] - s[d][1] for d in zone}
+    D_ref = {(d, "A"): ref_set()[d][0] - ref_set()[d][1] for d in zone}
+    before = top_cum_change_mm(reduce_survey(D, D_ref, P, "A"))
+    assert before == pytest.approx(-6 * len(zone) * P.L_m / (2 * P.K) * 1000)
+    prop = qc.bias_proposal_record(q, "R3", "D1", "I1", "eng", "2026-11-02T00:00:00Z")
+    with pytest.raises(ValueError):                                    # never applied without reviewer approval
+        C.CorrectionRecord(**{**prop.__dict__, "applied": True})
+    ok = C.CorrectionRecord(**{**prop.__dict__, "record_id": "R4", "applied": True,
+                               "reviewed_by": "reviewer", "reviewed_utc": "2026-11-02T01:00:00Z"})
+    after = top_cum_change_mm(reduce_survey(C.apply(D, C.active([ok], "I1", "S5")), D_ref, P, "A"))
+    assert after == pytest.approx(0.0, abs=1e-12)
 
 
 def test_gate_v_large_c_is_bad_resurvey_and_params_configurable():
@@ -107,12 +166,13 @@ def test_reference_set_default_baseline_and_override():
 
 
 def test_contract_docs_and_ddl_expose_fields():
-    fields = ("suspect_flag", "za_proposed_c", "n", "mean_dD", "sd", "spread", "equal_opposite",
+    fields = ("suspect_flag", "za_proposed_c", "n", "mean_dD", "sd", "se", "spread", "mean_cs_change",
+              "crosscheck_diff", "crosscheck_tol", "abs_dD", "abs_bs", "crosscheck_verdict", "requires_review",
               "reference_survey_id", "stable_zone_assumed", "params_unverified")
     assert set(fields) <= set(qc.BiasQC.__dataclass_fields__)
     for f in ("SCHEMA_CONTRACT.md", os.path.join("docs", "api_contract.md")):
         s = open(os.path.join(ROOT, f), encoding="utf-8").read()
-        assert "QA-020" in s and all(f"`{x}`" in s for x in fields), f
+        assert "QA-020" in s and "QA-021" in s and all(f"`{x}`" in s for x in fields), f
     ddl = open(os.path.join(ROOT, "sql", "ddl", "02_ref_calibration_threshold.sql"), encoding="utf-8").read()
     block = ddl.split("CREATE TABLE IF NOT EXISTS ref.incl_installation (")[1].split("\n);")[0]
     assert re.search(r"^\s*stable_zone_top_m\s+DOUBLE", block, re.M)

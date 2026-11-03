@@ -23,7 +23,8 @@ def rec(**kw):
     base = dict(record_id="r1", dam_id="D1", instrument_id="I1", survey_id="S2", axis="A", correction_type="bias",
                 parameter_name="c", auto_value=None, detection_method=None, detection_statistic=None,
                 override_value=None, applied=True, sign_convention=None, depth_range=None, reason="test",
-                source_citation="procedure §5", user="eng", timestamp_utc="2026-11-02T00:00:00Z")
+                source_citation="procedure §5", user="eng", timestamp_utc="2026-11-02T00:00:00Z",
+                reviewed_by="reviewer", reviewed_utc="2026-11-02T01:00:00Z")   # applied bias needs approval (§5)
     base.update(kw)
     return C.CorrectionRecord(**base)
 

@@ -54,26 +54,31 @@ def survey_qc(survey_id, axis, cs_by_depth: dict, prev_mean_cs=None, delta_tol=N
     return SurveyQC(survey_id, axis, len(vals), m, sd, dm, out, missing, flag, tuple(reasons))
 
 
-# ---- QA-020 between-set bias QC (procedure §7.1; §5 bias row governs) ------------------------------------------------
+# ---- QA-020/QA-021 between-set bias QC (procedure §7.1; §5 bias row governs) ------------------------------------------------
 # Sits beside the checksum flag above. It PROPOSES a ZA/ZB bias-shift value and never applies it: the output can be
 # turned into an applied=False ref.incl_correction row (bias_proposal_record) for a human to review and apply.
 # Every numeric default below is configurable and is UNVERIFIED engineering judgment (no source number) except where
 # noted; params_unverified=True travels with every result.
 import math                                                    # noqa: E402
 
-BIAS_STATUS = ("NO_PROPOSAL", "PROPOSED", "BAD_RESURVEY")
+BIAS_STATUS = ("NO_PROPOSAL", "PROPOSED", "SUSPECT_CROSSCHECK", "BAD_RESURVEY")
+BIAS_RULE = "QA021-v2"   # §5 lead ruling 2026-11-02 (QA-021 sign, QA-023 cross-check) + Inclinometer Specialist ruling
+                          # 19:55 ET: magnitude-only cross-check, no sign gate. Replaces the QA-020 0.5 ratio.
 
 
 @dataclass(frozen=True)
 class BiasQCParams:
     cs_shift_suspect: tuple = (("A", 10.0), ("B", 20.0))   # |Δ mean CS| suspect vs reference; UNVERIFIED (mirrors DMM
                                                            # individual-checksum bands). Investigate only.
-    min_stable_intervals: int = 5                          # gate (i); 5 sourced as typical [MIKKELSEN-2003 p4; DIGIPRO2 p36]
-    significance_k: float = 3.0                            # gate (ii) |mean ΔD| >= k·SD/√n; UNVERIFIED
+    min_stable_intervals: int = 5                          # gate (i) n_stable_min; 5 sourced as typical [MIKKELSEN-2003 p4;
+                                                           # DIGIPRO2 p36]; as a rule UNVERIFIED
+    significance_k: float = 3.0                            # gate (ii) bias_signif_k: |ΔD| > k·SE(ΔD); UNVERIFIED
     max_spread: tuple = (("A", 8.0), ("B", 16.0))          # gate (iii) SD(ΔD) <= value; UNVERIFIED (MIKKELSEN-2003 p6 σ bands)
-    equal_opposite_ratio: float = 0.5                      # gate (iv): passes are 'equal and opposite' (real movement)
-                                                           # when |mean(Δ0+Δ180)| < ratio·|mean ΔD|; UNVERIFIED
-    max_abs_c: float = 25.0                                # gate (v) |c| <= 25 else BAD / resurvey; UNVERIFIED as a rule
+    crosscheck_tol_abs: float = 2.0                        # gate (iv) bias_crosscheck_tol_abs, reading units; UNVERIFIED,
+                                                           # PRODUCTION BLOCKER pending lead/user sign-off
+                                                           # (docs/VERIFICATION.md INC-QA021)
+    crosscheck_tol_k: float = 3.0                          # gate (iv) bias_crosscheck_tol_k × SE(ΔD); UNVERIFIED, BLOCKER
+    max_abs_c: float = 25.0                                # gate (v) |ZA| <= 25 else BAD / resurvey; UNVERIFIED as a rule
                                                            # ("Generally ... does not exceed 25 units" MIKKELSEN-2003 p7)
     fallback_bottom_intervals: int = 5                     # stable_zone_top missing -> bottom 5; UNVERIFIED fallback
     params_unverified: bool = True
@@ -90,19 +95,28 @@ class BiasQC:
     delta_mean_cs: float | None        # mean CS(suspect) − mean CS(reference)
     suspect_flag: bool                 # |delta_mean_cs| > cs_shift_suspect: investigate only, never a correction
     n: int                             # stable intervals with both sets present
-    mean_dD: float | None              # mean(D_reference − D_suspect) over the stable zone, reading units
-    sd: float | None                   # sample SD of that ΔD (gates ii, iii)
+    mean_dD: float | None              # ΔD = mean(D_suspect − D_reference) over the stable zone, reading units (§5:
+                                       # every Δ is suspect − reference; ΔD = mean(ΔA0 − ΔA180))
+    sd: float | None                   # sample SD of the per-depth ΔD (gate iii)
+    se: float | None                   # SD/√n (gates ii, iv)
     spread: float | None               # max − min of ΔD (evidence only)
-    equal_opposite: bool | None        # within-set Δ0 ≈ −Δ180 (real movement, not bias)
-    mean_cs_change: float | None       # mean(Δ0 + Δ180) over the stable zone (one-pass-bias cross-check, §5)
-    bse_mm: float | None               # BSE: cumulative (reference − suspect) deviation over the stable zone, mm
-    za_proposed_c: float | None        # c = BSE/(N·C) = mean_dD; set only when status == PROPOSED (ZA/ZB = c, D' = D + c)
-    status: str                        # NO_PROPOSAL | PROPOSED | BAD_RESURVEY
+    mean_cs_change: float | None       # bs = mean(ΔA0 + ΔA180) over the stable zone (§5 cross-check, full value)
+    crosscheck_diff: float | None      # ||ΔD| − |bs|| (procedure §7.1 row: magnitudes)
+    crosscheck_tol: float | None       # max(crosscheck_tol_abs, crosscheck_tol_k·SE)
+    abs_dD: float | None               # |ΔD| (shown with the proposal, §5 lead ruling)
+    abs_bs: float | None               # |Δ0 + Δ180| (shown with the proposal; cross-check only, never sets ZA)
+    crosscheck_verdict: str | None     # 'AGREE' | 'SUSPECT' (tolerance verdict; ranks proposals, review flag only)
+    bse_mm: float | None               # cumulative correction over the stable zone, mm: Σ(−ΔD_i)·C
+    za_proposed_c: float | None        # ZA/ZB = −ΔD, applied to A0 (D' = D + ZA); set when status is PROPOSED or
+                                       # SUSPECT_CROSSCHECK. Never applied here: a reviewer approves each record.
+    status: str                        # BIAS_STATUS
     gates: tuple                       # ((gate, passed), ...) in order i..v
     stable_zone_top_m: float
     stable_zone_assumed: bool
     params_unverified: bool
-    qa_flag: str                       # OK | SUSPECT | BAD (BAD only for |c| > max_abs_c)
+    qa_flag: str                       # OK | SUSPECT | BAD (BAD only for |ZA| > max_abs_c)
+    rule: str = BIAS_RULE
+    requires_review: bool = True       # always: no bias correction is ever auto-applied (§5 automation ruling)
 
 
 def stable_zone(installation, params: BiasQCParams = BiasQCParams()):
@@ -116,8 +130,14 @@ def stable_zone(installation, params: BiasQCParams = BiasQCParams()):
 
 def between_set_bias_qc(installation, axis, suspect_survey_id, suspect: dict, reference: dict,
                         reference_survey_id=None, params: BiasQCParams = BiasQCParams()) -> BiasQC:
-    """suspect / reference: {interval_top_m: (r0, r180)} for one axis (None for a missing pass).
-    reference_survey_id defaults to installation.baseline_survey_id (user-overridable)."""
+    """Procedure §5 bias row (lead ruling 2026-11-02, QA-021/QA-023) + §7.1 gates. PROPOSES only.
+    suspect / reference: {interval_top_m: (r0, r180)} for one axis (None for a missing pass).
+    reference_survey_id defaults to installation.baseline_survey_id (user-overridable).
+    Gates: (i) n >= n_stable_min; (ii) |ΔD| > k·SE; (iii) SD <= max; (iv) ||ΔD| − |bs|| <= max(tol_abs, tol_k·SE)
+    (magnitudes only, §5/§7.1; no sign gate, Specialist/lead ruling 2026-11-02); (v) |ZA| <= 25.
+    (i)-(iii) fail -> NO_PROPOSAL; (v) fail -> BAD_RESURVEY; else a proposal ZA = −ΔD (applied to A0) with
+    status PROPOSED (iv agrees) or SUSPECT_CROSSCHECK (iv disagrees: a review flag that ranks the proposal, NOT a
+    rejection). bs is a cross-check only and never sets ZA. Nothing is applied: every record needs reviewer approval."""
     ref_id = reference_survey_id or installation.baseline_survey_id
     if not ref_id:
         raise ValueError("no reference set: installation has no baseline_survey_id and none was given")
@@ -138,45 +158,55 @@ def between_set_bias_qc(installation, axis, suspect_survey_id, suspect: dict, re
     zone, z_top, assumed = stable_zone(installation, params)
     keys = [d for d in zone if ok(suspect.get(d)) and ok(reference.get(d))]
     n = len(keys)
-    dD = [(reference[d][0] - reference[d][1]) - (suspect[d][0] - suspect[d][1]) for d in keys]
-    csch = [(suspect[d][0] - reference[d][0]) + (suspect[d][1] - reference[d][1]) for d in keys]
+    d0 = [suspect[d][0] - reference[d][0] for d in keys]                   # ΔA0  (suspect − reference)
+    d180 = [suspect[d][1] - reference[d][1] for d in keys]                 # ΔA180
+    dD = [a - b for a, b in zip(d0, d180)]                                 # per-depth change in D
     m = st.fmean(dD) if n else None
+    bs = st.fmean(a + b for a, b in zip(d0, d180)) if n else None
     sd = st.stdev(dD) if n > 1 else None
+    se = None if sd is None else sd / math.sqrt(n)
     spread = (max(dD) - min(dD)) if n else None
-    mcs = st.fmean(csch) if n else None
-    eo = None if m is None else abs(mcs) < params.equal_opposite_ratio * abs(m)
+    xdiff = None if m is None else abs(abs(m) - abs(bs))
+    xtol = None if se is None else max(params.crosscheck_tol_abs, params.crosscheck_tol_k * se)
     C = installation.probe.L_m / (2.0 * installation.probe.K) * 1000.0       # mm per reading unit per interval
-    bse = sum(x * C for x in dD) if n else None
-    c = bse / (n * C) if n else None                                         # = mean_dD [MIKKELSEN-2003 p6]
+    za = None if m is None else -m                                           # ZA = −ΔD (§5, QA-021)
+    bse = sum(-x * C for x in dD) if n else None
 
     g = [("n_stable>=min", n >= params.min_stable_intervals)]
-    g.append(("significant", bool(sd is not None and m is not None and abs(m) > 0                # zero ΔD: nothing
-                                  and abs(m) >= params.significance_k * sd / math.sqrt(n))))
+    g.append(("significant", bool(se is not None and m is not None and abs(m) > params.significance_k * se
+                                  and m != 0)))
     g.append(("spread<=max", bool(sd is not None and sd <= params.per_axis("max_spread", axis))))
-    g.append(("not_equal_opposite", eo is False))
-    first4 = all(p for _, p in g)
-    g.append(("|c|<=max", bool(c is not None and abs(c) <= params.max_abs_c)))
-    if first4 and g[-1][1]:
-        status, za, flag = "PROPOSED", c, "SUSPECT"
-    elif first4:
-        status, za, flag = "BAD_RESURVEY", None, "BAD"
+    base = all(p for _, p in g)
+    g.append(("crosscheck", bool(xdiff is not None and xtol is not None and xdiff <= xtol)))
+    g.append(("|ZA|<=max", bool(za is not None and abs(za) <= params.max_abs_c)))
+    verdict = None if xdiff is None or xtol is None else ("AGREE" if g[3][1] else "SUSPECT")
+    if not base:
+        status, out_za, flag = "NO_PROPOSAL", None, ("SUSPECT" if suspect_flag else "OK")
+    elif not g[4][1]:
+        status, out_za, flag = "BAD_RESURVEY", None, "BAD"
+    elif verdict != "AGREE":
+        status, out_za, flag = "SUSPECT_CROSSCHECK", za, "SUSPECT"        # proposal ranked SUSPECT, for review
     else:
-        status, za, flag = "NO_PROPOSAL", None, ("SUSPECT" if suspect_flag else "OK")
-    return BiasQC(suspect_survey_id, axis, ref_id, dcs, suspect_flag, n, m, sd, spread, eo, mcs, bse, za, status,
-                  tuple(g), z_top, assumed, params.params_unverified, flag)
+        status, out_za, flag = "PROPOSED", za, "SUSPECT"
+    return BiasQC(suspect_survey_id, axis, ref_id, dcs, suspect_flag, n, m, sd, se, spread, bs, xdiff, xtol,
+                  None if m is None else abs(m), None if bs is None else abs(bs), verdict, bse, out_za, status, tuple(g), z_top, assumed, params.params_unverified, flag)
 
 
 def bias_proposal_record(q: BiasQC, record_id, dam_id, instrument_id, user, timestamp_utc):
-    """A PROPOSED result as an UNAPPLIED ref.incl_correction row (applied=False). Applying it is a separate human
-    decision recorded as a new row; this engine never applies it."""
+    """A PROPOSED or SUSPECT_CROSSCHECK result as an UNAPPLIED ref.incl_correction row (applied=False). Applying it
+    is a separate reviewer-approved row (CorrectionRecord refuses applied bias without review); never applied here."""
     from .corrections import CorrectionRecord
-    if q.status != "PROPOSED":
+    if q.status not in ("PROPOSED", "SUSPECT_CROSSCHECK") or q.za_proposed_c is None:
         raise ValueError(f"no proposal to record (status {q.status})")
-    stat = (f"n={q.n};mean_dD={q.mean_dD:.4f};sd={q.sd:.4f};spread={q.spread:.4f};equal_opposite={q.equal_opposite};"
+    stat = (f"rule={q.rule};n={q.n};mean_dD={q.mean_dD:.4f};bs={q.mean_cs_change:.4f};sd={q.sd:.4f};se={q.se:.4f};"
+            f"spread={q.spread:.4f};ZA={q.za_proposed_c:.4f};abs_dD={q.abs_dD:.4f};abs_bs={q.abs_bs:.4f};"
+            f"crosscheck_verdict={q.crosscheck_verdict};status={q.status};requires_review=True;crosscheck_diff={q.crosscheck_diff:.4f};crosscheck_tol={q.crosscheck_tol:.4f};"
             f"reference_survey_id={q.reference_survey_id};stable_zone_top_m={q.stable_zone_top_m};"
             f"stable_zone_assumed={q.stable_zone_assumed};params_unverified={q.params_unverified}")
     return CorrectionRecord(record_id, dam_id, instrument_id, q.survey_id, q.axis, "bias", "c", q.za_proposed_c,
                             "between_set_bias_qc", stat, None, False, None,
                             None,                     # bias is a whole-survey ZA/ZB (straight line from the toe)
-                            "QA-020 proposal: ZA/ZB = c = BSE/(N*C); review against D-profile signature (§5)",
-                            "procedure §7.1; MIKKELSEN-2003-FMGM PDF p6-7", user, timestamp_utc)
+                            "QA-021 proposal (review-only): ZA/ZB = -dD applied to A0 (suspect - reference); cross-check "
+                            f"{q.crosscheck_verdict}; reviewer approval required; check D-profile signature (§5)",
+                            "procedure §5 bias row (lead ruling 2026-11-02), §7.1; MIKKELSEN-2003-FMGM PDF p4-7",
+                            user, timestamp_utc)
