@@ -1,4 +1,5 @@
-"""QA-039: bias-proposal review as an append-only, content-signed sign-off record.
+"""QA-039: review of a ref.incl_correction record as an append-only, content-signed sign-off record (one link of
+the per-dam hash chain, see audit_chain.py).
 
 The app never updates ref.incl_correction and never applies a correction. A reviewer's decision is ONE new row in
 Lakebase `dam_app.review_signoff` (the data layer's table, column-compatible with UC `audit.review_record`; the
@@ -64,11 +65,26 @@ def signature(row: dict, rec: dict) -> str:
 
 
 def build(rec: dict, dam_id: str, decision: str, comment: str, reviewer_id: str, pe_license: str | None,
-          signed_ts: str) -> dict:
+          signed_ts: str, *, action_type: str = "bias_review", review_level: str = REVIEW_LEVEL,
+          reviewer_email: str | None = None, reviewer_sub: str | None = None) -> dict:
+    """Chain-ready row (audit_chain.finalizer adds chain_id/chain_seq/prev_hash/record_hash) for a review of a
+    ref.incl_correction record. signature_hash stays the engine-compatible content hash. original_value = the value
+    before the correction (never overwritten); corrected_value = what the proposal would make it."""
+    from .audit_chain import canon_json
     row = {"review_id": f"RS-{uuid.uuid4().hex}", "dam_id": dam_id, "subject_type": SUBJECT_TYPE,
-           "subject_id": rec["record_id"], "review_level": REVIEW_LEVEL, "decision": decision, "comment": comment,
+           "subject_id": rec["record_id"], "review_level": review_level, "decision": decision, "comment": comment,
            "reviewer_id": reviewer_id, "reviewer_pe_license": pe_license or None, "signed_ts": signed_ts}
     row["signature_hash"] = signature(row, rec)
+    row.update(action_type=action_type, reviewer_email=reviewer_email, reviewer_sub=reviewer_sub,
+               original_value=canon_json({"parameter_name": rec.get("parameter_name"),
+                                          "before_value": rec.get("before_value"),
+                                          "units": "as stored in ref.incl_correction"}),
+               corrected_value=canon_json({"parameter_name": rec.get("parameter_name"),
+                                           "auto_value": rec.get("auto_value"),
+                                           "override_value": rec.get("override_value"),
+                                           "after_value": rec.get("after_value"),
+                                           "units": "as stored in ref.incl_correction",
+                                           "applied_by_app": False}))
     return row
 
 

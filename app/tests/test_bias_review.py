@@ -144,7 +144,7 @@ def test_review_signoffs_empty_and_columns():
     st.init_schema()   # idempotent, triggers included
     assert st.review_signoffs("incl_correction", []) == []
     cols = [r["name"] for r in st.execute("PRAGMA table_info(review_signoff)")]
-    assert tuple(cols) == StateStore._SIGNOFF_COLS
+    assert tuple(cols) == StateStore.SIGNOFF_COLS
 
 
 def test_canonical_value():

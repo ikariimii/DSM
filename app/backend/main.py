@@ -17,11 +17,12 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import seed
+from .audit_chain import NoopSigner
 from .bootstrap import bootstrap_admins
 from .config import Settings
 from .repos.analytics import MockAnalytics, SqlAnalytics
 from .repos.state import StateStore, lakebase_pool
-from .routers import admin, alarms, core, dssmp, instruments, onboarding, reports
+from .routers import admin, alarms, core, dssmp, instruments, onboarding, reports, signoffs
 
 log = logging.getLogger("dam_safety_app")
 
@@ -38,7 +39,7 @@ def build_state(settings: Settings, pg_pool=None) -> StateStore:
     return StateStore("postgres", schema=settings.state_schema, pg_pool=pg_pool or lakebase_pool())
 
 
-def create_app(settings: Settings | None = None, pg_pool=None, analytics_factory=None) -> FastAPI:
+def create_app(settings: Settings | None = None, pg_pool=None, analytics_factory=None, signer=None) -> FastAPI:
     settings = settings or Settings()
     settings.check()
     app = FastAPI(title="Dam Safety Monitoring", version="0.1.0")
@@ -52,7 +53,8 @@ def create_app(settings: Settings | None = None, pg_pool=None, analytics_factory
         app.state.analytics_factory = lambda token: mock
     else:
         app.state.analytics_factory = lambda token: SqlAnalytics(settings, token)
-    for r in (core, instruments, alarms, dssmp, reports, onboarding, admin):
+    app.state.signer = signer or NoopSigner()  # QA-039 v2: future key-based signer hook (no-op by default)
+    for r in (core, instruments, alarms, dssmp, reports, onboarding, admin, signoffs):
         app.include_router(r.router)
 
     dist = Path(settings.static_dir)

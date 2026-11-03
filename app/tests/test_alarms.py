@@ -31,7 +31,7 @@ def test_ack_close_workflow(c):
     assert c.post(f"/api/alarms/{eid}/close", user=ADMIN, json={"reason": "fine"}).status_code == 409
     r = c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"comment": "checking"})
     assert r.status_code == 200 and r.json()["state"] == "acknowledged"
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG).status_code == 409
+    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "again"}).status_code == 409
     a = c.get(f"/api/alarms/{eid}", user=ENG).json()
     assert a["acknowledged_by"] == ENG and a["comments"][0]["body"] == "checking"
     assert not a["can_ack"] and not a["can_close"]
@@ -51,10 +51,10 @@ def test_alarm_acl(c):
     al = c.get("/api/alarms?dam_id=PHR", user=DSO).json()["alarms"]
     eid = al[0]["event_id"]
     assert c.get(f"/api/alarms/{eid}", user=ENG).status_code == 403
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG).status_code == 403
+    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "x"}).status_code == 403
     assert c.post(f"/api/alarms/{eid}/comment", user=VIEWER, json={"body": "x"}).status_code == 403
     assert c.get("/api/alarms/EV-NOPE").status_code == 404
-    assert c.post(f"/api/alarms/{eid}/ack", user=DSO).status_code == 200
+    assert c.post(f"/api/alarms/{eid}/ack", user=DSO, json={"rationale": "piezometer spike reviewed"}).status_code == 200
 
 
 def test_unverified_alarm_value_withheld(c):

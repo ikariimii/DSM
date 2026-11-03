@@ -18,6 +18,12 @@ class Ctx:
     known: bool = True
     user_id: str = ""   # X-Forwarded-User: the identity key
 
+    @property
+    def token_sub(self) -> str | None:
+        """Unverified 'sub' claim of the forwarded access token (identity label only; the token is never stored)."""
+        from .audit_chain import token_sub
+        return token_sub(self.token)
+
     def role(self, dam_id: str) -> str | None:
         return "dam_admin" if self.is_admin else self.roles.get(dam_id)
 

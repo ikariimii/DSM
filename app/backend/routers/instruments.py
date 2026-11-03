@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .. import formulas as fx
 from .. import signoff as so
+from . import signoffs as sg
 from ..repos import contract as ct
 from ..common import gate_for, instrument_checked, site_or_404
 from ..deps import Ctx, analytics, ctx, require, store
@@ -149,7 +149,7 @@ def formula_check(formula_id: str, version: str, c: Ctx = Depends(ctx)):
     return fx.run_vectors(formula_id, version)
 
 
-# ---------------------------------------------------------------- QA-039 bias proposal review (append-only sign-off)
+# ---------------------------------------------------------------- QA-039 v2 reviews -> per-dam hash chain
 class BiasReviewBody(BaseModel):
     decision: str
     rationale: str = Field(min_length=1, max_length=8000)
@@ -162,42 +162,64 @@ def _signoffs(st, recs: list[dict]) -> list[dict]:
     return [{**r, "signature_verified": so.verify(r, by_id.get(r["subject_id"]))} for r in out]
 
 
-@router.post("/instruments/{instrument_id}/incl/surveys/{survey_id}/bias-proposals/{record_id}/review")
-def review_bias_proposal(instrument_id: str, survey_id: str, record_id: str, body: BiasReviewBody, request: Request,
-                         c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
-    """Record an engineer's approve/reject of one engine bias proposal as an append-only signed sign-off row.
-    Never updates ref.incl_correction and never applies a correction: applying stays with the engine (§5.5)."""
-    inst = instrument_checked(an, c, instrument_id, "engineer")
-    if inst["instrument_type"] != "inclinometer":
-        raise HTTPException(400, "Not an inclinometer")
+def _review(rec: dict | None, label: str, record_id: str, body: BiasReviewBody, inst: dict, request: Request,
+            c: Ctx, st) -> dict:
     if body.decision not in so.DECISIONS:
         raise HTTPException(422, f"decision must be one of {', '.join(so.DECISIONS)}")
-    rationale = body.rationale.strip()
-    if not rationale:
-        raise HTTPException(422, "A rationale is required")
-    # reviewer identity is the stable X-Forwarded-User id; demo personas (no proxy) are labelled as such
-    reviewer = c.user_id or (f"demo:{c.email}" if request.app.state.settings.demo_mode else "")
-    if not reviewer:  # pragma: no cover - deps.identity already returns 401 outside demo mode
-        raise HTTPException(401, "No authenticated user (X-Forwarded-User missing)")
-    rec = next((r for r in an.incl_bias_proposals(instrument_id, survey_id) if r.get("record_id") == record_id), None)
+    rationale = sg.rationale_of(body.rationale)
+    who = sg.reviewer_identity(c, request)
     if rec is None:
-        raise HTTPException(404, f"Unknown bias proposal {record_id} for {instrument_id} survey {survey_id}")
-    view = ct.bias_proposal(rec)
-    if view["integrity_error"]:
-        raise HTTPException(409, f"Record {record_id} has a data-integrity error ({view['integrity_error']})")
-    if view["approval_status"] != "proposed" or view["status"] not in ct.PROPOSAL_STATUSES:
-        raise HTTPException(409, f"Record {record_id} is {view['approval_status']} / {view['status']}; "
-                                 "only an open proposal can be reviewed")
+        raise HTTPException(404, f"Unknown {label} {record_id}")
+    is_bias = rec.get("detection_method") == "between_set_bias_qc"
+    if is_bias:
+        view = ct.bias_proposal(rec)
+        err, status, open_ = view["integrity_error"], view["approval_status"], view["status"] in ct.PROPOSAL_STATUSES
+    else:
+        try:
+            err, status, open_ = None, ct.approval_status(rec), True
+        except ct.DataIntegrityError as e:
+            err, status, open_ = e.code, None, False
+    if err:
+        raise HTTPException(409, f"Record {record_id} has a data-integrity error ({err})")
+    if status != "proposed" or not open_:
+        raise HTTPException(409, f"Record {record_id} is {status}; only an open proposal can be reviewed")
     if so.same_person((c.user_id, c.email), rec.get("user")):
         raise HTTPException(403, "The reviewer must not be the author of the proposal")
-    row = so.build(rec, inst["dam_id"], body.decision, rationale, reviewer, body.reviewer_pe_license,
-                   _now())
-    st.add_review_signoff(row)
-    st.audit(c.email, "bias_proposal_review", inst["dam_id"], record_id,
+    base = so.build(rec, inst["dam_id"], body.decision, rationale, who["reviewer_id"], body.reviewer_pe_license,
+                    sg.now_utc(), action_type="bias_review" if is_bias else "data_correction_review",
+                    review_level=sg.review_level(c, inst["dam_id"]), reviewer_email=who["reviewer_email"],
+                    reviewer_sub=who["reviewer_sub"])
+    row = sg.append(st, request, base)
+    st.audit(c.email, "bias_proposal_review" if is_bias else "data_correction_review", inst["dam_id"], record_id,
              {"review_id": row["review_id"], "decision": body.decision, "signature_hash": row["signature_hash"],
-              "reviewer_id": reviewer, "survey_id": survey_id})
+              "chain_seq": row["chain_seq"],
+              "record_hash": row["record_hash"], "reviewer_id": who["reviewer_id"], "survey_id": rec.get("survey_id")})
     return {**row, "signature_verified": True, "applied_by_app": False}
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+def _incl(an, c: Ctx, instrument_id: str) -> dict:
+    inst = instrument_checked(an, c, instrument_id, "engineer")
+    if inst["instrument_type"] != "inclinometer":
+        raise HTTPException(400, "Not an inclinometer")
+    return inst
+
+
+@router.post("/instruments/{instrument_id}/incl/surveys/{survey_id}/bias-proposals/{record_id}/review")
+def review_bias_proposal(instrument_id: str, survey_id: str, record_id: str, body: BiasReviewBody, request: Request,
+                         c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
+    """An engineer's approve/reject of one engine bias proposal: one record appended to the dam's hash chain.
+    Never updates ref.incl_correction and never applies a correction: applying stays with the engine (§5.5)."""
+    inst = _incl(an, c, instrument_id)
+    rec = next((r for r in an.incl_bias_proposals(instrument_id, survey_id) if r.get("record_id") == record_id), None)
+    return _review(rec, f"bias proposal for {instrument_id} survey {survey_id}:", record_id, body, inst, request, c, st)
+
+
+@router.post("/instruments/{instrument_id}/incl/surveys/{survey_id}/corrections/{record_id}/review")
+def review_correction(instrument_id: str, survey_id: str, record_id: str, body: BiasReviewBody, request: Request,
+                      c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
+    """Approve/reject of any proposed ref.incl_correction data correction (depth / rotation / sensitivity / bias):
+    one chained record holding the original and the proposed value. Nothing is applied or overwritten."""
+    inst = _incl(an, c, instrument_id)
+    rec = next((r for r in an.incl_corrections([record_id]) if r.get("record_id") == record_id
+                and r.get("instrument_id") == instrument_id and r.get("survey_id") == survey_id), None)
+    return _review(rec, f"correction for {instrument_id} survey {survey_id}:", record_id, body, inst, request, c, st)

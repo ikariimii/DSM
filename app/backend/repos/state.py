@@ -4,6 +4,7 @@ Same SQL for both backends: statements are written with %s placeholders and
 converted to ? for SQLite. JSON columns are stored as text and decoded here."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -53,15 +54,29 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS {s}audit_log (
         id {serial}, ts TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, dam_id TEXT,
         target TEXT, detail TEXT)""",
-    # QA-039: data-layer table (../lakebase/001_app_schema.sql, column-compatible with UC audit.review_record),
-    # created here too so the app never depends on DDL order. Insert-only (triggers below).
+    # QA-039 v2: hash-chained, append-only record of EVERY reviewer action (bias / data-correction reviews, alarm
+    # acknowledge / close). Data-layer table ../lakebase/001_app_schema.sql (column-compatible with UC
+    # audit.review_record + chain columns); created here too so the app never depends on DDL order. Insert-only
+    # (triggers below). comment = the reviewer's rationale (required, non-empty); original_value / corrected_value =
+    # canonical JSON, the original is never overwritten (Ch.14 §14.4.1).
     """CREATE TABLE IF NOT EXISTS {s}review_signoff (
         review_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
-        review_level TEXT NOT NULL, decision TEXT NOT NULL, comment TEXT, reviewer_id TEXT NOT NULL,
-        reviewer_pe_license TEXT, signed_ts TEXT NOT NULL, signature_hash TEXT NOT NULL)""",
+        review_level TEXT NOT NULL, decision TEXT NOT NULL, comment TEXT NOT NULL CHECK (length(trim(comment)) > 0),
+        reviewer_id TEXT NOT NULL, reviewer_pe_license TEXT, signed_ts TEXT NOT NULL, signature_hash TEXT NOT NULL,
+        action_type TEXT NOT NULL, reviewer_email TEXT, reviewer_sub TEXT,
+        original_value TEXT NOT NULL, corrected_value TEXT NOT NULL,
+        chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL, prev_hash TEXT NOT NULL, record_hash TEXT NOT NULL,
+        signature TEXT, sig_alg TEXT, key_id TEXT)""",
+    # chain head: the serialization point for appends (row lock / sqlite write lock) and the tail anchor that makes a
+    # deleted LAST record detectable. Updated only inside the append transaction.
+    """CREATE TABLE IF NOT EXISTS {s}review_chain_head (
+        chain_id TEXT PRIMARY KEY, chain_seq INTEGER NOT NULL, head_hash TEXT NOT NULL, updated_ts TEXT NOT NULL)""",
 ]
 
 APPEND_ONLY = ("review_signoff",)
+# columns the v2 chain adds to a review_signoff table created earlier by lakebase/001 (v1 columns)
+SIGNOFF_V2_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id",
+                   "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
 
 
 class StateStore:
@@ -127,6 +142,16 @@ class StateStore:
         else:
             self.execute("ALTER TABLE {s}app_user ADD COLUMN IF NOT EXISTS user_id TEXT")
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON {s}app_user (user_id)")
+        if self.kind == "sqlite":
+            have = {r["name"] for r in self.execute("PRAGMA table_info(review_signoff)")}
+            for col in SIGNOFF_V2_COLS:
+                if col not in have:  # pragma: no cover - only a pre-v2 local sqlite file
+                    self.execute(f"ALTER TABLE review_signoff ADD COLUMN {col} {'INTEGER' if col == 'chain_seq' else 'TEXT'}")
+        else:
+            for col in SIGNOFF_V2_COLS:
+                self.execute(f"ALTER TABLE {{s}}review_signoff ADD COLUMN IF NOT EXISTS {col} "
+                             f"{'BIGINT' if col == 'chain_seq' else 'TEXT'}")
+        self.execute("CREATE UNIQUE INDEX IF NOT EXISTS review_signoff_chain_seq ON {s}review_signoff (chain_id, chain_seq)")
         self._append_only_guards()
 
     def _append_only_guards(self) -> None:
@@ -220,24 +245,27 @@ class StateStore:
         rows = self.execute(f"SELECT * FROM {{s}}alarm_ack WHERE event_id IN ({ph})", event_ids)
         return {r["event_id"]: r for r in rows}
 
-    def acknowledge(self, event_id: str, dam_id: str, actor: str) -> dict:
-        cur = self.ack_states([event_id]).get(event_id)
-        if cur and cur["state"] != "open":
-            raise ValueError(f"alarm {event_id} is already {cur['state']}")
-        self.execute(
-            "INSERT INTO {s}alarm_ack (event_id, dam_id, state, acknowledged_by, acknowledged_at) "
-            "VALUES (%s, %s, 'acknowledged', %s, %s) ON CONFLICT (event_id) DO UPDATE SET state = 'acknowledged', "
-            "acknowledged_by = EXCLUDED.acknowledged_by, acknowledged_at = EXCLUDED.acknowledged_at",
-            (event_id, dam_id, actor, now_iso()))
-        return self.ack_states([event_id])[event_id]
+    def acknowledge(self, event_id: str, dam_id: str, actor: str, q=None) -> dict:
+        """q: a transaction executor (append_chained `also`), so the state change and its chained record commit
+        together; the state is re-checked inside that transaction."""
+        q = q or self.execute
+        cur = q("SELECT * FROM {s}alarm_ack WHERE event_id = %s", (event_id,))
+        if cur and cur[0]["state"] != "open":
+            raise ValueError(f"alarm {event_id} is already {cur[0]['state']}")
+        q("INSERT INTO {s}alarm_ack (event_id, dam_id, state, acknowledged_by, acknowledged_at) "
+          "VALUES (%s, %s, 'acknowledged', %s, %s) ON CONFLICT (event_id) DO UPDATE SET state = 'acknowledged', "
+          "acknowledged_by = EXCLUDED.acknowledged_by, acknowledged_at = EXCLUDED.acknowledged_at",
+          (event_id, dam_id, actor, now_iso()))
+        return q("SELECT * FROM {s}alarm_ack WHERE event_id = %s", (event_id,))[0]
 
-    def close_alarm(self, event_id: str, dam_id: str, actor: str, reason: str) -> dict:
-        cur = self.ack_states([event_id]).get(event_id)
-        if not cur or cur["state"] != "acknowledged":
+    def close_alarm(self, event_id: str, dam_id: str, actor: str, reason: str, q=None) -> dict:
+        q = q or self.execute
+        cur = q("SELECT * FROM {s}alarm_ack WHERE event_id = %s", (event_id,))
+        if not cur or cur[0]["state"] != "acknowledged":
             raise ValueError(f"alarm {event_id} must be acknowledged before it is closed")
-        self.execute("UPDATE {s}alarm_ack SET state = 'closed', closed_by = %s, closed_at = %s, close_reason = %s "
-                     "WHERE event_id = %s", (actor, now_iso(), reason, event_id))
-        return self.ack_states([event_id])[event_id]
+        q("UPDATE {s}alarm_ack SET state = 'closed', closed_by = %s, closed_at = %s, close_reason = %s "
+          "WHERE event_id = %s", (actor, now_iso(), reason, event_id))
+        return q("SELECT * FROM {s}alarm_ack WHERE event_id = %s", (event_id,))[0]
 
     def add_comment(self, event_id: str, dam_id: str, actor: str, body: str) -> None:
         self.execute("INSERT INTO {s}alarm_comment (event_id, dam_id, author, created_at, body) VALUES (%s,%s,%s,%s,%s)",
@@ -313,23 +341,81 @@ class StateStore:
     def pfm_reviews(self, dam_id: str) -> list[dict]:
         return self.execute("SELECT * FROM {s}pfm_review WHERE dam_id = %s ORDER BY id DESC", (dam_id,))
 
-    # ------------------------------------------------------------ review sign-offs (QA-039, insert-only)
-    _SIGNOFF_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
-                     "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash")
+    # ------------------------------------------------------------ transactions
+    @contextlib.contextmanager
+    def transaction(self):
+        """One atomic unit on ONE connection; yields q(sql, params) -> rows. Commits on clean exit, rolls back on
+        error. sqlite: BEGIN IMMEDIATE takes the database write lock up front, so concurrent writers (threads or a
+        second process on the same file) are serialized. Postgres: one pooled connection; the pool commits on exit
+        and rolls back on error. No retry inside a transaction (a dropped connection aborts it; the caller retries)."""
+        if self.kind == "sqlite":
+            with self._lock:
+                conn = self._conn
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    yield lambda sql, params=(): self._q_sqlite(conn, sql, params)
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+            return
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            def q(sql, params=()):
+                cur.execute(sql.replace("{s}", self.prefix), tuple(params))
+                return [dict(r) for r in cur.fetchall()] if cur.description else []
+            yield q
 
-    def add_review_signoff(self, row: dict) -> dict:
-        """INSERT only. There is deliberately no update/delete method for this table."""
-        cols = self._SIGNOFF_COLS
-        self.execute(f"INSERT INTO {{s}}review_signoff ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
-                     tuple(row[c] for c in cols))
+    def _q_sqlite(self, conn, sql, params):
+        cur = conn.execute(sql.replace("{s}", self.prefix).replace("%s", "?"), tuple(params))
+        return [dict(r) for r in cur.fetchall()] if cur.description else []
+
+    # ------------------------------------------------------------ hash-chained review records (QA-039 v2, insert-only)
+    SIGNOFF_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+                    "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
+                    "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
+                    "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
+
+    def append_chained(self, chain_id: str, genesis: str, finalize, also=None) -> dict:
+        """Append one record to `chain_id` atomically. Under the chain-head lock (Postgres: SELECT ... FOR UPDATE on
+        review_chain_head; sqlite: the BEGIN IMMEDIATE write lock) read (seq, head_hash), call
+        finalize(seq + 1, head_hash) -> complete row, INSERT it, advance the head, then run also(q) (e.g. the alarm
+        state change) in the SAME transaction. Two app instances therefore cannot fork the chain; the UNIQUE
+        (chain_id, chain_seq) index is the backstop. Nothing is ever updated in review_signoff."""
+        with self.transaction() as q:
+            ins = ("INSERT INTO {s}review_chain_head (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s, 0, %s, %s) "
+                   "ON CONFLICT (chain_id) DO NOTHING")
+            q(ins, (chain_id, genesis, now_iso()))
+            lock = " FOR UPDATE" if self.kind != "sqlite" else ""
+            head = q("SELECT chain_seq, head_hash FROM {s}review_chain_head WHERE chain_id = %s" + lock, (chain_id,))[0]
+            row = finalize(int(head["chain_seq"]) + 1, head["head_hash"])
+            cols = self.SIGNOFF_COLS
+            q(f"INSERT INTO {{s}}review_signoff ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+              tuple(row.get(c) for c in cols))
+            q("UPDATE {s}review_chain_head SET chain_seq = %s, head_hash = %s, updated_ts = %s WHERE chain_id = %s",
+              (row["chain_seq"], row["record_hash"], now_iso(), chain_id))
+            if also is not None:
+                also(q)
         return dict(row)
+
+    def chain_rows(self, chain_id: str) -> list[dict]:
+        return self.execute("SELECT * FROM {s}review_signoff WHERE chain_id = %s ORDER BY chain_seq, review_id",
+                            (chain_id,))
+
+    def chain_head(self, chain_id: str) -> dict | None:
+        r = self.execute("SELECT * FROM {s}review_chain_head WHERE chain_id = %s", (chain_id,))
+        return r[0] if r else None
+
+    def chain_ids(self) -> list[str]:
+        ids = {r["chain_id"] for r in self.execute("SELECT DISTINCT chain_id FROM {s}review_signoff")}
+        ids |= {r["chain_id"] for r in self.execute("SELECT chain_id FROM {s}review_chain_head")}
+        return sorted(i for i in ids if i)
 
     def review_signoffs(self, subject_type: str, subject_ids: list[str]) -> list[dict]:
         if not subject_ids:
             return []
         marks = ", ".join(["%s"] * len(subject_ids))
         return self.execute(f"SELECT * FROM {{s}}review_signoff WHERE subject_type = %s AND subject_id IN ({marks}) "
-                            "ORDER BY signed_ts, review_id", (subject_type, *subject_ids))
+                            "ORDER BY chain_id, chain_seq", (subject_type, *subject_ids))
 
     # ------------------------------------------------------------ audit
     def audit(self, actor: str, action: str, dam_id: str | None = None, target: str | None = None,
