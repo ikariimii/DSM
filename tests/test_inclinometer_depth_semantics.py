@@ -158,3 +158,15 @@ def test_display_only_exports_cannot_become_raw_readings(export_type):
     with pytest.raises(ValueError, match="never re-reduced"):
         import_reading("gtilt", 0.6, 1.0, "I", "S", "t", "A", 10, -8, "digits",
                        CASING, L, depth_metadata=m)
+
+
+
+def test_read_only_metadata_mapping_cannot_bypass_display_only_guard():
+    from types import MappingProxyType
+    m = MappingProxyType(dict(BASE, export_type="processed"))
+    with pytest.raises(ValueError, match="never re-reduced"):
+        import_reading("digipro", 0.6, 1.0, "I", "S", "t", "A", 10, -8, "digits",
+                       CASING, L, depth_metadata=m)
+    raw = import_reading("digipro", 0.6, 1.0, "I", "S", "t", "A", 10, -8, "digits",
+                         CASING, L, depth_metadata=MappingProxyType(BASE))
+    assert json.loads(raw.depth_metadata_json) == BASE
