@@ -1,9 +1,10 @@
-"""QA-044 synthetic structural cases only. No vendor example or restricted file is read.
+"""Synthetic QA-044 structure/semantics only; no VDV data, headers or scalars.
 
-These tables are invented for parser contracts, not assertions about real vendor spelling,
-layout, values, depth semantics or parity. Explicit descriptors are always supplied.
+Evidence: procedures/inclinometer_export_evidence.md §§2, 5. These invented layouts
+are not native vendor grammars and cannot establish parity or complete depth settings.
 """
 from dataclasses import FrozenInstanceError
+import math
 
 import pytest
 
@@ -11,149 +12,209 @@ from dam_safety.inclinometer import vendor_import as v
 
 META = dict(depth_datum="ground", depth_label_ref="midpoint", ground_shift=1.2,
             index_above_toc=0.4, auto_adjust=False)
+HEADER = "Zlabel,Adisplay,Bdisplay"
+ROW = "1.6,2.4,3.2"
 RAW_MAP = dict(depth="Zlabel", a0="Pplus", a180="Pminus", b0="Qplus", b180="Qminus")
 RAW_HEADER = "Zlabel,Pplus,Pminus,Qplus,Qminus"
 RAW_ROW = "1.6,11,-9,21,-19"
+# Explicit test cases, not production defaults or sample-derived layouts.
+VARIANTS = [
+    ("gtilt", "synthetic.txt", "vdv_gtilt_plot_coordinates", "whitespace", "Plot_Coordinates"),
+    ("digipro", "synthetic.txt", "digipro_tilt_change_text", "\t", "Tilt_Change"),
+    ("digipro", "synthetic.csv", "digipro_profile_change_csv", ",", "Profile_Change"),
+    ("digipro2", "synthetic.txt", "digipro2_text", "\t", "Tilt_Change"),
+    ("digipro2", "synthetic.csv", "digipro2_spreadsheet", ";", "Profile_Change"),
+]
 
 
-def table(kind="raw", section=None, axes=("A", "B"), **kw):
+def table(kind="processed", quantity="Profile_Change", axes=("A", "B"), section=None, **kw):
     if kind == "raw":
-        columns = dict(RAW_MAP)
-        units = {k: "m" if k == "depth" else "digits" for k in columns}
+        columns = {k: h for k, h in RAW_MAP.items() if k == "depth" or k[0].upper() in axes}
         quantity = None
     else:
         prefix = "checksum_" if kind == "checksums" else "value_"
         columns = {"depth": "Zlabel", **{prefix + a.lower(): a + "display" for a in axes}}
-        units = {k: "m" if k == "depth" else "declared-unit" for k in columns}
-        quantity = "synthetic-quantity"
-    return v.TableLayout(kind=kind, columns=columns, units=units, axes=axes,
-                         survey_id="synthetic-survey", section=section, quantity=quantity, **kw)
+    units = {k: "m" if k == "depth" else "declared-unit" for k in columns}
+    return v.TableLayout(kind, columns, units, axes, "synthetic-survey",
+                         section=section, quantity=quantity, **kw)
 
 
-def layout(*tables, delimiter=",", decimal=".", encoding="utf-8", **kw):
-    return v.ExportLayout(tables=tuple(tables) or (table(),), delimiter=delimiter,
-                          decimal=decimal, encoding=encoding, **kw)
+def layout(*tables, variant="digipro2_spreadsheet", delimiter=",", decimal=".", encoding="utf-8", **kw):
+    return v.ExportLayout(variant=variant, tables=tuple(tables) or (table(),),
+                          delimiter=delimiter, decimal=decimal, encoding=encoding, **kw)
 
 
-def parse(content=None, profile="digipro2", filename=None, spec=None, **kw):
-    if content is None:
-        content = (RAW_HEADER + "\n" + RAW_ROW + "\n").encode()
-    if filename is None:
-        filename = "synthetic.txt" if profile == "gtilt" else "synthetic.csv"
-    options = dict(processed_only=False, enabled=True, layout=layout() if spec is None else spec)
+def content(header=HEADER, row=ROW, delimiter=","):
+    separator = "   " if delimiter == "whitespace" else delimiter
+    return (header.replace(",", separator) + "\r\n" + row.replace(",", separator) + "\r\n").encode()
+
+
+def parse(data=None, profile="digipro2", filename="synthetic.csv", spec=None, **kw):
+    options = dict(processed_only=True, enabled=True, layout=layout() if spec is None else spec)
     options.update(kw)
-    return v.parse_export(profile, filename, content, META, 0.8, **options)
+    return v.parse_export(profile, filename, content() if data is None else data, META, 0.8, **options)
 
 
-@pytest.mark.parametrize("profile", ["digipro", "digipro2"])
-@pytest.mark.parametrize("separator", [",", ";", "\t"])
-def test_declared_csv_separator_and_raw_headers(profile, separator):
-    content = (RAW_HEADER.replace(",", separator) + "\r\n" + RAW_ROW.replace(",", separator) + "\r\n").encode()
-    result = parse(content, profile=profile, spec=layout(delimiter=separator))
-    assert result.status == "UNVERIFIED" and result.mode == "raw_unverified"
-    assert len(result.raw_rows) == 1 and not result.display_tables
-    row = result.raw_rows[0]
-    assert row.values["depth"] == 1.6 and row.values["a0"] == 11
-    assert row.original_cells == ("1.6", "11", "-9", "21", "-19")
-    assert row.qa_flag == "UNVERIFIED" and result.request.raw_content is content
-    assert result.request.metadata == v.DepthMetadata(**META)
-    with pytest.raises(v.ImportRejected, match="parity"):
+def parse_raw(data=None, spec=None, **kw):
+    spec = spec or layout(table("raw"), variant="gtilt_file_tabulate", delimiter="\t")
+    return parse(content(RAW_HEADER, RAW_ROW, "\t") if data is None else data,
+                 profile="gtilt", filename="synthetic.out", spec=spec, processed_only=False, **kw)
+
+
+@pytest.mark.parametrize("profile,filename,variant,separator,quantity", VARIANTS)
+def test_processed_variants_are_display_only_with_exact_quantity(profile, filename, variant, separator, quantity):
+    data = content(delimiter=separator)
+    result = parse(data, profile, filename, layout(table(quantity=quantity), variant=variant, delimiter=separator))
+    assert result.status == "UNVERIFIED" and result.variant == variant
+    assert result.mode == "display_cross_check_only" and result.raw_rows == ()
+    assert result.display_tables[0].layout.quantity == quantity
+    row = result.display_tables[0].rows[0]
+    assert row.values["depth"] == 1.6 and row.values["value_a"] == 2.4
+    assert row.qa_flag == "UNVERIFIED"
+    assert row.original_cells == ("1.6", "2.4", "3.2")
+    assert "UNVERIFIED_DEPTH_METADATA" in row.qa_reasons and "UNVERIFIED_MISSING_RULES" in row.qa_reasons
+    assert result.request.raw_content is data and result.request.metadata == v.DepthMetadata(**META)
+    with pytest.raises(v.ImportRejected, match="never re-reduced"):
         result.require_reduction()
+
+
+@pytest.mark.parametrize("profile,filename,variant,separator,quantity", VARIANTS)
+@pytest.mark.parametrize("wrong_mode", ["raw_table", "raw_mode"])
+def test_processed_variants_cannot_be_declared_raw(profile, filename, variant, separator, quantity, wrong_mode):
+    t = table("raw") if wrong_mode == "raw_table" else table(quantity=quantity)
+    with pytest.raises(v.ImportRejected, match="processed-only"):
+        parse(content(delimiter=separator), profile, filename,
+              layout(t, variant=variant, delimiter=separator), processed_only=wrong_mode == "raw_table")
+
+
+@pytest.mark.parametrize("quantity", ["Profile", "Tilt", "Tilt_Change"])
+def test_profile_change_csv_is_not_an_absolute_profile_or_tilt(quantity):
+    with pytest.raises(v.ImportRejected, match="Profile_Change"):
+        parse(spec=layout(table(quantity=quantity), variant="digipro_profile_change_csv"), profile="digipro")
+
+
+def test_filename_never_turns_a_change_profile_into_absolute_profile():
+    result = parse(filename="synthetic-absolute-Profile.csv", profile="digipro",
+                   spec=layout(variant="digipro_profile_change_csv"))
+    assert result.display_tables[0].layout.quantity == "Profile_Change"
+
+
+@pytest.mark.parametrize("separator,decimal,row", [
+    (",", ".", "1.6,2.4,3.2"), (";", ".", "1.6;2.4;3.2"),
+    ("\t", ".", "1.6\t2.4\t3.2"), (";", ",", "1,6;2,4;3,2"),
+])
+def test_digipro2_spreadsheet_separator_and_decimal_are_caller_declared(separator, decimal, row):
+    data = (HEADER.replace(",", separator) + "\n" + row + "\n").encode()
+    result = parse(data, spec=layout(delimiter=separator, decimal=decimal))
+    assert result.display_tables[0].rows[0].values["value_b"] == 3.2
+    if decimal == ",":
+        with pytest.raises(v.ImportRejected, match="Non-numeric"):
+            parse(data, spec=layout(delimiter=separator, decimal="."))
+
+
+@pytest.mark.parametrize("quantity", sorted(v.PROCESSED_QUANTITIES))
+def test_digipro2_keeps_processed_quantities_distinct(quantity):
+    kind = "checksums" if quantity in {"Checksum", "Difference_Checksum"} else "processed"
+    result = parse(spec=layout(table(kind, quantity)))
+    assert result.raw_rows == () and result.display_tables[0].layout.quantity == quantity
+
+
+@pytest.mark.parametrize("profile,filename,variant,separator,quantity", VARIANTS)
+def test_variant_quantity_is_not_guessed(profile, filename, variant, separator, quantity):
+    with pytest.raises(v.ImportRejected, match="quantity"):
+        parse(content(delimiter=separator), profile, filename,
+              layout(table(quantity="synthetic-unknown-quantity"), variant=variant, delimiter=separator))
+
+
+@pytest.mark.parametrize("variant,profile,filename,delimiter", [
+    ("digipro_tilt_change_text", "digipro", "synthetic.txt", ","),
+    ("digipro_profile_change_csv", "digipro", "synthetic.csv", ";"),
+    ("digipro2_text", "digipro2", "synthetic.txt", ";"),
+    ("vdv_gtilt_plot_coordinates", "gtilt", "synthetic.txt", "\t"),
+    ("digipro2_spreadsheet", "digipro2", "synthetic.csv", "whitespace"),
+])
+def test_variant_separator_cannot_be_silently_coerced(variant, profile, filename, delimiter):
+    with pytest.raises(v.ImportRejected, match="separator"):
+        parse(profile=profile, filename=filename, spec=layout(variant=variant, delimiter=delimiter))
+
+
+def test_variant_profile_extension_and_checksum_role_must_agree():
+    with pytest.raises(v.ImportRejected, match="mismatch"):
+        parse(profile="digipro", spec=layout(variant="digipro2_spreadsheet"))
+    with pytest.raises(v.ImportRejected, match="mismatch"):
+        parse(filename="synthetic.txt")
+    with pytest.raises(v.ImportRejected, match="diagnostic"):
+        parse(spec=layout(table(quantity="Checksum")))
+    with pytest.raises(v.ImportRejected, match="variant"):
+        layout(variant=None)
 
 
 @pytest.mark.parametrize("extension", [".txt", ".out"])
 @pytest.mark.parametrize("delimiter", ["whitespace", "\t"])
-def test_gtilt_declared_text_layout(extension, delimiter):
-    separator = "   " if delimiter == "whitespace" else "\t"
-    content = (RAW_HEADER.replace(",", separator) + "\n" + RAW_ROW.replace(",", separator) + "\n").encode()
-    result = parse(content, profile="gtilt", filename="synthetic" + extension, spec=layout(delimiter=delimiter))
-    assert result.raw_rows[0].values["a180"] == -9
-
-
-def test_gtilt_fixed_width_explicit_spans():
-    spans = tuple((i * 12, (i + 1) * 12) for i in range(5))
-    render = lambda cells: "".join(c.ljust(12) for c in cells)
-    content = (render(RAW_HEADER.split(",")) + "\n" + render(RAW_ROW.split(",")) + "\n").encode()
-    result = parse(content, profile="gtilt", spec=layout(table(spans=spans), delimiter="fixed"))
-    assert result.raw_rows[0].values["b0"] == 21
-    with pytest.raises(v.ImportRejected, match="outside declared"):
-        parse(content + b"unmapped text beyond span" * 4,
-              profile="gtilt", spec=layout(table(spans=spans), delimiter="fixed"))
-
-
-def test_regional_decimal_is_explicit_not_guessed():
-    content = (RAW_HEADER.replace(",", ";") + "\n1,6;11,0;-9,0;21,0;-19,0\n").encode()
-    result = parse(content, spec=layout(delimiter=";", decimal=","))
-    assert result.raw_rows[0].values["depth"] == 1.6
-    assert result.raw_rows[0].original_cells[0] == "1,6"
-    with pytest.raises(v.ImportRejected, match="Non-numeric"):
-        parse(content, spec=layout(delimiter=";", decimal="."))
-    with pytest.raises(v.ImportRejected, match="Wrong decimal"):
-        parse((RAW_HEADER.replace(",", ";") + "\n" + RAW_ROW.replace(",", ";") + "\n").encode(),
-              spec=layout(delimiter=";", decimal=","))
-
-
-@pytest.mark.parametrize("kind", ["processed", "plot", "checksums"])
-def test_processed_only_tables_stay_display_only(kind):
-    spec = layout(table(kind=kind))
-    content = b"Zlabel,Adisplay,Bdisplay\n1.6,2.4,3.2\n"
-    result = parse(content, spec=spec, processed_only=True)
-    assert not result.raw_rows and len(result.display_tables) == 1
-    assert result.mode == "display_cross_check_only"
-    with pytest.raises(v.ImportRejected, match="never re-reduced"):
-        result.require_reduction()
-    with pytest.raises(v.ImportRejected, match="Processed-only"):
-        parse(content, spec=spec, processed_only=False)
-
-
-def test_mixed_raw_and_processed_sections_never_fill_missing_passes():
-    content = ("SYNTH RAW\n" + RAW_HEADER + "\n1.6,,-9,21,-19\n"
-               "SYNTH DISPLAY\nZlabel,Adisplay,Bdisplay\n1.6,2.4,3.2\n").encode()
-    result = parse(content, spec=layout(table(section="SYNTH RAW"), table("processed", section="SYNTH DISPLAY")))
-    assert len(result.raw_rows) == 1 and result.raw_rows[0].values["a0"] is None
-    assert result.raw_rows[0].qa_flag == "MISSING" and "MISSING_A0" in result.raw_rows[0].qa_reasons
-    assert result.display_tables[0].rows[0].values["value_a"] == 2.4
-    assert "value_a" not in result.raw_rows[0].values
+def test_gtilt_file_tabulate_raw_is_separate_from_vdv_plots(extension, delimiter):
+    result = parse(content(RAW_HEADER, RAW_ROW, delimiter), profile="gtilt", filename="synthetic" + extension,
+                   spec=layout(table("raw"), variant="gtilt_file_tabulate", delimiter=delimiter), processed_only=False)
+    assert result.raw_rows[0].values["a180"] == -9 and not result.display_tables
     with pytest.raises(v.ImportRejected, match="parity"):
         result.require_reduction()
 
 
-def test_unmapped_processed_column_is_preserved_not_used_as_raw():
-    content = (RAW_HEADER + ",OpaqueProcessed\n1.6,,-9,21,-19,2.4\n").encode()
-    row = parse(content).raw_rows[0]
-    assert row.values["a0"] is None and row.original_cells[-1] == "2.4"
-    assert "OpaqueProcessed" not in row.values
+def test_gtilt_fixed_width_requires_explicit_spans_and_no_truncation():
+    spans = tuple((i * 12, (i + 1) * 12) for i in range(5))
+    render = lambda cells: "".join(c.ljust(12) for c in cells)
+    data = (render(RAW_HEADER.split(",")) + "\n" + render(RAW_ROW.split(",")) + "\n").encode()
+    spec = layout(table("raw", spans=spans), variant="gtilt_file_tabulate", delimiter="fixed")
+    assert parse_raw(data, spec).raw_rows[0].values["b0"] == 21
+    with pytest.raises(v.ImportRejected, match="outside declared"):
+        parse_raw(data + b"synthetic text outside declared spans" * 3, spec)
 
 
-@pytest.mark.parametrize("field", sorted(RAW_MAP.values()))
-def test_missing_required_source_header_is_rejected(field):
-    header = RAW_HEADER.replace(field, "SyntheticOtherHeader")
+@pytest.mark.parametrize("passes", ["1.6,,-9,21,-19", "1.6,,,,"])
+def test_raw_gaps_are_never_filled_from_processed_tables(passes):
+    data = ("SYNTH RAW\n" + RAW_HEADER.replace(",", "\t") + "\n" + passes.replace(",", "\t") +
+            "\nSYNTH DISPLAY\n" + HEADER.replace(",", "\t") + "\n" + ROW.replace(",", "\t") + "\n").encode()
+    spec = layout(table("raw", section="SYNTH RAW"), table(section="SYNTH DISPLAY"),
+                  variant="gtilt_file_tabulate", delimiter="\t")
+    result = parse_raw(data, spec)
+    assert result.raw_rows[0].values["a0"] is None and result.raw_rows[0].qa_flag == "MISSING"
+    assert "value_a" not in result.raw_rows[0].values
+    assert result.display_tables[0].rows[0].values["value_a"] == 2.4
+
+
+def test_processed_values_do_not_create_passes_even_with_raw_named_extra_columns():
+    result = parse((HEADER + ",Pplus,Pminus\n1.6,,3.2,11,-9\n").encode())
+    assert not result.raw_rows
+    row = result.display_tables[0].rows[0]
+    assert row.values["value_a"] is None and row.original_cells[-2:] == ("11", "-9")
+    assert "a0" not in row.values and row.qa_flag == "MISSING"
+
+
+@pytest.mark.parametrize("field", ["Zlabel", "Adisplay", "Bdisplay"])
+def test_required_headers_are_explicit(field):
     with pytest.raises(v.ImportRejected, match="Missing required source columns"):
-        parse((header + "\n" + RAW_ROW + "\n").encode())
+        parse((HEADER.replace(field, "SyntheticOtherHeader") + "\n" + ROW + "\n").encode())
 
 
-def test_required_raw_pairs_cannot_be_mapped_from_processed_names_implicitly():
-    with pytest.raises(v.ImportRejected, match="canonical columns"):
-        v.TableLayout("raw", {"depth": "Zlabel", "value_a": "Adisplay"},
-                      {"depth": "m", "value_a": "mm"}, ("A",), "synthetic")
-    with pytest.raises(v.ImportRejected, match="one-to-one"):
-        v.TableLayout("raw", dict(RAW_MAP, a0="Pminus"),
-                      {k: "m" if k == "depth" else "digits" for k in RAW_MAP}, ("A", "B"), "synthetic")
-
-
-@pytest.mark.parametrize("content,reason", [
-    (b"Zlabel,Pplus,Pplus,Qplus,Qminus\n1.6,11,-9,21,-19\n", "duplicate"),
-    (b"Zlabel,Pplus,Pminus,Qplus,\n1.6,11,-9,21,-19\n", "Blank"),
-    ((RAW_HEADER + "\n1.6,11,-9\n").encode(), "column count"),
-    ((RAW_HEADER + "\n,11,-9,21,-19\n").encode(), "Missing depth"),
-    ((RAW_HEADER + "\n1.6,NAN,-9,21,-19\n").encode(), "Non-numeric"),
-    ((RAW_HEADER + "\n1.6,1e999,-9,21,-19\n").encode(), "Nonfinite"),
-    ((RAW_HEADER + '\n1.6,"unterminated\n').encode(), "Malformed"),
-    (RAW_HEADER.encode(), "at least one"),
+@pytest.mark.parametrize("data,reason", [
+    (b"Zlabel,Adisplay,Adisplay\n1.6,2.4,3.2\n", "duplicate"),
+    (b"Zlabel,Adisplay,\n1.6,2.4,3.2\n", "Blank"),
+    ((HEADER + "\n1.6,2.4\n").encode(), "column count"),
+    ((HEADER + "\n,2.4,3.2\n").encode(), "Missing depth"),
+    ((HEADER + "\n1.6,NAN,3.2\n").encode(), "Non-numeric"),
+    ((HEADER + "\n1.6,*,3.2\n").encode(), "Non-numeric"),
+    ((HEADER + "\n1.6,1e999,3.2\n").encode(), "Nonfinite"),
+    ((HEADER + '\n1.6,"unterminated\n').encode(), "Malformed"),
+    (HEADER.encode(), "at least one"),
 ])
-def test_malformed_structures_are_rejected(content, reason):
+def test_malformed_structure_and_unknown_nonnumeric_sentinels_fail(data, reason):
     with pytest.raises(v.ImportRejected, match=reason):
-        parse(content)
+        parse(data)
+
+
+def test_zeros_are_numeric_not_guessed_missing_or_boundary_anchors():
+    row = parse((HEADER + "\n1.6,-0.0,0.0\n").encode()).display_tables[0].rows[0]
+    assert row.values["value_a"] == 0 and row.values["value_b"] == 0
+    assert math.copysign(1, row.values["value_a"]) == -1 and row.qa_flag == "UNVERIFIED"
 
 
 @pytest.mark.parametrize("filename", ["file.GTL", "file.dux", "file.bin", "PC-SLIN", "file.xlsx", "Inclinalysis.dat"])
@@ -162,118 +223,110 @@ def test_native_and_other_binary_filenames_require_text_export(filename):
         parse(filename=filename)
 
 
-@pytest.mark.parametrize("content", [b"a\x00b", b"%PDF-binary", b"PK\x03\x04payload", b"GIF89a",
-                                     b"\x89PNG\r\n", b"\x01\x02payload"])
-def test_renamed_binary_content_requires_text_export(content):
+@pytest.mark.parametrize("data", [b"a\x00b", b"%PDF-binary", b"PK\x03\x04payload", b"GIF89a",
+                                  b"\x89PNG\r\n", b"\x01\x02payload", b"\xff\xffnot-utf8"])
+def test_renamed_binary_and_invalid_encoding_require_text_export(data):
     with pytest.raises(v.ImportRejected, match="export to text/CSV"):
-        parse(content)
+        parse(data)
 
 
-@pytest.mark.parametrize("profile", ["gtilt", "digipro", "digipro2"])
+@pytest.mark.parametrize("profile,filename,variant,separator,quantity", VARIANTS)
 @pytest.mark.parametrize("field", sorted(v.REQUIRED_METADATA))
-def test_parser_never_infers_missing_metadata(profile, field):
+def test_five_depth_fields_are_never_inferred(profile, filename, variant, separator, quantity, field):
     metadata = dict(META)
     del metadata[field]
     with pytest.raises(v.ImportRejected, match=field):
-        v.parse_export(profile, "synthetic.txt" if profile == "gtilt" else "synthetic.csv",
-                       b"synthetic", metadata, 0.8, processed_only=True, enabled=True, layout=layout())
+        v.parse_export(profile, filename, b"synthetic", metadata, 0.8, processed_only=True, enabled=True,
+                       layout=layout(table(quantity=quantity), variant=variant, delimiter=separator))
 
 
-def test_off_by_default_and_no_layout_sniffing(monkeypatch):
+def test_off_by_default_no_layout_sniffing_or_depth_conversion(monkeypatch):
     monkeypatch.delenv(v.FEATURE_FLAG, raising=False)
     with pytest.raises(v.ImportRejected, match="UNVERIFIED.*disabled"):
         parse(enabled=None)
     with pytest.raises(v.ImportRejected, match="layout required"):
-        v.parse_export("digipro2", "synthetic.csv", b"text", META, 0.8,
-                       processed_only=False, enabled=True)
+        v.parse_export("digipro2", "synthetic.csv", b"text", META, 0.8, processed_only=True, enabled=True)
+    row = parse().display_tables[0].rows[0]
+    assert row.values["depth"] == 1.6 and not hasattr(row, "depth_top_m")
 
 
-def test_explicit_header_names_do_not_trigger_datum_conversion():
-    # Parsing keeps vendor depth labels: QA-042 conversion belongs to a separate gated step.
-    result = parse()
-    assert result.raw_rows[0].values["depth"] == 1.6
-    assert result.request.metadata.ground_shift == 1.2
-    assert not hasattr(result.raw_rows[0], "depth_top_m")
-
-
-def test_no_silent_metadata_or_grammar_mutation():
-    columns = dict(RAW_MAP)
-    t = v.TableLayout("raw", columns, {k: "m" if k == "depth" else "digits" for k in columns},
-                      ("A", "B"), "synthetic")
-    columns["a0"] = "ChangedOutside"
+def test_original_bytes_cells_grammar_and_metadata_stay_immutable():
+    columns = {"depth": "Zlabel", "value_a": "Adisplay", "value_b": "Bdisplay"}
+    t = v.TableLayout("processed", columns, {k: "m" for k in columns}, ("A", "B"), "synthetic",
+                      quantity="Profile_Change")
+    columns["value_a"] = "ChangedOutside"
     result = parse(spec=layout(t))
     with pytest.raises(TypeError):
-        result.raw_rows[0].values["a0"] = 99
+        result.display_tables[0].rows[0].values["value_a"] = 99
     with pytest.raises(FrozenInstanceError):
         result.status = "VERIFIED"
-    assert result.tables[0].layout.columns["a0"] == "Pplus"
+    assert result.display_tables[0].layout.columns["value_a"] == "Adisplay"
 
 
-def test_section_markers_preamble_and_order_are_explicit():
-    content = ("SYNTH TITLE\nSYNTH RAW\n" + RAW_HEADER + "\n" + RAW_ROW + "\n").encode()
-    result = parse(content, spec=layout(table(section="SYNTH RAW"), preamble_lines=1))
-    assert result.request.raw_content == content
+def test_explicit_sections_preamble_bom_and_quoted_headers():
+    spec = layout(table(section="SYNTH DISPLAY"), preamble_lines=1, encoding="utf-8-sig")
+    data = ('SYNTH TITLE\nSYNTH DISPLAY\n"Zlabel",Adisplay,Bdisplay\n' + ROW + "\n").encode("utf-8-sig")
+    assert parse(data, spec=spec).request.raw_content is data
     with pytest.raises(v.ImportRejected, match="declared section"):
-        parse(content, spec=layout(table(section="SYNTH RAW")))
+        parse(data, spec=layout(table(section="SYNTH DISPLAY"), encoding="utf-8-sig"))
     with pytest.raises(v.ImportRejected, match="section markers"):
-        layout(table(), table("processed"))
+        layout(table(), table())
 
 
-def test_explicit_single_axis_pair_is_structural_not_a_biaxial_default():
-    t = v.TableLayout("raw", {"depth": "Zlabel", "a0": "Pplus", "a180": "Pminus"},
-                      {"depth": "m", "a0": "digits", "a180": "digits"}, ("A",), "synthetic")
-    result = parse(b"Zlabel,Pplus,Pminus\n1.6,11,-9\n", spec=layout(t))
-    assert set(result.raw_rows[0].values) == {"depth", "a0", "a180"}
-
-
-def test_unsupported_format_layouts_stop_without_guessing():
-    with pytest.raises(v.ImportRejected, match="separator"):
-        parse(spec=layout(delimiter="whitespace"))
-    with pytest.raises(v.ImportRejected, match="GTILT text"):
-        parse(profile="gtilt")
+def test_explicit_single_axis_and_deferred_profiles():
+    result = parse(b"Zlabel,Adisplay\n1.6,2.4\n", spec=layout(table(axes=("A",))))
+    assert set(result.display_tables[0].rows[0].values) == {"depth", "value_a"}
     with pytest.raises(v.ImportRejected, match="deferred"):
         parse(profile="rst")
-    with pytest.raises(v.ImportRejected, match="explicit column spans"):
-        layout(delimiter="fixed")
-    with pytest.raises(v.ImportRejected, match="cannot coincide"):
-        layout(delimiter=",", decimal=",")
 
 
-
-def test_quoted_csv_header_and_explicit_bom_encoding():
-    columns = dict(RAW_MAP, depth="Synthetic depth label")
-    t = v.TableLayout("raw", columns, {k: "m" if k == "depth" else "digits" for k in columns},
-                      ("A", "B"), "synthetic")
-    content = ('"Synthetic depth label",Pplus,Pminus,Qplus,Qminus\n' + RAW_ROW + "\n").encode("utf-8-sig")
-    result = parse(content, spec=layout(t, encoding="utf-8-sig"))
-    assert result.tables[0].original_header[0] == "Synthetic depth label"
-    assert result.request.raw_content == content
-    with pytest.raises(v.ImportRejected, match="Missing required"):
-        parse(content, spec=layout(t, encoding="utf-8"))
-
-
-def test_empty_raw_passes_are_not_replaced_by_display_values():
-    content = ("SYNTH RAW\n" + RAW_HEADER + "\n1.6,,,,\n"
-               "SYNTH DISPLAY\nZlabel,Adisplay,Bdisplay\n1.6,2.4,3.2\n").encode()
-    result = parse(content, spec=layout(table(section="SYNTH RAW"), table("plot", section="SYNTH DISPLAY")))
-    assert result.raw_rows[0].qa_flag == "MISSING"
-    assert all(result.raw_rows[0].values[k] is None for k in ("a0", "a180", "b0", "b180"))
-    assert len(result.display_tables) == 1
-
-
-def test_invalid_encoding_and_missing_metadata_never_fall_back():
-    with pytest.raises(v.ImportRejected, match="export to text/CSV"):
-        parse(b"\xff\xffnot-utf8")
-    with pytest.raises(v.ImportRejected, match="Missing required depth metadata"):
-        v.parse_export("gtilt", "synthetic.out", b"text", None, 0.8,
-                       processed_only=True, enabled=True, layout=layout(delimiter="whitespace"))
-
-
-def test_fixed_columns_never_guess_units_or_optional_missing_pair():
+def test_bad_units_spans_missing_metadata_and_ambiguous_decimal_are_rejected():
     with pytest.raises(v.ImportRejected, match="units required"):
         v.TableLayout("raw", RAW_MAP, {}, ("A", "B"), "synthetic")
     with pytest.raises(v.ImportRejected, match="metre depth"):
-        v.TableLayout("raw", RAW_MAP, {k: "ft" if k == "depth" else "digits" for k in RAW_MAP},
-                      ("A", "B"), "synthetic")
+        v.TableLayout("raw", RAW_MAP, {k: "ft" for k in RAW_MAP}, ("A", "B"), "synthetic")
     with pytest.raises(v.ImportRejected, match="nonoverlapping"):
         table(spans=((0, 12), (8, 20)))
+    with pytest.raises(v.ImportRejected, match="column spans"):
+        layout(variant="gtilt_file_tabulate", delimiter="fixed")
+    with pytest.raises(v.ImportRejected, match="cannot coincide"):
+        layout(decimal=",")
+    with pytest.raises(v.ImportRejected, match="Missing required depth metadata"):
+        v.parse_export("digipro2", "synthetic.csv", b"text", None, 0.8,
+                       processed_only=True, enabled=True, layout=layout())
+
+
+@pytest.mark.parametrize("quantity", ["Tilt", "Profile", "Profile_Change"])
+def test_digipro_text_tilt_change_does_not_become_absolute_tilt(quantity):
+    with pytest.raises(v.ImportRejected, match="Tilt_Change"):
+        parse(content(delimiter="\t"), "digipro", "synthetic.txt",
+              layout(table(quantity=quantity), variant="digipro_tilt_change_text", delimiter="\t"))
+
+
+def test_file_tabulate_processed_option_cannot_enter_raw_mode():
+    with pytest.raises(v.ImportRejected, match="Processed-only"):
+        parse(content(delimiter="\t"), "gtilt", "synthetic.out",
+              layout(variant="gtilt_file_tabulate", delimiter="\t"), processed_only=False)
+
+
+def test_raw_canonical_pairs_cannot_be_replaced_by_processed_columns():
+    with pytest.raises(v.ImportRejected, match="canonical columns"):
+        v.TableLayout("raw", {"depth": "Zlabel", "value_a": "Adisplay"},
+                      {"depth": "m", "value_a": "mm"}, ("A",), "synthetic")
+    with pytest.raises(v.ImportRejected, match="one-to-one"):
+        v.TableLayout("raw", dict(RAW_MAP, a0="Pminus"),
+                      {k: "m" for k in RAW_MAP}, ("A", "B"), "synthetic")
+
+
+def test_wrong_decimal_convention_and_undeclared_bom_are_not_normalized():
+    with pytest.raises(v.ImportRejected, match="Wrong decimal"):
+        parse(content(delimiter=";"), spec=layout(delimiter=";", decimal=","))
+    with pytest.raises(v.ImportRejected, match="Missing required"):
+        parse((HEADER + "\n" + ROW + "\n").encode("utf-8-sig"))
+
+
+def test_vdv_text_is_not_selected_as_file_tabulate_out_by_extension():
+    with pytest.raises(v.ImportRejected, match="mismatch"):
+        parse(content(delimiter="whitespace"), "gtilt", "synthetic.out",
+              layout(table(quantity="Plot_Coordinates"), variant="vdv_gtilt_plot_coordinates",
+                     delimiter="whitespace"))

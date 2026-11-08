@@ -2,14 +2,15 @@
 
 Depth rule: procedures/inclinometers.md §3.1; reference verify.py T17a–g.
 Only metadata declared by the caller is used; vendor defaults are never inferred.
+Variant evidence: procedures/inclinometer_export_evidence.md §§2, 5 (internal, cited only).
 """
 from __future__ import annotations
 
-import math
 import csv
 import io
-import re
+import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import PurePath
 from types import MappingProxyType
@@ -19,8 +20,8 @@ STATUS = "UNVERIFIED"
 FEATURE_FLAG = "INCL_VENDOR_IMPORTERS_UNVERIFIED"
 PROFILES = MappingProxyType({
     "gtilt": frozenset({".txt", ".out"}),
-    "digipro": frozenset({".csv"}),
-    "digipro2": frozenset({".csv"}),
+    "digipro": frozenset({".txt", ".tsv", ".csv"}),
+    "digipro2": frozenset({".txt", ".tsv", ".csv"}),
     "rst": frozenset({".csv"}),
     "geosense": frozenset({".csv"}),
 })
@@ -138,8 +139,17 @@ def prepare_import(profile, filename, raw_content, depth_metadata, probe_L_m, *,
 # Sources: GTILT PLUS v3 File/Tabulate, PDF p26 [printed 4-2]; DigiPro2
 # Manual 2025/5/29 Exporting Plots, PDF p33 [printed 31]. These format descriptions
 # establish output kinds and separator policies, NOT a universal column grammar.
+# Semantic restrictions: /workspace/dam-refs/procedures/inclinometer_export_evidence.md
+# §§2, 5. VDV plot exports are processed, not raw survey or universal header evidence.
 # Layouts below must be supplied explicitly; no vendor sample or default is embedded.
 STAGED_PARSERS = frozenset({"gtilt", "digipro", "digipro2"})
+EXPORT_VARIANTS = frozenset({
+    "gtilt_file_tabulate", "vdv_gtilt_plot_coordinates", "digipro_tilt_change_text",
+    "digipro_profile_change_csv", "digipro2_text", "digipro2_spreadsheet",
+})
+PROCESSED_QUANTITIES = frozenset({
+    "Tilt", "Tilt_Change", "Profile", "Profile_Change", "Checksum", "Difference_Checksum",
+})
 _NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 
 
@@ -211,6 +221,7 @@ class TableLayout:
 
 @dataclass(frozen=True)
 class ExportLayout:
+    variant: str                       # explicit export selection, never guessed from title/name
     tables: tuple[TableLayout, ...]
     delimiter: str                     # comma/semicolon/tab, or GTILT whitespace/fixed
     decimal: str                       # '.' | ','; no locale sniffing or thousands separator
@@ -218,6 +229,8 @@ class ExportLayout:
     preamble_lines: int = 0             # explicit count; preamble retained in raw_content
 
     def __post_init__(self):
+        if self.variant not in EXPORT_VARIANTS:
+            raise ImportRejected("Explicit supported export variant required; grammar remains UNVERIFIED")
         tables = tuple(self.tables)
         if not tables or any(not isinstance(t, TableLayout) for t in tables):
             raise ImportRejected("At least one explicit TableLayout required")
@@ -259,6 +272,7 @@ class ParsedTable:
 class ParsedExport:
     request: ImportRequest
     tables: tuple[ParsedTable, ...]
+    variant: str
     status: str = STATUS
 
     @property
@@ -337,9 +351,51 @@ def _parse_table(lines, layout, table):
         if values["depth"] is None:
             raise ImportRejected(f"Missing depth label in source record {i}")
         missing_values = tuple(key for key, value in values.items() if value is None)
-        reasons = ("UNVERIFIED_VENDOR_FORMAT",) + tuple("MISSING_" + key.upper() for key in missing_values)
+        reasons = ("UNVERIFIED_VENDOR_FORMAT", "UNVERIFIED_DEPTH_METADATA", "UNVERIFIED_MISSING_RULES") + tuple("MISSING_" + key.upper() for key in missing_values)
         rows.append(ExportRow(i, cells, MappingProxyType(values), "MISSING" if missing_values else STATUS, reasons))
     return ParsedTable(table, header, tuple(rows))
+
+
+def _validate_variant(request, layout):
+    """Enforce evidence-note §§2, 5 semantics, not a sample-derived header grammar.
+
+    File/Tabulate can explicitly describe raw surveys; the selected VDV/plot variants
+    cannot. A CSV filename is never evidence of an absolute Profile or raw passes.
+    """
+    variant = layout.variant
+    suffix = PurePath(request.filename).suffix.lower()
+    policies = {
+        "gtilt_file_tabulate": ("gtilt", {".txt", ".out"}, {"whitespace", "fixed", "\t"}),
+        "vdv_gtilt_plot_coordinates": ("gtilt", {".txt"}, {"whitespace", "fixed"}),
+        "digipro_tilt_change_text": ("digipro", {".txt", ".tsv"}, {"\t"}),
+        "digipro_profile_change_csv": ("digipro", {".csv"}, {","}),
+        "digipro2_text": ("digipro2", {".txt", ".tsv"}, {"\t"}),
+        "digipro2_spreadsheet": ("digipro2", {".csv"}, {",", ";", "\t"}),
+    }
+    profile, suffixes, delimiters = policies[variant]
+    if request.profile != profile or suffix not in suffixes:
+        raise ImportRejected("Export variant/profile/extension mismatch; no filename-based quantity inference")
+    if layout.delimiter not in delimiters:
+        raise ImportRejected("Explicit separator incompatible with selected export variant")
+    if variant == "gtilt_file_tabulate":
+        return  # raw/processed/checksum options remain distinct explicitly declared tables
+    if not request.processed_only or any(t.kind == "raw" for t in layout.tables):
+        raise ImportRejected("Selected plot variant is processed-only; never infer raw passes or re-reduce")
+    required_quantity = {
+        "vdv_gtilt_plot_coordinates": "Plot_Coordinates",
+        "digipro_tilt_change_text": "Tilt_Change",
+        "digipro_profile_change_csv": "Profile_Change",
+    }.get(variant)
+    for table in layout.tables:
+        if required_quantity is not None:
+            if table.kind not in {"processed", "plot"} or table.quantity != required_quantity:
+                raise ImportRejected(f"Selected variant requires processed quantity {required_quantity}")
+        else:
+            if table.quantity not in PROCESSED_QUANTITIES:
+                raise ImportRejected("Explicit processed quantity required; keep Tilt/Profile and their changes distinct")
+            checksum = table.quantity in {"Checksum", "Difference_Checksum"}
+            if (table.kind == "checksums") != checksum:
+                raise ImportRejected("Checksum quantities require diagnostic checksum tables, never raw passes")
 
 
 def parse_export(profile, filename, raw_content, depth_metadata, probe_L_m, *,
@@ -348,7 +404,7 @@ def parse_export(profile, filename, raw_content, depth_metadata, probe_L_m, *,
 
     Parse structure only: keep raw labels/units/values, never convert depths or produce
     RawReading objects. QA-042/043 gates remain unchanged and reduction remains blocked.
-    Regional CSV separators/decimals, monospaced boundaries, headers, table roles and
+    Export variant, regional CSV separators/decimals, monospaced boundaries, table roles and
     survey identity must be supplied, not inferred. No vendor-parity claim is made.
     """
     request = prepare_import(profile, filename, raw_content, depth_metadata, probe_L_m,
@@ -357,10 +413,7 @@ def parse_export(profile, filename, raw_content, depth_metadata, probe_L_m, *,
         raise ImportRejected(f"UNVERIFIED: {profile} parser deferred beyond this stage")
     if not isinstance(layout, ExportLayout):
         raise ImportRejected("Explicit UNVERIFIED export layout required; no vendor header/delimiter defaults")
-    if profile in {"digipro", "digipro2"} and layout.delimiter not in {",", ";", "\t"}:
-        raise ImportRejected("DigiPro CSV/tab export requires an explicit comma, semicolon or tab separator")
-    if profile == "gtilt" and layout.delimiter not in {"whitespace", "fixed", "\t"}:
-        raise ImportRejected("GTILT text requires explicit whitespace, fixed-width or tab layout")
+    _validate_variant(request, layout)
     try:
         text = raw_content.decode(layout.encoding)
     except UnicodeDecodeError as e:
@@ -388,4 +441,4 @@ def parse_export(profile, filename, raw_content, depth_metadata, probe_L_m, *,
     has_raw = any(t.layout.kind == "raw" for t in parsed)
     if not has_raw and not processed_only:
         raise ImportRejected("Processed-only exports are display/cross-check only; declare processed_only=true")
-    return ParsedExport(request, tuple(parsed))
+    return ParsedExport(request, tuple(parsed), layout.variant)

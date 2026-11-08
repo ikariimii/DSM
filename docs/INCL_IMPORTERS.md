@@ -8,14 +8,15 @@ Production v1 remains contract CSV and TOA5 until real vendor exports pass parit
 
 | Profile | In-scope exports |
 |---|---|
-| `gtilt` | GTILT text (`.txt`, `.out`) |
-| `digipro`, `digipro2` | DigiPro / DigiPro2 CSV |
+| `gtilt` | Explicit File/Tabulate text (`.txt`, `.out`), distinct from VDV processed Plot Coordinates |
+| `digipro` | Explicit processed Tilt_Change tab text or Profile_Change comma CSV |
+| `digipro2` | Explicit processed tab text or regionalized spreadsheet export |
 | `rst` | RST raw CSV — planned, parser deferred beyond this stage |
 | `geosense` | Geosense CSV — planned, parser deferred beyond this stage |
 
 Native `.GTL`, `.dux`, PC-SLIN and Inclinalysis binaries are out of scope. Reject them
 with an **export to text/CSV** message. Renaming a binary does not make it supported.
-Processed-only exports are **display/cross-check only, never re-reduced**. Their raw
+Processed-only exports are **display/cross-check only, never re-reduced**. Their source
 values remain unchanged, just as for raw exports; no substitution of processed values
 for missing raw passes is allowed.
 
@@ -139,19 +140,52 @@ suite results separately from a clean committed snapshot.
 
 ## QA-044 staged structural parser contract
 
-Clean-room format-description sources read for this stage (no manual example tables or
-vendor files were used):
+Clean-room format-description sources for this stage (no manual example tables or
+vendor sample contents are embedded):
 
 - GTILT PLUS User's Manual v3, **File/Tabulate**, PDF p26 [printed 4-2]: identifies raw,
   processed, checksum and plot-coordinate output categories and monospaced text presentation.
 - DigiPro2 Manual, footer 2025/5/29, **Exporting Plots**, PDF p33 [printed 31]: describes
   tab-separated text and regionalized spreadsheet separators/decimals. This describes plot
   export, not an authoritative raw-pass CSV schema. DigiPro compatibility is provisional.
+- Specialist evidence: `/workspace/dam-refs/procedures/inclinometer_export_evidence.md`
+  §§1–2, 5, particularly its per-variant distinctions and remaining blockers. This internal
+  note is cited, not copied; neither sample headers/rows nor derived values are embedded.
 
 Neither description defines universal literal headers, per-survey framing or fixed-width
 column offsets. The implementation deliberately embeds **no native header template**.
 A successful structural parse is not evidence that a supplied column map is a correct
 vendor mapping. These remain UNVERIFIED until reviewed against actual permitted exports.
+
+### Evidence-aligned export variants
+
+The Specialist's `inclinometer_export_evidence.md` §§2, 5 establishes the semantic
+restrictions below, **not universal native header grammars**. The VDV observations apply
+only to those examples, not all vendor versions or export choices.
+
+`ExportLayout.variant` must explicitly select one of these staged variants:
+
+| Variant | Profile / extension | Explicit separator | Meaning and allowed handling |
+|---|---|---|---|
+| `gtilt_file_tabulate` | `gtilt`, `.txt` / `.out` | whitespace, fixed-width or tab | Independently declared raw, processed, plot or checksum option; raw grammar is still UNVERIFIED |
+| `vdv_gtilt_plot_coordinates` | `gtilt`, `.txt` | whitespace or fixed-width | `Plot_Coordinates`, processed-only display/cross-check |
+| `digipro_tilt_change_text` | `digipro`, `.txt` / `.tsv` | tab | `Tilt_Change`, processed interval change, not absolute Tilt or raw passes |
+| `digipro_profile_change_csv` | `digipro`, `.csv` | comma | `Profile_Change`, processed cumulative change, **not absolute Profile** |
+| `digipro2_text` | `digipro2`, `.txt` / `.tsv` | tab | Explicit processed quantity, no fixed header grammar |
+| `digipro2_spreadsheet` | `digipro2`, `.csv` | comma, semicolon or tab | Explicit processed quantity, caller-declared regional separator **and decimal mark** |
+
+These are explicit selections, not filename/title detectors. A VDV GTILT Plot Coordinates
+file is **not a complete GTILT.OUT raw/checksum export**. Selecting any plot variant with
+`processed_only=False` or with a raw table is rejected; no opposite-pass readings are
+inferred, even if extra columns happen to look like raw columns. Raw survey exports need
+separate evidence/layouts; this stage exposes no DigiPro/DigiPro2 raw-survey variant.
+The independently declared GTILT File/Tabulate raw option is not evidence about VDV plots.
+
+DigiPro2 quantities stay distinct: `Tilt`, `Tilt_Change`, `Profile`, `Profile_Change`,
+`Checksum`, `Difference_Checksum`. Checksums use diagnostic tables, never raw pass pairs.
+The VDV-backed DigiPro CSV selection requires the label `Profile_Change` even if a file
+name mentions Profile. Other absolute Tilt/Profile exports are not silently relabelled
+as these change variants; they need separately declared, supported selections.
 
 ### Explicit layout and result API
 
@@ -163,9 +197,9 @@ unchanged. A later conversion/reduction step still requires the already-verified
 
 `ExportLayout` requires:
 
-- An ordered tuple of `TableLayout` descriptors;
-- an explicit delimiter: GTILT `whitespace`, `fixed`, or tab; DigiPro/DigiPro2 CSV comma,
-  semicolon or tab (the filename remains `.csv` within this stage's scope);
+- An explicit `variant` from the table above, preserved in `ParsedExport.variant`;
+- an ordered tuple of `TableLayout` descriptors;
+- an explicit delimiter compatible with that variant (text and spreadsheet modes are separate);
 - an explicit decimal convention (`.` or `,`, distinct from the field delimiter);
 - an explicit supported encoding (`utf-8`, `utf-8-sig`, `cp1252`, `latin-1`);
 - optionally an explicit count of preamble lines (default zero, never detected).
@@ -187,12 +221,15 @@ Header spelling, survey dates/IDs, axis order, quantities, raw-unit scale, local
 meaning and footer behavior are never guessed. Blank/duplicate headers, missing required
 columns, malformed quoting, wrong field counts, missing depth and nonnumeric/nonfinite
 mapped values are rejected. Blank pass/value cells remain null and receive MISSING flags;
-there is no processed-value substitution. No row is labelled OK or vendor-verified.
+that is this structural API's policy, **not a validated vendor missing-sentinel rule**.
+Signed and unsigned zeros remain numeric; they are not discarded as sentinels or boundary
+anchors. There is no processed-value substitution. No row is labelled OK or vendor-verified.
 Unmapped source columns are retained as original cells, not promoted into raw fields.
 
 `ParsedExport` keeps its request (original immutable bytes and depth metadata), immutable
 tables/headers/cells and parsed numeric values. `raw_rows` selects only explicitly raw
-tables; `display_tables` keeps other kinds separate. All results carry UNVERIFIED status.
+tables; `display_tables` keeps other kinds separate. All results carry UNVERIFIED status,
+including explicit row reasons for unverified format, full depth metadata and missing rules.
 A processed-only file must be declared `processed_only=True`; otherwise it is rejected.
 Both processed-only and raw-containing results refuse `require_reduction()`.
 
@@ -200,14 +237,32 @@ Native `.GTL`, `.dux`, PC-SLIN/Inclinalysis and unsupported binary extensions ar
 with an export-to-text/CSV message. Renamed binary signatures, control bytes and invalid
 encoding are rejected too. Unsupported/ambiguous text layouts fail rather than being
 silently coerced. Atlas arrays, graphics, unknown date-wide headers and automatic splitting
-of repeated-survey tables are not supported by a guessed schema.
+of repeated-survey tables are not supported by a guessed schema. Form-feed/pagination
+controls are currently rejected rather than silently removed; full source framing/footer
+support is still UNVERIFIED. The variant declaration alone is not a complete VDV-file parser.
+
+### Remaining evidence gaps and restricted samples
+
+The five depth fields are mandatory declarations, **not complete verified depth metadata**.
+Stickup-applied state, actual output-point/boundary placement, casing extent, settings,
+corrections and source units still need the separate QA-042 gate and evidence. Parsing does
+not fill them, run depth conversion or claim a grid fit establishes their meaning.
+Exact full-file grammars, missing sentinels and complete per-file depth settings remain
+UNVERIFIED (`inclinometer_export_evidence.md` §5); QA-042/043 code is not reopened.
+
+The VDV samples are **internal-test-only**, licence unstated (evidence note §4). Never copy
+samples, excerpts, numeric results or derived scalars into this repo or shipped artifacts.
+Current parser tests are synthetic only and do not read VDV files. Any future internal VDV
+experiment must read the original via an explicitly provided environment-variable path,
+skip when unset/absent, and persist neither the file nor derived values. It cannot claim
+redistributable fixtures or vendor parity. Ivancich remains a separate arithmetic oracle.
 
 ### Questions for the Inclinometer Specialist (format only)
 
 1. Authoritative literal header sets, section markers and column boundaries for each
    GTILT File/Tabulate output kind and version; how multiple dates/surveys are framed.
-2. DigiPro/DigiPro2 CSV/TSV header/axis/date layout and locale declarations; whether any
-   supported export actually carries raw passes (the cited page documents plot export).
+2. Exact DigiPro/DigiPro2 text/spreadsheet header/axis/date layout and locale declarations.
+   The reviewed VDV variants are processed-only; a future raw survey export needs separate evidence.
 3. Explicit units/scales, blank/sentinel rules, optional checksum columns, footer lines,
    repeated sections and distinguishing plot boundary rows from reading rows in each format.
 4. Specialist-approved mappings to accompany real vendor exports for QA parity. No need
