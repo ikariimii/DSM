@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import json
 from dataclasses import dataclass, replace
 
 from .installation import interval_top_from_label
@@ -33,6 +34,7 @@ class RawReading:
     qa_reason: str = ""
     raw_depth_label: str | float | None = None   # depth label exactly as in the source file (kept, never edited)
     depth_reference: str = "top_of_casing"       # source label convention (installation.DEPTH_REFERENCES)
+    depth_metadata_json: str | None = None      # immutable per-output provenance, never overwrite raw depth
 
 
 def _num(v):
@@ -80,12 +82,17 @@ def make_reading(instrument_id, survey_id, survey_ts_utc, depth_top_m, axis, raw
 
 
 def import_reading(profile, raw_depth_label, label_unit_m, instrument_id, survey_id, survey_ts_utc, axis, raw_r0,
-                   raw_r180, raw_unit, casing_depth_m=None, L_m=None, system="probe", max_abs=None) -> RawReading:
+                   raw_r180, raw_unit, casing_depth_m=None, L_m=None, system="probe", max_abs=None, *, depth_metadata=None) -> RawReading:
     """make_reading with the depth label re-keyed per import profile (installation.IMPORT_PROFILES): stores the interval
     top from top of casing, the raw label and depth_reference ('from_bottom_label' for the workbook profile only)."""
-    top, ref = interval_top_from_label(profile, raw_depth_label, label_unit_m, casing_depth_m, L_m)
+    if profile in ("gtilt", "digipro") and isinstance(depth_metadata, dict):
+        if depth_metadata.get("export_type") in ("processed", "plot"):
+            raise ValueError("Processed/plot-only exports are display/cross-check only; never re-reduced")
+    top, ref = interval_top_from_label(profile, raw_depth_label, label_unit_m, casing_depth_m, L_m,
+                                       depth_metadata=depth_metadata)
     r = make_reading(instrument_id, survey_id, survey_ts_utc, top, axis, raw_r0, raw_r180, raw_unit, system, max_abs)
-    return replace(r, raw_depth_label=raw_depth_label, depth_reference=ref)
+    return replace(r, raw_depth_label=raw_depth_label, depth_reference=ref,
+                   depth_metadata_json=None if depth_metadata is None else json.dumps(depth_metadata, sort_keys=True))
 
 
 def renormalise(r: RawReading, system: str) -> RawReading:

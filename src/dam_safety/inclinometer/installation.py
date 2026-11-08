@@ -74,19 +74,25 @@ def rekey_from_bottom_label(label_from_bottom_m: float, casing_depth_m: float, L
 # how the SOURCE file labelled depth, and the raw label is kept next to the re-keyed value.
 #   workbook : labels are feet from the BOTTOM; top = casing_depth - d - L (workbook: 28 - d ft) [REPORT D2; verify
 #              T13d/T13e]. Author intent UNVERIFIED (docs/VERIFICATION.md INC-LABEL): inferred from T13e only.
-#   gtilt    : native depths from the top of casing, kept as-is.
-#   digipro  : native depths from the top of casing (DMM row label = interval top, procedure §4.0 / verify T11b), kept.
+#   contract : already-normalised silver depth (NOT a vendor import), checked by batch's full-grid QC.
+#   gtilt/digipro: REQUIRE explicit per-output depth metadata; unknown placement/settings are rejected.
+# Source: procedures/inclinometer_depth_semantics.md §§2–7; procedures/inclinometers.md §3.1.
 DEPTH_REFERENCES = ("top_of_casing", "from_bottom_label")
-IMPORT_PROFILES = {"workbook": "from_bottom_label", "gtilt": "top_of_casing", "digipro": "top_of_casing"}
+IMPORT_PROFILES = {"workbook": "from_bottom_label", "contract": "top_of_casing",
+                   "gtilt": "metadata_required", "digipro": "metadata_required"}
 
 
 def interval_top_from_label(profile: str, raw_label, label_unit_m: float, casing_depth_m: float | None = None,
-                            L_m: float | None = None) -> tuple[float, str]:
+                            L_m: float | None = None, *, depth_metadata=None) -> tuple[float, str]:
     """(depth_top_m from top of casing, depth_reference) for one source depth label. No implicit guessing: the
-    from-bottom mapping happens only for the 'workbook' profile and needs casing depth and L."""
+    from-bottom mapping happens only for 'workbook'. Vendor profiles require declared metadata
+    plus casing depth and L; no native-from-top assumption is made (QA-042)."""
     if profile not in IMPORT_PROFILES:
         raise ValueError(f"unknown import profile {profile!r}; expected one of {sorted(IMPORT_PROFILES)}")
     ref = IMPORT_PROFILES[profile]
+    if ref == "metadata_required":
+        from .depth_semantics import interval_top
+        return interval_top(profile, raw_label, label_unit_m, casing_depth_m, L_m, depth_metadata), "top_of_casing"
     d = float(raw_label) * label_unit_m
     if not math.isfinite(d):
         raise ValueError("depth label must be finite")

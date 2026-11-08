@@ -41,15 +41,23 @@ def test_workbook_profile_from_bottom_label_rekeyed_raw_label_kept():
 
 
 @pytest.mark.parametrize("profile", ["gtilt", "digipro"])
-def test_gtilt_digipro_keep_native_from_top_depths(profile):
-    top, ref = interval_top_from_label(profile, 2, FT, 30 * FT, 2 * FT)
+def test_gtilt_digipro_require_declared_from_top_depths(profile):
+    metadata = dict(depth_datum="toc", depth_label_ref="top", ground_shift=0.0,
+                    index_above_toc=0.0, auto_adjust=False, export_type="raw_survey", depth_mode="depth",
+                    output_point="top", placement_verified=True, placement_evidence="synthetic fixture",
+                    settings_verified=True, additional_depth_corrections="none", probe_type="classic",
+                    apply_stickup=False, stickup_value_m=0.0)
+    with pytest.raises(ValueError, match="metadata"):
+        interval_top_from_label(profile, 2, FT, 30 * FT, 2 * FT)
+    top, ref = interval_top_from_label(profile, 2, FT, 30 * FT, 2 * FT, depth_metadata=metadata)
     assert ref == "top_of_casing" and top == pytest.approx(2 * FT, abs=1e-9)     # NOT re-keyed to 26 ft
-    r = import_reading(profile, 2.0, FT, "I1", "S1", "t", "B", 1, 1, "u", 30 * FT, 2 * FT)
+    r = import_reading(profile, 2.0, FT, "I1", "S1", "t", "B", 1, 1, "u", 30 * FT, 2 * FT,
+                       depth_metadata=metadata)
     assert r.depth_reference == "top_of_casing" and r.raw_depth_label == 2.0
     assert make_reading("I1", "S1", "t", 0.0, "A", 1, 1, "u").depth_reference == "top_of_casing"
     with pytest.raises(ValueError):
         interval_top_from_label("excel_guess", 2, FT)
-    assert set(IMPORT_PROFILES) == {"workbook", "gtilt", "digipro"}
+    assert set(IMPORT_PROFILES) == {"workbook", "contract", "gtilt", "digipro"}
 
 
 # ---- (2) rotation, axis A ------------------------------------------------------------------------------------------

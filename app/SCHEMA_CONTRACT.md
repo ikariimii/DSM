@@ -287,27 +287,25 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       head_missing | head_mismatch | signature_invalid.
    f. **Rebase:** this branch (`app/v1.5-audit-chain`) is built on e01e1ab → a9e7d56. a9e7d56 + e01e1ab must be rebased onto
       QA's fe4ed7b before any push (the DA reports a `docs/VERIFICATION.md` conflict). The app did not rebase.
-11. **QA-043 a/b/c: inclinometer depth-grid QC (engine patch proposal; app guard in place).**
-    The engine (`src/dam_safety/inclinometer/batch.py`, DA-owned) keys survey rows by interval top in a dict. A
-    duplicate depth is resolved last-wins with qa_flag OK (043b). There is no grid check, so off-grid labels and labels
-    at or below the casing bottom are reduced as OK (043c). `reduction.reduce_survey` breaks the cumulative only on an
-    explicit None, so an absent depth row is summed across as zero change (043a).
+11. **QA-043 a/b/c: inclinometer depth-grid QC (engine and app guard implemented).**
+    Both layers use the expected interval-top grid. The engine change was assigned to App Dev;
+    duplicate labels no longer resolve last-wins, rejected labels are never reduced, and missing
+    intervals cannot contribute an implicit zero to cumulative displacement.
     - **App guard (this branch):** `backend/incl_depth.py check_profile` runs on every served profile (demo and SQL).
       The grid is the installation row valid at survey time: tops 0, L, … < casing_depth_m. Rows are flagged as follows:
       DEPTH_OFF_GRID, DEPTH_BELOW_CASING, DEPTH_DUPLICATE (every copy) and DEPTH_GRID_UNKNOWN rows are BAD, and their
       values are nulled. Each absent top gets a placeholder row with qa_flag MISSING and reason DEPTH_MISSING. Every
       cumulative (cum_a, cum_b, resultant) at or above a gap, a rejected row or a QC-BAD/MISSING row is nulled
       (CUM_GAP_BELOW), because an upstream sum may already include it. Increments stay shown. No row is dropped.
-    - **Engine patch (proposal, not applied):** `app/docs/proposals/QA-043_engine_depth_grid.patch` changes
-      `batch.py` and adds `tests/test_inclinometer_depth_grid.py` (7 tests). Rejected labels produce no reading, so they
-      are never reduced. Every expected top is emitted. An absent top in the survey or in the baseline cuts the
-      cumulative above it: the row there is DEPTH_MISSING or BASELINE_DEPTH_MISSING, and the rows above carry
-      CUM_GAP_BELOW. A non-numeric label sets DEPTH_LABEL_INVALID, which is BAD for the whole survey. Verified on a
-      temporary worktree of HEAD with the patch applied: the 3 QA-043 strict xfails in
-      `qa/test_gtilt_digipro_parity.py` XPASS, the QA-042 xfail is still xfail (no depth-semantics change), and root
-      `tests/` give 382 passed and 1 skipped, plus 1 failure that also fails without the patch
-      (`test_catalog_seed_in_sync_with_manifests`: a new manifest DS-INC-IVANCICH-CNR is not in the seed). When the DA
-      applies the patch, QA should drop the 3 xfail markers.
+    - **Engine:** `batch.reduce_instrument` builds `interval_tops_m(casing_depth, L)` for the
+      installation valid at survey time. Every duplicate copy is excluded before reduction, every
+      expected top is emitted, and absent/current/baseline BAD or MISSING passes break the affected
+      axis cumulative at and above the gap. Reasons include DEPTH_MISSING, BASELINE_DEPTH_MISSING,
+      PASS_MISSING_A/B and CUM_GAP_BELOW_A/B. No first/last duplicate wins. Non-numeric/nonfinite
+      labels fail closed with DEPTH_LABEL_INVALID. Tests: `tests/test_inclinometer_depth_grid.py`.
+      The saved `app/docs/proposals/QA-043_engine_depth_grid.patch` is a historical proposal;
+      the implementation additionally handles axis-specific gaps, negative/nonfinite labels and invalid grids.
+      QA's strict xfail markers are intentionally unchanged.
     - **Vocabulary for the DA's qa_reason list:** DEPTH_MISSING and BASELINE_DEPTH_MISSING (MISSING); DEPTH_DUPLICATE,
       DEPTH_OFF_GRID, DEPTH_BELOW_CASING, DEPTH_GRID_UNKNOWN and DEPTH_LABEL_INVALID (BAD); CUM_GAP_BELOW (MISSING, applies
       to the cumulative only).
@@ -322,7 +320,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       - No manufacturer page prescribes software handling of missing, duplicate or off-grid rows. Treating
         DUPLICATE, OFF_GRID and BELOW_CASING as BAD is **UNVERIFIED (engineering judgment)**.
     - **Worked examples** (SYNTHETIC, L = 0.5 m, casing 5.0 m, so tops 0.0–4.5 m; every increment +1.0 mm; asserted
-      in `tests/test_incl_depth.py` and the patch's `tests/test_inclinometer_depth_grid.py`):
+      in `app/tests/test_incl_depth.py` and `tests/test_inclinometer_depth_grid.py` (scaled synthetic inputs)):
       - **WE-043a (missing 3.5 m):** cum 4.5 = 1.0 mm and 4.0 = 2.0 mm; 3.5 m is MISSING. Cum at 0.0–3.0 m is
         withheld. A silent sum would show 9.0 mm at 0.0 m, understating the true value by the unknown increment.
       - **WE-043b (2.0 m twice, increments 1.0 and 9.0 mm):** both copies are BAD. Cum at 2.5–4.5 m = 5.0…1.0 mm,
@@ -331,5 +329,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
         upstream sum included it, so it withholds every cumulative; an included row would show 11.0 mm at 0.0 m.
         With the engine patch the row is never reduced, so cum at 0.0 m = 10.0 mm. Labels offset +0.2 m: all ten
         rows are OFF_GRID BAD and all ten tops are MISSING.
-    - QA-042 depth semantics are not changed by QA-043. They are handled in the importers (QA-044, see
-      `docs/INCL_IMPORTERS.md`).
+    - **QA-042:** `gtilt`/`digipro` profiles now require explicit verified depth settings and output placement;
+      missing or UNVERIFIED interpretations and off-grid converted tops are rejected. The stored-depth
+      `contract` profile is separate. See root `docs/INCL_IMPORTERS.md` for the field contract, elevation/AT
+      handling and citations to `procedures/inclinometer_depth_semantics.md` §§2–7. Parser stubs remain disabled.

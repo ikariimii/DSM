@@ -41,7 +41,7 @@ REDUCED_COLUMNS = ("dam_id", "instrument_id", "survey_id", "survey_ts", "initial
                    "probe_constants")
 _SEV = {"OK": 0, "SUSPECT": 1, "MISSING": 2, "BAD": 3}
 GRID_TOL_M = 1e-6                                 # QA-043: label must sit on an interval top within this
-_PROFILE = {"from_bottom_label": "workbook", "top_of_casing": "gtilt"}   # gtilt == digipro: native from-top depths
+_PROFILE = {"from_bottom_label": "workbook", "top_of_casing": "contract"}   # already-normalised silver rows, never vendor defaults
 
 
 @dataclass(frozen=True)
