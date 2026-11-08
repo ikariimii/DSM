@@ -7,6 +7,7 @@ share one code path [procedure §3 table: K and L rows]."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 FT = 0.3048
 IN = 0.0254
@@ -19,7 +20,7 @@ class Probe:
     raw_unit: str         # e.g. 'sin*20000' (procedure §8 raw_unit vocabulary)
 
     def __post_init__(self):
-        if not (self.L_m > 0 and self.K > 0):
+        if not (math.isfinite(self.L_m) and math.isfinite(self.K) and self.L_m > 0 and self.K > 0):
             raise ValueError("L_m and K must be positive")
 
 
@@ -44,10 +45,17 @@ class Installation:
 
     def interval_tops_m(self) -> list[float]:
         """Interval tops, top-down: 0, L, 2L, ... while top + L <= casing depth."""
-        n = int(round(self.casing_depth_m / self.probe.L_m))
-        if abs(n * self.probe.L_m - self.casing_depth_m) > 1e-6:
-            raise ValueError("casing depth is not a whole number of intervals")
-        return [round(i * self.probe.L_m, 9) for i in range(n)]
+        return interval_tops_m(self.casing_depth_m, self.probe.L_m)
+
+
+def interval_tops_m(casing_depth_m: float, L_m: float) -> list[float]:
+    """Expected interval tops; procedure §3.1/§4.0 and depth-semantics §7 (QA-043)."""
+    if not all(math.isfinite(v) and v > 0 for v in (casing_depth_m, L_m)):
+        raise ValueError("casing depth and L must be finite and positive")
+    n = int(round(casing_depth_m / L_m))
+    if not n or abs(n * L_m - casing_depth_m) > 1e-6:
+        raise ValueError("casing depth is not a whole number of intervals")
+    return [round(i * L_m, 9) for i in range(n)]
 
 
 def rekey_from_bottom_label(label_from_bottom_m: float, casing_depth_m: float, L_m: float) -> float:
@@ -80,6 +88,8 @@ def interval_top_from_label(profile: str, raw_label, label_unit_m: float, casing
         raise ValueError(f"unknown import profile {profile!r}; expected one of {sorted(IMPORT_PROFILES)}")
     ref = IMPORT_PROFILES[profile]
     d = float(raw_label) * label_unit_m
+    if not math.isfinite(d):
+        raise ValueError("depth label must be finite")
     if ref == "from_bottom_label":
         if casing_depth_m is None or L_m is None:
             raise ValueError("workbook profile needs casing_depth_m and L_m")
