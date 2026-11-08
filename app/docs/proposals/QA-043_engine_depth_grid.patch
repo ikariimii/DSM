@@ -1,5 +1,5 @@
 diff --git a/src/dam_safety/inclinometer/batch.py b/src/dam_safety/inclinometer/batch.py
-index c16bc4b..cff2694 100644
+index c16bc4b..1862a6f 100644
 --- a/src/dam_safety/inclinometer/batch.py
 +++ b/src/dam_safety/inclinometer/batch.py
 @@ -40,6 +40,7 @@ REDUCED_COLUMNS = ("dam_id", "instrument_id", "survey_id", "survey_ts", "initial
@@ -10,7 +10,7 @@ index c16bc4b..cff2694 100644
  _PROFILE = {"from_bottom_label": "workbook", "top_of_casing": "gtilt"}   # gtilt == digipro: native from-top depths
  
  
-@@ -87,16 +88,55 @@ def correction_from_row(r: dict) -> C.CorrectionRecord:
+@@ -87,16 +88,59 @@ def correction_from_row(r: dict) -> C.CorrectionRecord:
      return C.CorrectionRecord(**vals)
  
  
@@ -31,7 +31,11 @@ index c16bc4b..cff2694 100644
 +    QA-043 b/c: every label is checked against the installation grid (interval_tops_m). Off-grid or negative labels
 +    (DEPTH_OFF_GRID), labels at/below the casing bottom (DEPTH_BELOW_CASING), every copy of a depth that occurs more
 +    than once in a survey (DEPTH_DUPLICATE, no last-wins) and every label when the grid is unknown
-+    (DEPTH_GRID_UNKNOWN) produce NO reading: they are reported in the 4th element and never reduced."""
++    (DEPTH_GRID_UNKNOWN) produce NO reading: they are reported in the 4th element and never reduced.
++    Sources: procedures/inclinometers.md §3.1 (engine depth = interval top from TOC on the L grid), §4.0 (CUM(d) =
++    sum over EVERY interval with top >= d, from the fixed bottom [DGSI-DMM PDF p100 [printed p9-10]]), §7 "Missing
++    depth / pass" -> MISSING (engine rule); inclinometers/user_tool/REPORT.md E9 (silent 0 on bad input). No vendor
++    page prescribes duplicate/off-grid handling: BAD is engineering judgment (UNVERIFIED as a vendor rule)."""
      inst, out = ir.installation, {}
      prof = _PROFILE[ir.depth_reference]
 +    tops = _expected_tops(inst)
@@ -71,7 +75,7 @@ index c16bc4b..cff2694 100644
          for ax, a, b in (("A", "a0", "a180"), ("B", "b0", "b180")):
              if r.get(a) is None and r.get(b) is None:
                  continue
-@@ -105,6 +145,13 @@ def _readings(ir: InstallationRow, rows, label_unit_m: float = 1.0):
+@@ -105,6 +149,13 @@ def _readings(ir: InstallationRow, rows, label_unit_m: float = 1.0):
      return out
  
  
@@ -85,7 +89,7 @@ index c16bc4b..cff2694 100644
  def _pairs(readings, axis):
      return {r.depth_top_m: (r.r0, r.r180) for r in readings
              if r.axis == axis and r.qa_flag in ("OK", "SUSPECT")}
-@@ -189,14 +236,16 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+@@ -189,14 +240,16 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
              bad_recs.add(r.get("survey_id"))                       # invalid stored record: skipped, flagged
      order = sorted(surveys, key=lambda s: (str(surveys[s][0]), s))
      base_id = inst.baseline_survey_id if inst.baseline_survey_id in surveys else order[0]   # None = earliest
@@ -104,7 +108,7 @@ index c16bc4b..cff2694 100644
          reasons, sev = [], 0
          try:
              rows, _audit = reduce_with_corrections(rd, base_rd, inst.probe, recs, inst.instrument_id, sid,
-@@ -210,6 +259,10 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+@@ -210,6 +263,10 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
              rows, applied_ids = {}, []
              reasons.append(f"CORRECTION_ERROR:{type(e).__name__}")
              sev = 3
@@ -115,7 +119,7 @@ index c16bc4b..cff2694 100644
          if sid in bad_recs:
              reasons.append("CORRECTION_RECORD_INVALID")
              sev = max(sev, 1)
-@@ -242,7 +295,13 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+@@ -242,7 +299,13 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
          survey_reason = C.merge_qa_reason(",".join(dict.fromkeys(reasons)), info)
          by = {(r.depth_top_m, r.axis): r for ax_rows in rows.values() for r in ax_rows}
          rd_by = {(r.depth_top_m, r.axis): r for r in rd}
@@ -130,7 +134,7 @@ index c16bc4b..cff2694 100644
              A, B = by.get((d, "A")), by.get((d, "B"))
              ra, rb = rd_by.get((d, "A")), rd_by.get((d, "B"))
              rsev = sev
-@@ -250,7 +309,20 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
+@@ -250,7 +313,20 @@ def _reduce_with_row(inst_row: dict, survey_rows, correction_rows, batch_id: str
              for r in (ra, rb):
                  if r is not None and r.qa_flag != "OK":
                      rsev = max(rsev, _SEV[r.qa_flag])

@@ -12,9 +12,24 @@ row valid at survey time. Against that grid, each served row is checked:
 
 The cumulative is summed from the fixed bottom, so any interval that is not a single valid on-grid row breaks
 every cumulative value above it. Those rows keep their own incremental values but cum_a / cum_b / resultant are
-nulled (CUM_GAP_BELOW). No implicit zero is ever used across a gap (REPORT E9: a missing interval makes every
-cumulative value above it MISSING). Depth semantics (stickup, midpoints, vendor depth references) are QA-042 and
-are NOT changed here."""
+nulled (CUM_GAP_BELOW). No implicit zero is ever used across a gap. Depth semantics (stickup, midpoints, vendor
+depth references) are QA-042 and are NOT changed here.
+
+Rule sources (/workspace/dam-refs; read, not copied):
+  * procedures/inclinometers.md §4.0 (team cumulative convention, lead ruling 2026-11-02): CUM(d) = sum of the
+    increments of EVERY interval whose top is at depth >= d, summed from the fixed bottom. With one interval
+    absent, the sum is undefined at and above that interval, not a smaller number. The running bottom-up sum is
+    the DGSI DMM cumulative [DGSI-DMM PDF p100 [printed p9-10]], as cited in inclinometers/user_tool/formula_map.md.
+  * procedures/inclinometers.md §7 row "Missing depth / pass": MISSING. This is an engine rule (the procedure's own
+    label), not a manufacturer requirement.
+  * procedures/inclinometers.md §3.1: the engine depth is the interval top measured down from the top of casing,
+    in steps of the probe wheelbase L. The grid comes from the installation row (casing_depth_m, probe_L_m).
+  * inclinometers/user_tool/REPORT.md erratum E9: IFERROR(...,0) turns bad input into 0 displacement without
+    warning. This is the failure mode an implicit zero across a gap reproduces.
+  * No manufacturer manual page was found that prescribes how software must treat a missing, duplicate or off-grid
+    depth row. DUPLICATE and OFF_GRID/BELOW_CASING = BAD are engineering judgment (UNVERIFIED as a vendor rule):
+    the row cannot be attributed to one interval, so it is never reduced.
+Worked examples (SYNTHETIC; asserted in tests/test_incl_depth.py): see SCHEMA_CONTRACT.md §7 item 11."""
 from __future__ import annotations
 
 TOL_M = 1e-6

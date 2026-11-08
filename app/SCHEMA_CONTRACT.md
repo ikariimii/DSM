@@ -311,4 +311,25 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Vocabulary for the DA's qa_reason list:** DEPTH_MISSING and BASELINE_DEPTH_MISSING (MISSING); DEPTH_DUPLICATE,
       DEPTH_OFF_GRID, DEPTH_BELOW_CASING, DEPTH_GRID_UNKNOWN and DEPTH_LABEL_INVALID (BAD); CUM_GAP_BELOW (MISSING, applies
       to the cumulative only).
-    - Not done here: QA-042 depth semantics (waiting on the Inclinometer Specialist).
+    - **Rule sources** (`/workspace/dam-refs`, cited, not copied):
+      - `procedures/inclinometers.md` §4.0: CUM(d) = Σ Δ over every interval whose top is at depth ≥ d, summed
+        from the fixed bottom [DGSI-DMM PDF p100 [printed p9-10], as cited in `inclinometers/user_tool/formula_map.md`].
+        When an interval is absent, CUM is undefined at and above it.
+      - `procedures/inclinometers.md` §7, "Missing depth / pass": MISSING (an engine rule).
+      - `procedures/inclinometers.md` §3.1: the engine depth is the interval top from top of casing, on the L grid.
+      - `inclinometers/user_tool/REPORT.md` erratum E9: `IFERROR(…,0)` turns bad input into a silent 0 displacement.
+        That is the failure an implicit zero across a gap reproduces.
+      - No manufacturer page prescribes software handling of missing, duplicate or off-grid rows. Treating
+        DUPLICATE, OFF_GRID and BELOW_CASING as BAD is **UNVERIFIED (engineering judgment)**.
+    - **Worked examples** (SYNTHETIC, L = 0.5 m, casing 5.0 m, so tops 0.0–4.5 m; every increment +1.0 mm; asserted
+      in `tests/test_incl_depth.py` and the patch's `tests/test_inclinometer_depth_grid.py`):
+      - **WE-043a (missing 3.5 m):** cum 4.5 = 1.0 mm and 4.0 = 2.0 mm; 3.5 m is MISSING. Cum at 0.0–3.0 m is
+        withheld. A silent sum would show 9.0 mm at 0.0 m, understating the true value by the unknown increment.
+      - **WE-043b (2.0 m twice, increments 1.0 and 9.0 mm):** both copies are BAD. Cum at 2.5–4.5 m = 5.0…1.0 mm,
+        and cum ≤ 2.0 m is withheld. Last-wins would show 18.0 mm at 0.0 m, and first-wins 10.0 mm.
+      - **WE-043c (extra 5.0 m row below the casing):** that row is BAD. The app guard cannot know whether the
+        upstream sum included it, so it withholds every cumulative; an included row would show 11.0 mm at 0.0 m.
+        With the engine patch the row is never reduced, so cum at 0.0 m = 10.0 mm. Labels offset +0.2 m: all ten
+        rows are OFF_GRID BAD and all ten tops are MISSING.
+    - QA-042 depth semantics are not changed by QA-043. They are handled in the importers (QA-044, see
+      `docs/INCL_IMPORTERS.md`).
