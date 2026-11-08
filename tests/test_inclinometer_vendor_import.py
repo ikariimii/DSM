@@ -97,8 +97,8 @@ def test_preserves_raw_input_and_processed_is_never_reduced():
 
 
 @pytest.mark.parametrize("profile,filename", PROFILES)
-def test_parser_stays_explicit_stub_even_after_opt_in(profile, filename):
-    with pytest.raises(NotImplementedError, match="UNVERIFIED"):
+def test_parser_never_infers_layout_even_after_opt_in(profile, filename):
+    with pytest.raises(v.ImportRejected, match="UNVERIFIED"):
         v.parse_export(profile, filename, b"text\n", META, 0.8, processed_only=False, enabled=True)
 
 
