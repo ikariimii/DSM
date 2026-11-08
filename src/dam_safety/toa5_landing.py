@@ -10,6 +10,11 @@ Rules (each one closes a gap that the reader leaves to the caller by design):
   * Integer NAN sentinels (FP2 -7999, Long -2147483648 [CS-NANINF]) -> NULL only for fields the caller declares
     (int_sentinel_fields): TOA5 does not record the stored data type, so we never guess.
   * A mapped field missing from the file raises: a renamed logger field must not silently stop a sensor.
+  * QA-018: first-wins dedup on (table name, RECORD, TIMESTAMP) within this parsed file, BEFORE channel expansion.
+    Raw Toa5Table records are never modified. Other sequence anomalies are retained and flagged, not rejected.
+    Reader warnings and landing diagnostics are surfaced as Toa5LandingWarning and retained on LandingRows.diagnostics;
+    to_landing_diagnostics_json provides the companion append-only diagnostics output (not a readings CSV column).
+    See docs/TOA5_READER.md, sequence-warning contract [CS-LN-TOA5]. RECORD is required by this landing policy.
 
 Provenance (docs/PROVENANCE.md): clean-room. Written from the Campbell Scientific TOA5 format documentation
 ([CS-LN-TOA5], [CS-CR1000] §7 Tables 12-13 and §8, [CS-NANINF]) and the public API of common.toa5 only; it is NOT
@@ -19,7 +24,9 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
+import warnings
 from datetime import timedelta, timezone
 
 from common.toa5 import FP2_NAN_SENTINEL, LONG_NAN_SENTINEL, Toa5Table
@@ -33,6 +40,32 @@ class Toa5LandingError(ValueError):
     pass
 
 
+class Toa5LandingWarning(UserWarning):
+    """Surfaced reader/landing diagnostic; see docs/TOA5_READER.md [CS-LN-TOA5]."""
+
+
+class LandingRows(list):
+    """Bronze-compatible rows plus diagnostics for the companion JSON output.
+
+    List behaviour is retained for existing callers. Persist the JSON sidecar outside the
+    readings/ directory alongside the unchanged source file; see docs/TOA5_READER.md [CS-LN-TOA5].
+    """
+
+    def __init__(self, rows=(), *, diagnostics=()):
+        super().__init__(rows)
+        self.diagnostics = tuple(diagnostics)
+
+
+def to_landing_diagnostics_json(rows: LandingRows) -> str:
+    """Serialize the QA-018 diagnostics sidecar; docs/TOA5_READER.md [CS-LN-TOA5].
+
+    Pure output adapter: the caller appends this JSON to its diagnostics volume/path.
+    No file or UC writes occur here. Empty diagnostics are serialized too.
+    """
+    return json.dumps({"schema_version": 1, "diagnostics": rows.diagnostics},
+                      ensure_ascii=False, allow_nan=False, sort_keys=True) + "\n"
+
+
 def _num(v, field, int_sentinel_fields):
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None                      # str / None -> NULL (QC NULL_VALUE)
@@ -43,13 +76,28 @@ def _num(v, field, int_sentinel_fields):
 
 
 def to_landing_rows(table: Toa5Table, dam_id: str, utc_offset_min: int, channel_map: dict,
-                    temp_map: dict | None = None, int_sentinel_fields: frozenset = frozenset()) -> list[dict]:
+                    temp_map: dict | None = None, int_sentinel_fields: frozenset = frozenset(), *,
+                    expected_interval_seconds: float | None = None) -> LandingRows:
+    """Dedup/flag one parsed file without altering raw; docs/TOA5_READER.md [CS-LN-TOA5].
+
+    Key: table+RECORD+TIMESTAMP, scoped to this dam/logger/file. First occurrence wins,
+    even for conflicting values; every suppressed source row gets a diagnostic. RECORD
+    gaps are flagged; timestamp gaps require caller-supplied expected cadence (no guessing).
+    Persist to_landing_diagnostics_json(result) with the source-file identity. Cross-file
+    replay dedup requires orchestration and is not implemented by this stateless adapter.
+    """
     if utc_offset_min is None:
         raise Toa5LandingError("utc_offset_min is required: TOA5 timestamps carry no time zone")
+    if expected_interval_seconds is not None and (
+            isinstance(expected_interval_seconds, bool) or not isinstance(expected_interval_seconds, (int, float))
+            or not math.isfinite(expected_interval_seconds) or expected_interval_seconds <= 0):
+        raise Toa5LandingError("expected_interval_seconds must be finite and positive")
     temp_map = temp_map or {}
     names = set(table.names)
     if "TIMESTAMP" not in names:
         raise Toa5LandingError("TOA5 table has no TIMESTAMP column")
+    if "RECORD" not in names:
+        raise Toa5LandingError("TOA5 landing requires RECORD for the table+RECORD+TIMESTAMP dedup key")
     missing = sorted((set(channel_map) | set(temp_map.values())) - names)
     if missing:
         raise Toa5LandingError(f"mapped fields not in file: {missing}")
@@ -57,7 +105,37 @@ def to_landing_rows(table: Toa5Table, dam_id: str, utc_offset_min: int, channel_
     logger_id = f"{env.logger_model}:{env.serial_number}"
     tz = timezone(timedelta(minutes=utc_offset_min))
     out = []
-    for r in table.records:
+    diagnostics = []
+    seen = {}
+    by_line = {}
+    for diagnostic in table.warnings:
+        by_line.setdefault(diagnostic.line, []).append((diagnostic.code, diagnostic.message))
+    previous = None
+    for index, r in enumerate(table.records):
+        # Reader permits no blank lines inside data: physical line = four headers + ordinal.
+        line = index + 5
+        key = (env.table_name, r["RECORD"], r["TIMESTAMP"])
+        duplicate = key in seen
+        entries = list(by_line.pop(line, ()))
+        if duplicate:
+            entries.append(("landing_duplicate_suppressed", f"first occurrence at line {seen[key]} wins"))
+        else:
+            seen[key] = line
+        if previous is not None:
+            if r["RECORD"] > previous["RECORD"] + 1:
+                entries.append(("record_gap", f"RECORD {previous['RECORD']} to {r['RECORD']}"))
+            if expected_interval_seconds is not None:
+                elapsed = (r["TIMESTAMP"] - previous["TIMESTAMP"]).total_seconds()
+                if elapsed > expected_interval_seconds:
+                    entries.append(("timestamp_gap", f"interval {elapsed}s exceeds {expected_interval_seconds}s"))
+        previous = r
+        for code, message in entries:
+            diagnostics.append(dict(dam_id=dam_id, logger_id=logger_id, table_name=env.table_name,
+                                    line=line, record=r["RECORD"], timestamp=r["TIMESTAMP"].isoformat(),
+                                    code=code, message=message,
+                                    disposition="suppressed_duplicate" if duplicate else "retained_flagged"))
+        if duplicate:
+            continue
         ts = r["TIMESTAMP"].replace(tzinfo=tz).astimezone(timezone.utc)
         for field, sensor_id in channel_map.items():
             row = dict.fromkeys(LANDING_COLUMNS)
@@ -68,7 +146,17 @@ def to_landing_rows(table: Toa5Table, dam_id: str, utc_offset_min: int, channel_
                        temp_raw=_num(r[temp_map[field]], temp_map[field], int_sentinel_fields)
                        if field in temp_map else None)
             out.append(row)
-    return out
+    # Preserve file-level reader warnings too (e.g. dropped unterminated tail).
+    for line, entries in by_line.items():
+        for code, message in entries:
+            diagnostics.append(dict(dam_id=dam_id, logger_id=logger_id, table_name=env.table_name,
+                                    line=line, record=None, timestamp=None, code=code, message=message,
+                                    disposition="reader_warning"))
+    diagnostics.sort(key=lambda d: d["line"])
+    for diagnostic in diagnostics:
+        warnings.warn(f"TOA5 {env.table_name} line {diagnostic['line']} "
+                      f"[{diagnostic['code']}]: {diagnostic['message']}", Toa5LandingWarning, stacklevel=2)
+    return LandingRows(out, diagnostics=diagnostics)
 
 
 def to_landing_csv(rows: list[dict]) -> str:

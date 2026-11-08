@@ -76,3 +76,60 @@ Databricks CLI, no workspace** — so nothing Spark/LDP/UC/bundle-level has been
 | QA-037 / LB-REF (v1.5) | **Pending `databricks bundle validate -t prod`** (no CLI here): the resolved-config test mirrors `apply_bundle_permissions.go` but the real CLI has not confirmed `dam-portfolio-all` never reaches the app, nor that `${resources.postgres_endpoints.<k>.id}` resolves (ENDPOINT `.id` UNVERIFIED). |
 | V15-SCD2 (v1.5) | Installation row valid at survey time enforced in `batch.installation_row_at` + job (tested in core; Spark wrapper untested). Limitation: the baseline survey is converted with the target survey's row constants; if L/K change between them the result is UNVERIFIED (question to the Inclinometer Specialist). |
 | V15-DEMO (v1.5) | `sample_data/demo/` reading_id/survey_id hashes assume Spark `CAST(ts AS STRING)` = `YYYY-MM-DD HH:MM:SS` (UTC session) and `_metadata.file_path` = `/Volumes/dam_dev/raw/landing/...`; UNVERIFIED. |
+
+## QA-018 landing sequence residual (2026-11-08)
+
+Sources: `docs/TOA5_READER.md` (QA-018 sequence-warning contract) and **CS-LN-TOA5**,
+Campbell Scientific LoggerNet, “TOA5”:
+https://help.campbellsci.com/loggernet-manual/ln_manual/campbell_scientific_file_formats/toa5.htm.
+The following is the **application ingest policy**, not a Campbell-prescribed deduplication algorithm.
+
+- `common.toa5` remains the sole, unchanged reader. `to_landing_rows` returns a list-compatible
+  `LandingRows` object; the bronze `LANDING_COLUMNS` and readings CSV are unchanged.
+- Within one parsed file, dedup is **first-wins on (table_name, RECORD, TIMESTAMP)** before sensor/channel
+  expansion, scoped to the caller's dam/logger. Conflicting values with the same key are also suppressed
+  from derived landing rows and explicitly diagnosed. The parsed source records/source file are never edited,
+  deleted, or overwritten: retain them append-only. No UPDATE/DELETE of raw is introduced.
+- Duplicate RECORD alone or duplicate TIMESTAMP alone is **not** the composite key. These records and
+  non-monotonic rows remain in source order, with `retained_flagged` diagnostics. They are review flags,
+  not automatic rejection or evidence of a sensor fault. The adapter does not sort or repair readings.
+- Every `Toa5Table.warnings` entry is surfaced as `Toa5LandingWarning` and retained unchanged in code,
+  message, and physical line in `result.diagnostics`, including a dropped unterminated tail. Additional
+  codes are `landing_duplicate_suppressed`, `record_gap` (forward jump greater than one), and
+  `timestamp_gap` (only when `expected_interval_seconds` is explicitly provided; never infer cadence).
+  Documented counter rollovers do not become gaps. RECORD-less TOA5 is valid for the reader, but this
+  adapter fails closed because its chosen dedup key requires RECORD; TIMESTAMP remains required too.
+- **Companion output contract:** persist `to_landing_diagnostics_json(result)` as an append-only JSON
+  sidecar, e.g. `/Volumes/<catalog>/raw/landing/<dam>/toa5_diagnostics/<source-id>.json`, separate from
+  `readings/` (the bronze CSV glob must not ingest it). Each ingestion attempt needs a unique source-id
+  associated with the retained original file; do not overwrite an earlier attempt. The serializer emits
+  `schema_version: 1` and a `diagnostics` array with dam_id, logger_id, table_name, physical line, RECORD,
+  logger-local ISO timestamp (the required station offset is applied separately to reading ts_utc), code,
+  message, and disposition (`retained_flagged`, `suppressed_duplicate`, `reader_warning`). For file-level
+  warnings RECORD/timestamp are null. A clean file emits an empty array. Persist the sidecar even if all
+  duplicate derived rows are suppressed; writing the readings CSV alone is not sufficient for audit.
+- Tests in `tests/test_toa5_landing.py` use synthetic sequence cases only: conflicting/exact duplicate keys,
+  multi-channel expansion, non-monotonic records/timestamps, gaps and explicit cadence validation, both
+  documented counter rollovers, sidecar disk round-trip, tail diagnostics, and unchanged raw/CSV schema.
+- **UNVERIFIED / not implemented here:** this is a stateless per-file output adapter, not an orchestrator.
+  Sidecar retention/ACLs and end-to-end Auto Loader/UC execution have not been tested on a workspace.
+  Cross-file/replay dedup is not guaranteed by this function; the caller must provide replay/idempotency
+  control separately. No new deployed pipeline diagnostics table or automatic volume writer is claimed.
+
+Local validation on the current `app/v1.5-audit-chain` tree (not the older `bed918c` main worktree),
+with suites run separately using `.venv/bin/python`:
+
+| Suite | Result |
+|---|---|
+| Landing regression (`tests/test_toa5_landing.py`) | 22 passed |
+| Root (`tests/`) | 705 passed, 2 skipped |
+| App (`app/`, invoked from that directory) | 299 passed |
+| QA (`qa/`, including pre-existing uncommitted QA files) | 203 passed, 4 xfailed, 1 failed |
+| Focused TOA5 QA (`qa/test_toa5_adversarial.py`, `qa/test_toa5_fix_verification.py`) | 100 passed |
+| Internal-test-only suite (run locally, no data copied) | 7 passed |
+| Full restricted guard (`qa/restricted_guard.py scan`) | 0 hits |
+
+The QA failure is `qa/test_inclinometer_bias_rules.py::test_qa020_bias_qc_never_changes_reduced_data`:
+its cumulative-displacement assertion calls `abs()` on a null value. It is outside this landing change;
+no inclinometer or QA files were modified to hide/fix it. App and QA also emit the existing
+Starlette TestClient/httpx deprecation warning. Workspace validation/deployment was not run.
