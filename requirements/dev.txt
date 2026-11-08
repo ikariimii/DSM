@@ -1,0 +1,6 @@
+# Unified root test environment: engine, app/backend and independent QA.
+# Run: .venv/bin/python -m pip install -r requirements/dev.txt
+-r ../app/requirements-dev.txt
+numpy
+pandas
+pyyaml>=6
