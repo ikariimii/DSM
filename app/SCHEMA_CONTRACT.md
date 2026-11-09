@@ -98,6 +98,17 @@ Every reviewer action is ONE inserted row in Lakebase `review_signoff` (lakebase
 names `t_no{update,delete}_review_signoff` / `t_app_noupd_review_signoff` / `app_forbid_mutation`), and the app never
 updates ref.incl_correction, never applies a correction and never changes a measured value.
 
+**Guard init (QA-045b/QA-045c).** Postgres guards: row-level `t_app_noupd_review_signoff` (UPDATE/DELETE) and
+statement-level `t_app_notrunc_review_signoff` (TRUNCATE). `StateStore.init_schema` runs the whole Postgres init on
+ONE pooled connection in ONE transaction after `pg_advisory_xact_lock(4702045)` (the key shared with
+`lakebase/001_app_schema.sql`) and uses `CREATE OR REPLACE TRIGGER` (no DROP), so concurrent replicas and the
+data-layer script serialize and no session ever sees review_signoff without its guards. It refuses an autocommit
+connection. Tested on local PostgreSQL 17.11 (`app/tests/test_state_pg_append_only.py`, `DAM_TEST_PG`): 8 concurrent
+inits on a fresh schema with 0 errors, and 3 x 8 concurrent re-inits under an UPDATE/DELETE/TRUNCATE hammer with 0
+errors and 0 mutations. Without the lock the same tests fail (UniqueViolation / DeadlockDetected). **UNVERIFIED:**
+Lakebase's Postgres major version (CREATE OR REPLACE TRIGGER needs >= 14) and whether the Lakebase app role may take
+advisory locks.
+
 | action_type | endpoint (role) | subject_type / decision | original_value → corrected_value |
 |---|---|---|---|
 | `bias_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/bias-proposals/{record_id}/review` (engineer+) | `incl_correction` / `approve\|reject` | `{parameter_name, before_value}` → `{parameter_name, auto_value, override_value, after_value, applied_by_app:false}` (units as stored in ref.incl_correction) |

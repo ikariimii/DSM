@@ -67,3 +67,117 @@ def test_guard_init_is_idempotent_and_keeps_one_trigger_each(pg_store):
         assert trunc & 32 and not trunc & 1  # TRIGGER_TYPE_TRUNCATE, FOR EACH STATEMENT (not ROW)
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
         st.execute("TRUNCATE {s}review_signoff")
+
+
+# ------------------------------------------------------------------ QA-045c: race-free init (one locked transaction)
+def _concurrent_inits(schema, n, hammer_rounds=0):
+    """n StateStores (own pools, as n app replicas) init the same schema at once while, optionally, an attacker
+    connection keeps trying UPDATE / DELETE / TRUNCATE on review_signoff. Returns (init errors, mutations through)."""
+    import threading
+
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    errors, through, stop = [], [], threading.Event()
+    start = threading.Barrier(n + (1 if hammer_rounds else 0))
+    pools = [ConnectionPool(PG, min_size=1, max_size=2, kwargs={"row_factory": dict_row}, open=True) for _ in range(n)]
+
+    def init(pool):
+        start.wait()
+        try:
+            StateStore("postgres", schema=schema, pg_pool=pool, retries=1)
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    def hammer():
+        with psycopg.connect(PG, autocommit=True) as conn:
+            start.wait()
+            for i in range(hammer_rounds):
+                for stmt in (f'UPDATE "{schema}".review_signoff SET comment = \'tampered\'',
+                             f'DELETE FROM "{schema}".review_signoff', f'TRUNCATE "{schema}".review_signoff'):
+                    try:
+                        before = conn.execute(f'SELECT count(*) FROM "{schema}".review_signoff').fetchone()[0]
+                        cur = conn.execute(stmt)
+                        if stmt.startswith("TRUNCATE") and before or cur.rowcount and cur.rowcount > 0:
+                            through.append((i, stmt))
+                    except psycopg.Error:
+                        pass   # refused by the guard (or the table is being created): not a mutation
+                if stop.is_set() and i > 20:
+                    break
+
+    threads = [threading.Thread(target=init, args=(p,)) for p in pools]
+    if hammer_rounds:
+        threads.append(threading.Thread(target=hammer))
+    for t in threads:
+        t.start()
+    for t in threads[:n]:
+        t.join(120)
+    stop.set()
+    for t in threads[n:]:
+        t.join(120)
+    for p in pools:
+        p.close()
+    return errors, through
+
+
+def _drop(schema):
+    import psycopg
+    with psycopg.connect(PG, autocommit=True) as conn:
+        conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+def test_qa045c_concurrent_inits_on_fresh_db_have_no_errors():
+    pytest.importorskip("psycopg")
+    schema = f"qa045c_{uuid.uuid4().hex[:10]}"
+    try:
+        errors, _ = _concurrent_inits(schema, 8)
+        assert errors == []
+        import psycopg
+        with psycopg.connect(PG) as conn:
+            names = sorted(r[0] for r in conn.execute(
+                "SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = %s::regclass",
+                (f'"{schema}".review_signoff',)))
+        assert names == ["t_app_notrunc_review_signoff", "t_app_noupd_review_signoff"]
+    finally:
+        _drop(schema)
+
+
+def test_qa045c_concurrent_reinits_never_open_an_unguarded_window(pg_store):
+    """Existing DB with a chained record: 8 concurrent re-inits (CREATE OR REPLACE TRIGGER inside one transaction
+    under pg_advisory_xact_lock) while an attacker hammers UPDATE / DELETE / TRUNCATE: 0 errors, 0 mutations."""
+    st, _, _ = pg_store
+    st.append_chained("CRD", ac.GENESIS, ac.finalizer(_row(0)))
+    for _ in range(3):
+        errors, through = _concurrent_inits(st.schema, 8, hammer_rounds=200)
+        assert errors == [] and through == []
+    rows = st.chain_rows("CRD")
+    assert len(rows) == 1 and rows[0]["comment"] == "rationale"
+    assert ac.verify_chain(rows, st.chain_head("CRD"))["ok"]
+
+
+def test_qa045c_init_takes_the_shared_advisory_lock(pg_store):
+    """While another session holds pg_advisory_xact_lock(4702045) (e.g. lakebase/001), the app init waits."""
+    import threading
+    import time
+
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from backend.repos.state import INIT_LOCK_KEY
+    st, _, _ = pg_store
+    assert INIT_LOCK_KEY == 4702045
+    done = threading.Event()
+    with psycopg.connect(PG) as holder:
+        holder.execute("SELECT pg_advisory_xact_lock(%s)", (INIT_LOCK_KEY,))
+        pool = ConnectionPool(PG, min_size=1, max_size=2, kwargs={"row_factory": dict_row}, open=True)
+        t = threading.Thread(target=lambda: (StateStore("postgres", schema=st.schema, pg_pool=pool, retries=1),
+                                             done.set()))
+        t.start()
+        time.sleep(1.0)
+        assert not done.is_set()          # blocked on the shared lock
+        holder.commit()                   # releases the xact lock
+    t.join(30)
+    pool.close()
+    assert done.is_set()

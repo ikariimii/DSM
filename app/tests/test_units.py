@@ -330,7 +330,9 @@ def test_state_postgres_path(monkeypatch):
     log, fail = [], []
     pool = FakePool(FakeConn(log, fail))
     st = st_mod.StateStore("postgres", schema="dam_app", pg_pool=pool, retries=3)
-    assert log[0] == 'CREATE SCHEMA IF NOT EXISTS "dam_app"'
+    assert log[0] == "SELECT pg_advisory_xact_lock(%s)"            # QA-045c: init = one locked transaction
+    assert log[1] == 'CREATE SCHEMA IF NOT EXISTS "dam_app"'
+    assert not any(x.startswith("DROP TRIGGER") for x in log)    # CREATE OR REPLACE TRIGGER, no unguarded window
     assert any('"dam_app".app_user' in s for s in log) and any("BIGSERIAL" in s for s in log)
     assert st.execute("SELECT 1") == [{"x": 1}]
     # scale-to-zero wake-up / HA failover: retried with backoff on a fresh pooled connection

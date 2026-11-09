@@ -8,6 +8,12 @@
 -- regulatory record: job dam_lakebase_extract copies append-style rows to UC Delta
 -- (audit.event_log, audit.review_record, ops.exceedance_status_log, ops.surveillance_inspection,
 -- raw landing volume for manual readings). Timestamps: app uses ISO-8601 TEXT (UTC, 'Z').
+-- QA-045c: the whole init runs in ONE transaction under a transaction-scoped advisory lock, so concurrent inits
+-- (two psql sessions, or this script racing the app's StateStore.init_schema, which takes the same key) serialize,
+-- and no other session ever sees a table without its guard. Key 4702045 = the shared 'dam_app schema init' lock
+-- (same literal in app/backend/repos/state.py, see tools/patches). Released automatically at COMMIT/ROLLBACK.
+BEGIN;
+DO $$ BEGIN PERFORM pg_advisory_xact_lock(4702045); END $$;  -- held until COMMIT (no result row printed)
 CREATE SCHEMA IF NOT EXISTS dam_app;
 SET search_path TO dam_app;
 
@@ -61,27 +67,25 @@ ALTER TABLE manual_reading ADD COLUMN IF NOT EXISTS datum_id TEXT;
 -- Row-level BEFORE UPDATE OR DELETE triggers do not fire on TRUNCATE (PostgreSQL 17 docs, CREATE TRIGGER:
 -- "triggers may be defined to fire for TRUNCATE, though only FOR EACH STATEMENT"), so each table also gets a
 -- statement-level BEFORE TRUNCATE trigger (QA-045b). Same function; TG_OP names the refused operation.
--- SQLSTATE 'insufficient_privilege' (42501). Idempotent: CREATE OR REPLACE FUNCTION + DROP TRIGGER IF EXISTS.
+-- SQLSTATE 'insufficient_privilege' (42501). Idempotent and race-free: CREATE OR REPLACE FUNCTION and
+-- CREATE OR REPLACE TRIGGER (QA-045c; replaces the old DROP TRIGGER IF EXISTS + CREATE TRIGGER pair, which left a
+-- window with no guard when run outside a transaction). CREATE OR REPLACE TRIGGER needs PostgreSQL >= 14
+-- (OR REPLACE is in the PG 14+ CREATE TRIGGER docs, absent from PG 13's); Lakebase's Postgres major version is
+-- UNVERIFIED (docs/VERIFICATION.md LB-PG14). OR REPLACE is not supported for constraint triggers (none here).
 CREATE OR REPLACE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql AS
 $$ BEGIN RAISE EXCEPTION '% is append-only (% refused)', TG_TABLE_NAME, TG_OP
      USING ERRCODE = 'insufficient_privilege'; END $$;
-DROP TRIGGER IF EXISTS t_noupd_exceedance_status ON exceedance_status;
-CREATE TRIGGER t_noupd_exceedance_status BEFORE UPDATE OR DELETE ON exceedance_status
+CREATE OR REPLACE TRIGGER t_noupd_exceedance_status BEFORE UPDATE OR DELETE ON exceedance_status
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
-DROP TRIGGER IF EXISTS t_noupd_review_signoff ON review_signoff;
-CREATE TRIGGER t_noupd_review_signoff BEFORE UPDATE OR DELETE ON review_signoff
+CREATE OR REPLACE TRIGGER t_noupd_review_signoff BEFORE UPDATE OR DELETE ON review_signoff
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
-DROP TRIGGER IF EXISTS t_noupd_manual_reading ON manual_reading;
-CREATE TRIGGER t_noupd_manual_reading BEFORE UPDATE OR DELETE ON manual_reading
+CREATE OR REPLACE TRIGGER t_noupd_manual_reading BEFORE UPDATE OR DELETE ON manual_reading
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
-DROP TRIGGER IF EXISTS t_notrunc_exceedance_status ON exceedance_status;
-CREATE TRIGGER t_notrunc_exceedance_status BEFORE TRUNCATE ON exceedance_status
+CREATE OR REPLACE TRIGGER t_notrunc_exceedance_status BEFORE TRUNCATE ON exceedance_status
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
-DROP TRIGGER IF EXISTS t_notrunc_review_signoff ON review_signoff;
-CREATE TRIGGER t_notrunc_review_signoff BEFORE TRUNCATE ON review_signoff
+CREATE OR REPLACE TRIGGER t_notrunc_review_signoff BEFORE TRUNCATE ON review_signoff
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
-DROP TRIGGER IF EXISTS t_notrunc_manual_reading ON manual_reading;
-CREATE TRIGGER t_notrunc_manual_reading BEFORE TRUNCATE ON manual_reading
+CREATE OR REPLACE TRIGGER t_notrunc_manual_reading BEFORE TRUNCATE ON manual_reading
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
 -- Defence in depth: REVOKE TRUNCATE from the app's Postgres role. The role is the app service principal's
 -- Lakebase role, whose name is per-workspace and not known to this file, so it is opt-in: run with
@@ -98,3 +102,5 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS extract_watermark (
   table_name TEXT PRIMARY KEY, last_id BIGINT, last_ts TEXT, updated_at TEXT NOT NULL);
+
+COMMIT;

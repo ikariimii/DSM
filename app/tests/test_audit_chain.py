@@ -1,9 +1,11 @@
 """QA-039 v2: per-dam hash chain over every reviewer action (bias / data-correction reviews, alarm ack / close)."""
 import base64
 import contextlib
+import copy
 import json
 import logging
 import sqlite3
+import sys
 import threading
 
 import pytest
@@ -545,3 +547,53 @@ def test_app_hash_and_verify_match_engine_v16_vector():
     assert ac.verify_chain(vec["rows"], vec["head"])["ok"]
     v = ac.verify_chain(vec["rows"], vec["head"], _FakeSigner())  # unsigned UC rows never pass a real signer
     assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 1, "signature_missing")
+
+
+# ------------------------------------------------------------------ QA-045c: app verify_chain == engine verify_records
+def _engine_ac():
+    """The engine verifier (src/dam_safety/audit_chain.py), imported from the repo's src/ for this check only."""
+    from pathlib import Path
+    src = str(Path(__file__).resolve().parents[2] / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    import importlib
+    return importlib.import_module("dam_safety.audit_chain")
+
+
+class _VecHmacSigner:
+    """TEST ONLY: the public HMAC key stored in tests/fixtures/review_chain_signed_vector.json (not a secret)."""
+    def __init__(self, spec):
+        self.alg, self.key_id, self._key = spec["alg"], spec["key_id"], spec["key_utf8"].encode("utf-8")
+
+    def sign(self, record_hash):
+        import hashlib
+        import hmac
+        return hmac.new(self._key, record_hash.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def verify(self, record_hash, signature, key_id):
+        import hmac
+        return key_id == self.key_id and hmac.compare_digest(str(signature), self.sign(record_hash))
+
+
+def _svec():
+    from pathlib import Path
+    return json.loads((Path(__file__).resolve().parents[2] / "tests" / "fixtures" /
+                       "review_chain_signed_vector.json").read_text(encoding="utf-8"))
+
+
+SVEC_CASES = sorted(_svec()["cases"])
+
+
+@pytest.mark.parametrize("with_signer", [True, False], ids=["signer", "noop"])
+@pytest.mark.parametrize("case", SVEC_CASES)
+def test_app_and_engine_verifiers_agree_on_signed_vector(case, with_signer):
+    vec = _svec()
+    eng = _engine_ac()
+    c = vec["cases"][case]
+    signer = _VecHmacSigner(vec["signer"]) if with_signer else None
+    verdict = lambda v: {"ok": v["ok"], "reason": v["reason"], "first_broken_seq": v["first_broken_seq"]}  # noqa: E731
+    app_v = verdict(ac.verify_chain(copy.deepcopy(c["rows"]), c["head"], signer))
+    eng_v = verdict(eng.verify_records(copy.deepcopy(c["rows"]), signer, c["head"]))
+    assert app_v == eng_v == c["expected" if with_signer else "expected_noop_signer"]
+    if case == "intact":
+        assert all(ac.record_hash(r) == eng.record_hash(r) == r["record_hash"] for r in c["rows"])
