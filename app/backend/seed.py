@@ -316,6 +316,10 @@ def build() -> dict:
                                        unit=inst["eng_unit"], effective_from=_iso(START - timedelta(days=365)),
                                        effective_to=None, is_current=True, pfm_id=pfm[0],
                                        required_actions=responses[lvl - 1],
+                                       # ref.threshold NOT NULL columns (demo values): DSSMP version, tier,
+                                       # hysteresis in the rule unit, consecutive readings to raise / clear
+                                       dssmp_version_id=f"DSSMP-{did}-2026", tier=f"AL{lvl}",
+                                       deadband=round(lim * 0.02, 3), persistence_on=2, persistence_off=3,
                                        # ref.threshold.cdse_ack_required (DA-owned column, default false): the demo
                                        # flags CRD-IN-1's Verify rule so a level-1 alarm needs CRD's CDSE
                                        cdse_ack_required=f"{iid}-T{lvl}" in CDSE_FLAGGED_RULES))
@@ -326,6 +330,8 @@ def build() -> dict:
                                    direction="abs", value=0.8, unit="mm", effective_from=_iso(START - timedelta(days=365)),
                                    effective_to=None, is_current=True, pfm_id=pfm_slide,
                                    required_actions="Review seasonal amplitude at the annual DSSMR",
+                                   dssmp_version_id=f"DSSMP-{did}-2026", tier="AL1", deadband=0.05,
+                                   persistence_on=1, persistence_off=1,
                                    cdse_ack_required=False))
 
     # --- alarm events from value thresholds (one event per level episode)

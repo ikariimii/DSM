@@ -40,6 +40,20 @@ CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_lev
                 "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
                 "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
                 "prev_hash")
+# Versioned canonical record form (v1.6, DA follow-up 1). canon_version NULL/absent = canon 1: exactly CHAIN_FIELDS,
+# so every existing record and the DA's fixtures (review_chain_vector.json, review_chain_signed_vector.json) hash
+# unchanged. canon 2 (every NEW app record) also hashes actor_app_role and canon_version itself, so stripping either
+# breaks record_hash. A canon-2 record without a valid actor_app_role fails verification (actor_role_missing /
+# actor_role_invalid); a canon-1 record after a canon-2 record is canon_downgrade; an unknown version is canon_unknown.
+CANON_VERSION = 2
+ACTOR_ROLE_FIELD = "actor_app_role"
+CANON_FIELD = "canon_version"
+CHAIN_FIELDS_V2 = CHAIN_FIELDS + (ACTOR_ROLE_FIELD, CANON_FIELD)
+CANON_FIELDS = {1: CHAIN_FIELDS, 2: CHAIN_FIELDS_V2}
+# actor_app_role: the RAW app roles of the acting user on that dam at the time of the action, derived server-side
+# (routers/signoffs.actor_app_role), never client-supplied. One token, or several sorted and comma-joined
+# (e.g. "admin,cdse", "cdse,engineer"). "cdse" = the dam's named CDSE via the reviewer-authority lookup.
+ACTOR_ROLES = ("viewer", "engineer", "dso", "dam_admin", "admin", "cdse")
 # app role -> review_level (Genie-confirmed 2026-11-09; DA SCHEMA_CONTRACT v1.6 ROLE-LEVEL). An app role NEVER
 # confers CDSE: dso, dam_admin and platform admin get no review elevation. CDSE_LEVEL is recorded only for the
 # principal named by ref.dam.cdse_id (or a direct ref.project_membership CDSE grant) for that dam - FERC Ch.14 App K
@@ -88,15 +102,44 @@ def canon_json(obj) -> str:
     return _canon({k: canonical_value(v) for k, v in obj.items()} if isinstance(obj, dict) else canonical_value(obj))
 
 
+def canon_of(row: dict) -> int | None:
+    """Canonical form of a stored record: 1 when canon_version is NULL/absent (pre-v2), else its int value
+    (None when it is not an integer)."""
+    v = row.get(CANON_FIELD)
+    if v is None or (isinstance(v, str) and v.strip() == ""):
+        return 1
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def actor_role_problem(value) -> str | None:
+    """None when value is a valid actor_app_role, else 'actor_role_missing' / 'actor_role_invalid'."""
+    if value is None or not str(value).strip():
+        return "actor_role_missing"
+    parts = str(value).split(",")
+    if any(p not in ACTOR_ROLES for p in parts) or parts != sorted(set(parts)):
+        return "actor_role_invalid"
+    return None
+
+
 def record_hash(row: dict) -> str:
-    payload = {k: canonical_value(row.get(k)) for k in CHAIN_FIELDS}
+    canon = canon_of(row)
+    fields = CANON_FIELDS.get(canon, CHAIN_FIELDS_V2)  # unknown canon: hashed as v2, verify reports canon_unknown
+    payload = {k: canonical_value(row.get(k)) for k in fields}
     payload["chain_seq"] = None if row.get("chain_seq") is None else int(row["chain_seq"])
+    if CANON_FIELD in fields:
+        payload[CANON_FIELD] = canon
     return hashlib.sha256(_canon(payload).encode("utf-8")).hexdigest()
 
 
 def finalizer(base: dict, signer: Signer | None = None):
     """Returns finalize(seq, prev_hash) for StateStore.append_chained: completes the row under the chain lock."""
     signer = signer or NoopSigner()
+
+    if canon_of(base) == CANON_VERSION and actor_role_problem(base.get(ACTOR_ROLE_FIELD)):
+        raise ValueError(f"a canon-{CANON_VERSION} record needs a valid server-derived {ACTOR_ROLE_FIELD}")
 
     def finalize(seq: int, prev_hash: str) -> dict:
         row = {**base, "chain_id": base["dam_id"], "chain_seq": seq, "prev_hash": prev_hash}
@@ -125,7 +168,7 @@ def verify_chain(rows: list[dict], head: dict | None, signer: Signer | None = No
 
     enforce = is_enforcing(signer)
     out["signatures_required"] = enforce
-    expected, prev, signed_seen = 1, GENESIS, 0
+    expected, prev, signed_seen, v2_seen = 1, GENESIS, 0, 0
     for r in rows:
         seq = int(r["chain_seq"])
         if seq != expected:
@@ -133,8 +176,19 @@ def verify_chain(rows: list[dict], head: dict | None, signer: Signer | None = No
         if r.get("prev_hash") != prev:
             return broken(seq, "prev_mismatch", "prev_hash does not match the previous record_hash"
                           if seq > 1 else "first record does not start at GENESIS")
+        canon = canon_of(r)
+        if canon not in CANON_FIELDS:
+            return broken(seq, "canon_unknown", f"unknown canon_version {r.get(CANON_FIELD)!r}")
         if record_hash(r) != r.get("record_hash"):
             return broken(seq, "hash_mismatch", "recomputed record_hash differs from the stored one")
+        if canon >= 2:
+            bad = actor_role_problem(r.get(ACTOR_ROLE_FIELD))
+            if bad:
+                return broken(seq, bad, f"canon-{canon} record has {ACTOR_ROLE_FIELD} {r.get(ACTOR_ROLE_FIELD)!r}")
+            v2_seen = v2_seen or seq
+        elif v2_seen:
+            return broken(seq, "canon_downgrade", f"canon-1 record (no {ACTOR_ROLE_FIELD}) after canon-2 record(s) "
+                          f"(first at seq {v2_seen})")
         if enforce:
             # QA-045a: signature/sig_alg/key_id sit outside record_hash, so stripping them leaves the hash chain intact.
             # With a real signer every record must carry all three and verify; nothing unsigned is accepted.

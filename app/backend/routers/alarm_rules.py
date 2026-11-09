@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from .. import audit_chain as ac
 from ..deps import Ctx, analytics, ctx, require, store
+from ..onboarding import PUBLISH_REQUIRED  # ref.threshold NOT NULL columns carried from version N into N+1
 from . import alarms as alarms_router
 from . import signoffs as sg
 
@@ -95,6 +96,11 @@ def _stale(st, rule: dict, base_version: int, base_flag: bool, proposal_id: str 
 def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationale: str, proposal: dict | None) -> dict:
     """Append the apply record + queue version N+1 + close the proposal in ONE chain transaction."""
     dam_id, tid = rule["dam_id"], rule["threshold_id"]
+    missing = [k for k in PUBLISH_REQUIRED if rule.get(k) is None or str(rule.get(k)).strip() == ""]
+    if missing:  # copied from version N, never defaulted: refuse before anything is recorded or queued
+        raise HTTPException(409, f"{tid} v{_version(rule)} lacks the NOT NULL ref.threshold column(s) "
+                                 f"{', '.join(missing)}; version {_version(rule) + 1} cannot be published without them "
+                                 "(no defaults are invented) - the DA must backfill the current version first")
     now = sg.now_utc()
     new_version = _version(rule) + 1
     insert = {k: v for k, v in rule.items() if k not in DERIVED}
@@ -122,7 +128,7 @@ def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationa
                                   "applied" if demo else "pending")
 
     try:
-        rec = sg.append(st, request, base, also)
+        rec = sg.append(st, request, base, also, c=c, an=an)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     if demo:
@@ -181,7 +187,7 @@ def propose(dam_id: str, threshold_id: str, body: FlagBody, request: Request, c:
            "base_threshold_version": _version(rule), "base_flag": _flag(rule), "new_flag": body.cdse_ack_required,
            "proposed_by": c.email, "proposed_by_id": who["reviewer_id"], "proposed_at": now, "rationale": rationale,
            "status": "pending"}
-    rec = sg.append(st, request, base, lambda q: st.insert_flag_proposal(q, row))
+    rec = sg.append(st, request, base, lambda q: st.insert_flag_proposal(q, row), c=c, an=an)
     st.audit(c.email, "alarm_rule_flag_propose", dam_id, threshold_id,
              {"proposal_id": pid, "from": _flag(rule), "to": body.cdse_ack_required})
     return {**st.flag_proposal(pid), "chain_seq": rec["chain_seq"]}
@@ -237,7 +243,7 @@ def reject(dam_id: str, proposal_id: str, body: DecisionBody, request: Request, 
                                      "state": "rejected", "proposed_by": p["proposed_by"]})
     try:
         rec = sg.append(st, request, base, lambda q: st.decide_flag_proposal(
-            q, proposal_id, "rejected", c.email, who["reviewer_id"], now, rationale))
+            q, proposal_id, "rejected", c.email, who["reviewer_id"], now, rationale), c=c, an=an)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     st.audit(c.email, "alarm_rule_flag_reject", dam_id, p["threshold_id"], {"proposal_id": proposal_id})

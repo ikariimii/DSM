@@ -99,7 +99,13 @@ function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit:
           { key: "limit_type", type: "select", options: ["magnitude", "rate", "cyclic"] },
           { key: "direction", type: "select", options: ["upper", "lower", "abs"] }, { key: "value", type: "number" },
           { key: "unit" }, { key: "pfm_id" }, { key: "required_actions" },
+          { key: "dssmp_version_id", label: "DSSMP version *" },
+          { key: "tier", label: "tier *", type: "select", options: ["AL1", "AL2", "AL3", "AL4", "AL5", "AL6", "AL7", "AL8", "AL9", "THRESHOLD", "DESIGN_BASIS"] },
+          { key: "deadband", label: "deadband * (rule unit)", type: "number" },
+          { key: "persistence_on", label: "persistence on * (readings)", type: "number" },
+          { key: "persistence_off", label: "persistence off * (readings)", type: "number" },
           { key: "cdse_ack_required", label: "CDSE ack required", type: "checkbox" }]} />}
+        {name === "thresholds" && <div className="muted">* Required to go live (ref.threshold NOT NULL; no defaults are filled in): DSSMP version the limit is set under; tier (AL1..ALn, THRESHOLD or DESIGN_BASIS); deadband = hysteresis in the rule's own unit (≥ 0); persistence on / off = consecutive readings to raise / to clear (whole number ≥ 1).</div>}
         {name === "thresholds" && <div className="muted">"CDSE ack required" (default off): acknowledging any alarm from this rule, at any level, needs the dam's named CDSE (ref.dam.cdse_id). Levels 2 and 3 always need the CDSE. Changing it is recorded in the audit log.</div>}
         {name === "thresholds" && <div className="muted">Cyclic limits are stored but not evaluated by the alarm machine; abs limits are evaluated as |value| &gt; limit.</div>}
         {name === "data_sources" && <Rows value={data.data_sources || []} onSave={save} disabled={readOnly} cols={[

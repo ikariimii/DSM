@@ -11,6 +11,12 @@ NEW-SP-1,NEW-MAIN,piezometer,standpipe,STANDPIPE_DTW,1.0.0,m,piezometric_elev_m,
 """
 
 
+def _pub(tier, deadband, on=2, off=3):
+    """ref.threshold NOT NULL publication columns the wizard collects (DA follow-up 2)."""
+    return {"dssmp_version_id": "DSSMP-NEW-2026", "tier": tier, "deadband": deadband, "persistence_on": on,
+            "persistence_off": off}
+
+
 def good_draft():
     return {
         "details": {"dam_id": "NEW", "name": "New Dam", "dam_type": "Earthfill", "hazard_class": "High",
@@ -28,11 +34,11 @@ def good_draft():
         ],
         "thresholds": [
             {"instrument_id": "NEW-PZ-1", "level": 1, "limit_type": "magnitude", "direction": "upper", "value": 200,
-             "unit": "m", "required_actions": "verify"},
+             "unit": "m", "required_actions": "verify", **_pub("AL1", 0.05)},
             {"instrument_id": "NEW-PZ-1", "level": 2, "limit_type": "magnitude", "direction": "upper", "value": 205,
-             "unit": "m", "required_actions": "evaluate"},
+             "unit": "m", "required_actions": "evaluate", **_pub("AL2", 0.05)},
             {"instrument_id": "NEW-SP-1", "level": 1, "limit_type": "magnitude", "direction": "lower", "value": 176,
-             "unit": "m", "required_actions": "check dry"},
+             "unit": "m", "required_actions": "check dry", **_pub("AL1", 0.1)},
         ],
         "data_sources": [
             {"instrument_id": "NEW-PZ-1", "source_type": "logger_file", "path": "/Volumes/x/new/*.dat",
@@ -186,7 +192,7 @@ def test_golive_payload():
     # a legacy-shaped draft threshold is converted to canonical columns
     d = good_draft()
     d["thresholds"][0] = {"instrument_id": "NEW-PZ-1", "level": 1, "rule": "value_above", "upper_limit": 200,
-                          "unit": "m", "pfm_ids": ["P"], "response_action": "v"}
+                          "unit": "m", "pfm_ids": ["P"], "response_action": "v", **_pub("AL1", 0.05)}
     t = ob.golive_payload(d)["thresholds"][0]
     assert (t["limit_type"], t["direction"], t["value"], t["pfm_id"], t["required_actions"]) == \
         ("magnitude", "upper", 200.0, "P", "v")
