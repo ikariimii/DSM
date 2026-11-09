@@ -65,6 +65,41 @@ def is_enforcing(signer) -> bool:
     return signer is not None and not isinstance(signer, NoopSigner)
 
 
+# ---------------------------------------------------------------- prod fail-closed (Genie 2026-11-09)
+PROD_CATALOGS = ("dam_prod",)
+NO_SIGNER = ("", "none", "noop")
+
+
+class SignerConfigError(SystemExit):
+    """Raised at job start; a SystemExit so the task fails before reading any data."""
+
+
+def load_signer(spec: str | None):
+    """Signer from the job configuration (--chain_signer / env DAM_CHAIN_SIGNER). 'none' / unset -> NoopSigner. No real
+    signer implementation exists yet (FERC requires no in-app crypto signature; VERIFICATION QA-045c), so any other
+    value is refused instead of being silently treated as no-op."""
+    s = (spec or "").strip().lower()
+    if s in NO_SIGNER:
+        return NoopSigner()
+    raise SignerConfigError(f"chain signer {spec!r} is not implemented (known: none); refusing to start")
+
+
+def is_real_signer(signer) -> bool:
+    """Enforcing, with a non-empty alg and key_id, a callable verify, and not a TEST-ONLY signer (alg '*-test')."""
+    alg, kid = getattr(signer, "alg", None), getattr(signer, "key_id", None)
+    return (is_enforcing(signer) and callable(getattr(signer, "verify", None)) and bool(alg and str(alg).strip())
+            and bool(kid and str(kid).strip()) and not str(alg).lower().endswith("-test"))
+
+
+def require_signer_for_catalog(catalog: str, signer) -> None:
+    """Fail closed: a job that verifies chains must not run against a production catalog without a real signer,
+    because a fully stripped chain verifies under the no-op signer (QA-045c). Call at job start, before any read."""
+    if catalog in PROD_CATALOGS and not is_real_signer(signer):
+        raise SignerConfigError(
+            f"refusing to verify reviewer chains in {catalog}: no real (non-no-op) signer is configured "
+            f"(got {type(signer).__name__}, alg={getattr(signer, 'alg', None)!r}); configure --chain_signer first")
+
+
 def _present(v) -> bool:
     return v is not None and str(v).strip() != ""
 

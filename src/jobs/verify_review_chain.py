@@ -3,16 +3,21 @@ append-only audit.chain_head (written by dam_lakebase_extract). No caller suppli
 used and every stored head is checked as a checkpoint (dam_safety.audit_chain.verify_with_chain_heads). Any chain
 that is not ok fails the task (so the job's failure notification fires), after printing every verdict.
 
-Signer: none exists yet (FERC requires no in-app crypto signature; docs/VERIFICATION.md QA-045c), so signatures are
-not enforced. UNVERIFIED: never run on a workspace.
+Signer: none exists yet (FERC requires no in-app crypto signature; docs/VERIFICATION.md QA-045c). FAIL CLOSED: with
+--catalog dam_prod the task refuses to start (before any read) unless a real, non-no-op signer is configured
+(--chain_signer or env DAM_CHAIN_SIGNER; audit_chain.require_signer_for_catalog). Until a signer exists the prod task
+therefore fails every run, by design. dam_dev / dam_test run with the no-op signer. UNVERIFIED: never run on a
+workspace.
 """
 import json
+import os
 
 try:
     from . import _common  # noqa: F401
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
-from dam_safety.audit_chain import CHAIN_FIELDS, verify_with_chain_heads
+from dam_safety.audit_chain import (CHAIN_FIELDS, load_signer, require_signer_for_catalog,
+                                    verify_with_chain_heads)
 from dam_safety.rule_flag_authority import rule_flag_authority_problems
 
 
@@ -35,8 +40,16 @@ def authority_failures(records, authority, app_roles=None):
     return [p for p in probs if p["severity"] == "error"], [p for p in probs if p["severity"] != "error"]
 
 
+def start():
+    """Job start: parse args, build the signer, fail closed for prod. Returns (args, signer). No data is read."""
+    a = _common.args(("chain_signer", os.environ.get("DAM_CHAIN_SIGNER", "none")))
+    signer = load_signer(a.chain_signer)
+    require_signer_for_catalog(a.catalog, signer)
+    return a, signer
+
+
 def main():
-    a = _common.args()
+    a, signer = start()
     spark = _common.spark()
     cols = ", ".join(sorted(set(CHAIN_FIELDS) | {"record_hash", "signature", "sig_alg", "key_id"}))
     records = [r.asDict() for r in spark.sql(
@@ -44,7 +57,7 @@ def main():
     heads = [r.asDict() for r in spark.sql(
         f"SELECT dam_id, chain_id, chain_seq, head_hash, CAST(computed_utc AS STRING) AS computed_utc, job_run_id "
         f"FROM {a.catalog}.audit.chain_head").collect()]
-    res = verify_all(records, heads)
+    res = verify_all(records, heads, signer)
     for v in res:
         print(json.dumps({k: v.get(k) for k in ("dam_id", "chain_id", "records", "heads_checked", "ok", "reason",
                                                  "first_broken_seq", "detail")}, default=str))
