@@ -107,12 +107,13 @@ def test_chain_record_carries_every_review_record_column():
         pytest.skip(f"lakebase_extract not importable here: {e}")
     rec = {"record_id": "P1", "parameter_name": "c", "auto_value": -6.0, "before_value": None}
     base = so.build(rec, "CRD", "approve", "ok", "rev", None, "2026-11-02T00:00:00Z")
-    # v1.6: the extract carries all 24 columns (incl. the chain columns the finalizer adds under the chain lock)
+    # v1.6: 24 columns; v1.7 canon v2 (DA v1_7_002): 26 (+ actor_app_role, canon_version)
+    base = {**base, ac.ACTOR_ROLE_FIELD: "engineer", ac.CANON_FIELD: ac.CANON_VERSION}   # as signoffs.append
     row = ac.finalizer(base)(1, ac.GENESIS)
-    assert len(cols) == 24 and set(ext.CHAIN_COLS) <= set(cols)
+    assert len(cols) == 26 and set(ext.CHAIN_COLS) <= set(cols)
     for c in cols:
         if c != "source":
             assert c in row
             # covered by record_hash, except the hash itself and the (optional) signature columns
-            assert (c in ac.HASH_EXCLUDED) != (c in ac.CHAIN_FIELDS)
+            assert (c in ac.HASH_EXCLUDED) != (c in ac.CHAIN_FIELDS_V2)
     assert set(ext.REVIEW_REQUIRED) <= {c for c in cols if row.get(c) not in (None, "")}

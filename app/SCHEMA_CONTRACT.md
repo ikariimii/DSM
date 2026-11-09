@@ -564,10 +564,12 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - Fits the §7.13 authority verifier (`rule_flag_authority_problems`) as a new failure code such as
       `self_approval`.
 17. **Lakebase split ownership: state.py patch applied (DA `tools/patches/v17_lakebase_owner_state_init.patch`,
-    0274aeb). App-side review.**
-    - **Applied** with one conflict, resolved: the patch predates the canon-2 columns. It was written against the old
-      `ALTER TABLE review_signoff ADD COLUMN` line. Kept both: the canon-2 int column typing and the patch's
-      owner-owned branch.
+    regenerated version in e8cc437, which replaces the 0274aeb one). App-side review.**
+    - **Applied.** The 0274aeb version had conflicted on the canon-2 column typing. The regenerated patch is
+      identical apart from that context line. Applying it to e8cc437's state.py gives exactly the app's state.py
+      minus the app's canon-CHECK verification below, so the two are reconciled. Also applied:
+      `tools/patches/v17_canon2_app_contract_test.patch` (`test_contract_v15`: 26 extract columns,
+      `CHAIN_FIELDS_V2`).
     - **Guards are kept:**
       - Init still runs in ONE transaction after `pg_advisory_xact_lock(4702045)`; the patch's ownership probes run
         inside it.
@@ -588,9 +590,14 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       - The remaining statements touch only app-owned tables (`app_user` user_id, `CREATE TABLE IF NOT EXISTS`,
         which needs the granted schema CREATE).
       - Verified live on PostgreSQL 17 as a NOSUPERUSER, non-member LOGIN role
-        (`app/tests/test_lakebase_owner_live.py`): init twice; append and verify canon 2; UPDATE, DELETE, TRUNCATE,
-        DISABLE TRIGGER and DROP CONSTRAINT all refused with 42501; canon-2 without a role refused with 23514; init
-        refuses a dropped CHECK, a disabled guard and a dropped column.
+        (`app/tests/test_lakebase_owner_live.py`, provisioned by lakebase/001 alone):
+        - a statement spy over a full init shows no ALTER / CREATE INDEX / TRIGGER / FUNCTION / SCHEMA DDL on owner
+          objects. The only statement naming review_signoff is the no-op `CREATE TABLE IF NOT EXISTS`, which needs
+          the granted schema CREATE;
+        - init runs twice, and canon 2 appends and verifies;
+        - UPDATE, DELETE, TRUNCATE, DISABLE TRIGGER and DROP CONSTRAINT are all refused with 42501;
+        - a canon-2 row without a role is refused with 23514;
+        - init refuses a dropped CHECK, a disabled guard and a dropped column.
     - **UPDATE / DELETE audit (nothing needs a new grant):** the app updates or deletes only tables it owns under the
       DA model:
       - `app_user`, `dam_role`, `alarm_ack`, `onboarding_draft`;
@@ -605,8 +612,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       decision row or 'pending'. The app can switch to this when the DA adds it to the owner DDL. Nothing was
       granted.
     - **DA needs:**
-      - (a) The canon-2 DDL of item 14 in `lakebase/001`. With the committed 001 (3d398dd), the patched app
-        correctly refuses to start: "missing columns ['actor_app_role', 'canon_version']".
+      - (a) Done in e8cc437: `lakebase/001` adds the canon-2 columns and `ck_review_signoff_canon`. Before it, the
+        patched app refused to start ("missing columns ['actor_app_role', 'canon_version']"), as intended.
       - (b) The publish job must be able to set `status` / `applied_at` / `message` on `ref_change_publication` and
         `onboarding_publication`. 001 grants the extract role only SELECT; it needs UPDATE on those columns, or an
         append-only publication-result table.

@@ -2,8 +2,8 @@
 v1.7: NOLOGIN dam_lakebase_owner owns the schema and the append-only tables; the app role has SELECT + INSERT on
 them and owns its mutable tables). Runs only with DAM_TEST_PG (superuser conninfo used to provision a scratch DB):
     DAM_TEST_PG="host=/tmp port=55432 user=postgres dbname=postgres" pytest app/tests/test_lakebase_owner_live.py
-The canon-2 addendum below is the DDL requested from the DA in SCHEMA_CONTRACT §7 item 14 (idempotent; a no-op once
-lakebase/001 carries it)."""
+lakebase/001 (DA e8cc437) carries the canon-2 columns and ck_review_signoff_canon itself; the app runs no DDL on
+owner-owned objects."""
 import os
 import shutil
 import subprocess
@@ -19,17 +19,6 @@ PG = os.environ.get("DAM_TEST_PG")
 pytestmark = pytest.mark.skipif(not PG or not shutil.which("psql"),
                                 reason="set DAM_TEST_PG (superuser libpq conninfo) and have psql to run")
 LB001 = Path(__file__).resolve().parents[2] / "lakebase" / "001_app_schema.sql"
-CANON2_ADDENDUM = """
-ALTER TABLE dam_app.review_signoff ADD COLUMN IF NOT EXISTS actor_app_role TEXT,
-  ADD COLUMN IF NOT EXISTS canon_version INTEGER;
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_review_signoff_canon'
-                 AND conrelid = 'dam_app.review_signoff'::regclass) THEN
-    ALTER TABLE dam_app.review_signoff ADD CONSTRAINT ck_review_signoff_canon CHECK (
-      canon_version IS NULL OR (canon_version = 2 AND actor_app_role IS NOT NULL AND length(trim(actor_app_role)) > 0));
-  END IF;
-END $$;
-"""
 
 
 def _psql(conn, *args, env=None):
@@ -41,14 +30,13 @@ def _psql(conn, *args, env=None):
 
 @pytest.fixture()
 def lakebase():
-    """Scratch DB provisioned by lakebase/001 (as superuser = deployer) + canon-2 addendum; yields (su, app) conninfo."""
+    """Scratch DB provisioned by lakebase/001 alone (as superuser = deployer); yields (su, app) conninfo."""
     tag = uuid.uuid4().hex[:8]
     db, role = f"lbown_{tag}", f"lbown_app_{tag}"
     _psql(PG, "-c", f"CREATE DATABASE {db}", "-c", f"CREATE ROLE {role} LOGIN NOSUPERUSER NOREPLICATION NOBYPASSRLS")
     su = f"{PG} dbname={db}"
     try:
         _psql(su, "-f", str(LB001), env={"PGOPTIONS": f"-c dam.app_role={role}"})
-        _psql(su, "-c", CANON2_ADDENDUM)
         yield su, f"{PG} dbname={db} user={role}"
     finally:
         _psql(PG, "-c", f"DROP DATABASE IF EXISTS {db} WITH (FORCE)", "-c", f"DROP ROLE IF EXISTS {role}")
@@ -87,6 +75,27 @@ def test_app_role_is_restricted_and_init_runs_no_owner_ddl(lakebase):
         assert mine[0]["o"] == role                   # app-created mutable table: app-owned
     finally:
         pool.close()
+
+
+def test_owner_model_startup_runs_no_owner_ddl(lakebase, monkeypatch):
+    """Under the owner model the app's own review_signoff ALTERs / CHECK / index / guard DDL are neither needed nor
+    attempted: capture every statement of a full init as the app role."""
+    _, app = lakebase
+    seen = []
+    orig = StateStore.execute
+
+    def spy(self, sql, params=()):
+        seen.append(sql)
+        return orig(self, sql, params)
+    monkeypatch.setattr(StateStore, "execute", spy)
+    st, pool = _store(app)
+    pool.close()
+    ddl = [q for q in seen if q.lstrip().upper().startswith(("ALTER", "CREATE", "DROP", "GRANT", "REVOKE", "COMMENT"))]
+    owner_objects = ("review_signoff", "exceedance_status", "manual_reading", "extract_watermark", "forbid_mutation",
+                     "CREATE SCHEMA", "TRIGGER")
+    assert not [q for q in ddl if any(o in q for o in owner_objects) and not q.lstrip().upper().startswith(
+        "CREATE TABLE IF NOT EXISTS")], ddl
+    assert not [q for q in ddl if "review_signoff" in q and not q.lstrip().upper().startswith("CREATE TABLE IF NOT EXISTS")]
 
 
 def test_append_verify_and_guards_as_app_role(lakebase):
