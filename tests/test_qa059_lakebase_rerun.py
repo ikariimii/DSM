@@ -8,7 +8,8 @@ its status trigger. Fixed in three layers, all tested here:
      re-run / older / out-of-order-down refused unless --rerun "<reason>"; v1_7_005 refused ALWAYS once v1_7_010 is
      applied (ledger or probe), flag or not;
   3. the validator runs after every runner-applied file (exit 5 on any violation).
-Plus a CI check: no Lakebase / PostgreSQL file uses \\p{...} (PG 17 ARE rejects it: "invalid escape \\ sequence")."""
+Plus a CI check: no Lakebase / PostgreSQL file uses \\p{...} (PG 17 ARE rejects it: "invalid escape \\ sequence"),
+since QA-062 in tests/test_qa062_no_pclass.py (scope extended to app/, tests/ and qa/)."""
 import importlib.util
 import os
 import re
@@ -94,27 +95,7 @@ def test_every_lakebase_up_has_a_down_and_the_runner_knows_the_hardening():
     assert set(rm.lakebase_files()) == set(ups())
 
 
-# ---------------------------------------------------------------- static: no \p{...} in PostgreSQL code
-UC_PCLASS_ALLOWED = {os.path.join("tools", "verify", "qa057_guard_probe.sql")} | {
-    os.path.join("sql", "migrations", f) for f in os.listdir(os.path.join(ROOT, "sql", "migrations"))
-    if f.endswith("_down.sql")}
-
-
-def test_no_lakebase_or_postgres_file_uses_unicode_property_escapes():
-    """\\p{...} is Java (Databricks) regex only; PostgreSQL 17 ARE fails with 'invalid escape \\ sequence'. Every
-    lakebase/ file, and every runtime .py / .sql outside the UC down guard, must be free of it."""
-    hits = []
-    for top in ("lakebase", "src", "tools", "resources", "sql"):
-        for base, _, names in os.walk(os.path.join(ROOT, top)):
-            for n in names:
-                if not n.endswith((".sql", ".py", ".yml", ".yaml")):
-                    continue
-                rel = os.path.relpath(os.path.join(base, n), ROOT)
-                txt = open(os.path.join(base, n), encoding="utf-8").read()
-                code = "\n".join(l.split("--")[0] for l in txt.splitlines()) if n.endswith(".sql") else txt
-                if re.search(r"\\+p\{", code) and (rel.startswith("lakebase") or rel not in UC_PCLASS_ALLOWED):
-                    hits.append(rel)
-    assert hits == []
+# static: the no-Unicode-property-class check moved to tests/test_qa062_no_pclass.py (QA-062: app/, tests/, qa/ too)
 
 
 # ---------------------------------------------------------------- unit: the runner's decision
