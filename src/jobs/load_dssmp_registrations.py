@@ -39,12 +39,13 @@ def outbox_updates(decisions, now_iso):
 
 
 def main():
-    a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"))
+    a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"),
+                     ("lb_schema", "dam_app"))
     spark = _common.spark()
     from lakebase_extract import _connect
     from psycopg.rows import dict_row
     tgt = f"{a.catalog}.ref.dssmp_version"
-    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint) as conn, conn.cursor(row_factory=dict_row) as cur:
+    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(OUTBOX_SQL)
         pending = cur.fetchall()
         if not pending:

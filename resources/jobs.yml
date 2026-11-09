@@ -99,7 +99,8 @@ resources:
           spark_python_task:
             python_file: ../src/jobs/lakebase_extract.py
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
-                          "--lb_branch", "production", "--lb_endpoint", "primary", "--job_run_id", "{{job.run_id}}" ]
+                          "--lb_branch", "production", "--lb_endpoint", "primary",
+                          "--lb_schema", "${var.lakebase_schema}", "--job_run_id", "{{job.run_id}}" ]
         # QA-045d: re-verify every reviewer chain in UC against audit.chain_head (fails the run on any break)
         - task_key: verify_review_chain
           depends_on: [ { task_key: extract } ]
@@ -130,7 +131,8 @@ resources:
           spark_python_task:
             python_file: ../src/jobs/apply_cdse_assignments.py
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
-                          "--lb_branch", "production", "--lb_endpoint", "primary", "--job_run_id", "{{job.run_id}}",
+                          "--lb_branch", "production", "--lb_endpoint", "primary",
+                          "--lb_schema", "${var.lakebase_schema}", "--job_run_id", "{{job.run_id}}",
                           "--cdse_flag_require_second_approver", "${var.cdse_flag_require_second_approver}" ]
         - task_key: load_dssmp_registrations
           depends_on: [ { task_key: apply_cdse_assignments } ]
@@ -139,7 +141,8 @@ resources:
           spark_python_task:
             python_file: ../src/jobs/load_dssmp_registrations.py
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
-                          "--lb_branch", "production", "--lb_endpoint", "primary" ]
+                          "--lb_branch", "production", "--lb_endpoint", "primary",
+                          "--lb_schema", "${var.lakebase_schema}" ]
         - task_key: publish_ref_changes
           depends_on: [ { task_key: load_dssmp_registrations } ]
           run_if: ALL_DONE
@@ -148,6 +151,7 @@ resources:
             python_file: ../src/jobs/publish_ref_changes.py
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
                           "--lb_branch", "production", "--lb_endpoint", "primary",
+                          "--lb_schema", "${var.lakebase_schema}",
                           "--cdse_flag_require_second_approver", "${var.cdse_flag_require_second_approver}" ]
       environments:
         - environment_key: pg

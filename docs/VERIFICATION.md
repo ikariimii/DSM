@@ -385,3 +385,17 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   `raise_error` inside `SELECT CASE`, the `\p{Cf}` regex class in `regexp_replace`, `current_catalog()` before /
   after `USE CATALOG`, the databricks-sdk `jobs.submit` call shape in the tool. Lakebase downs
   (lakebase/migrations/*_down.sql) are not catalog-scoped and are not guarded by this tool (run by hand per runbook 8).
+
+## LB-SEARCH-PATH (QA item 4: unqualified Lakebase table names in the jobs)
+
+- `src/jobs/lakebase_extract._connect(project, branch, endpoint, schema)` now calls `_session(conn, schema)`: schema
+  name validated (`^[a-z_][a-z0-9_]{0,62}$`, else ValueError before any SQL), `SET search_path TO "<schema>"`
+  (pg_catalog stays implicitly first; no `"$user"` / public fallback), verified with `current_schemas(false)` =
+  [schema] (missing schema or no USAGE -> RuntimeError, connection closed), committed as a session setting, then
+  REPEATABLE READ (QA-045d unchanged). Schema from config: bundle variable `lakebase_schema` (default dam_app) ->
+  `--lb_schema` on all four Lakebase tasks (extract, apply_cdse_assignments, load_dssmp_registrations,
+  publish_ref_changes); apply_cdse_assignments' own `SET search_path TO dam_app` removed (now shared).
+- Evidence (PG 17.11): tests/test_lakebase_search_path.py: without the set-up an unqualified name resolves to
+  public; with it to dam_app only, survives commit, isolation repeatable read; missing / inaccessible schema fails
+  closed; `_connect` with the SDK faked uses the set-up and closes on failure; jobs.yml / databricks.yml wiring.
+- UNVERIFIED: on Lakebase (the jobs' OAuth role must have USAGE on dam_app, i.e. the extract / publisher roles).

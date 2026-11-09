@@ -68,14 +68,14 @@ def reversion_context(spark, catalog, pending, second):
 
 def main():
     a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"),
-                     (SECOND_APPROVER_ARG, None))
+                     ("lb_schema", "dam_app"), (SECOND_APPROVER_ARG, None))
     second = second_approver_required({"CDSE_FLAG_REQUIRE_SECOND_APPROVER": getattr(a, SECOND_APPROVER_ARG)}
                                       if getattr(a, SECOND_APPROVER_ARG) is not None else None)
     spark = _common.spark()
     from lakebase_extract import _connect          # same OAuth connection helper as the extract task
     from psycopg.rows import dict_row
     tgt = f"{a.catalog}.ref.threshold"
-    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint) as conn, conn.cursor(row_factory=dict_row) as cur:
+    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(OUTBOX_SQL, (KIND,))
         pending = cur.fetchall()
         if not pending:

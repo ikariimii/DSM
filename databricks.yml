@@ -10,6 +10,9 @@ include:
 variables:
   catalog:
     description: Unity Catalog catalog for this target (dam_dev | dam_test | dam_prod)
+  lakebase_schema:
+    description: Lakebase schema the jobs set as search_path (src/jobs/lakebase_extract._session; unqualified names)
+    default: dam_app
   warehouse_id:
     description: Serverless SQL warehouse for DDL tasks and SQL alerts
   ops_destination_id:

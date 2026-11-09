@@ -246,7 +246,33 @@ def chain_head_rows(lb_heads, uc_latest, computed_utc, job_run_id):
     return out
 
 
-def _connect(project, branch, endpoint):
+DEFAULT_LB_SCHEMA = "dam_app"                       # bundle variable lakebase_schema -> --lb_schema
+LB_SCHEMA_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+
+
+def _session(conn, schema=DEFAULT_LB_SCHEMA):
+    """Shared session set-up for every Lakebase job connection (QA item 4: the jobs use unqualified table names).
+    search_path is set to exactly the configured schema (pg_catalog stays implicitly first, so built-ins cannot be
+    shadowed; no "$user" / public fallback), verified with current_schemas(false) (a missing or inaccessible schema
+    fails here instead of resolving names elsewhere), and committed as a session setting BEFORE switching to
+    REPEATABLE READ, so the QA-045d one-snapshot rule starts at the job's first real query."""
+    import psycopg
+    from psycopg import sql
+    if not isinstance(schema, str) or not LB_SCHEMA_RE.match(schema):
+        raise ValueError(f"invalid Lakebase schema name {schema!r}")
+    conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+    got = conn.execute("SELECT current_schemas(false)").fetchone()[0]
+    if list(got) != [schema]:
+        conn.rollback()
+        raise RuntimeError(f"Lakebase schema {schema!r} missing or not accessible (current_schemas = {list(got)})")
+    conn.commit()
+    # QA-045d: one snapshot for the whole run, so review_chain_head and review_signoff are read consistently (the app
+    # advances the head in the same transaction as the INSERT).
+    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    return conn
+
+
+def _connect(project, branch, endpoint, schema=DEFAULT_LB_SCHEMA):
     import psycopg
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient()
@@ -255,21 +281,22 @@ def _connect(project, branch, endpoint):
     host = w.postgres.get_endpoint(name=name).status.hosts.host    # UNVERIFIED attribute path
     user = w.current_user.me().user_name
     conn = psycopg.connect(host=host, dbname="databricks_postgres", user=user, password=token, sslmode="require")
-    # QA-045d: one snapshot for the whole run, so review_chain_head and review_signoff are read consistently (the app
-    # advances the head in the same transaction as the INSERT).
-    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
-    return conn
+    try:
+        return _session(conn, schema)
+    except Exception:
+        conn.close()
+        raise
 
 
 def main():
     a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"),
-                     ("job_run_id", None))
+                     ("lb_schema", DEFAULT_LB_SCHEMA), ("job_run_id", None))
     a.job_run_id = a.job_run_id or "manual-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spark = _common.spark()
     now = dt.datetime.now(dt.timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     from psycopg.rows import dict_row
-    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint) as conn, conn.cursor(row_factory=dict_row) as cur:
+    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         def wm(t):
             cur.execute("SELECT last_id, last_ts FROM extract_watermark WHERE table_name=%s", (t,))
             r = cur.fetchone()

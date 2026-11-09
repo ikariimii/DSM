@@ -62,7 +62,7 @@ def load_context(spark, catalog):
 
 def main():
     a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"),
-                     ("job_run_id", None), (SECOND_APPROVER_ARG, None))
+                     ("lb_schema", "dam_app"), ("job_run_id", None), (SECOND_APPROVER_ARG, None))
     run_id = a.job_run_id or "manual-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     second = second_approver_required({"CDSE_FLAG_REQUIRE_SECOND_APPROVER": getattr(a, SECOND_APPROVER_ARG)}
                                       if getattr(a, SECOND_APPROVER_ARG) is not None else None)
@@ -70,8 +70,7 @@ def main():
     from lakebase_extract import _connect
     from psycopg.rows import dict_row
     tgt = f"{a.catalog}.ref.dam_cdse_assignment"
-    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint) as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("SET search_path TO dam_app")
+    with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(OUTBOX_SQL)
         pending = cur.fetchall()
         if not pending:
