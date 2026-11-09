@@ -143,17 +143,24 @@ def _sha(*parts):
     return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()
 
 
-def ack_rows_to_events(rows, recorded_ts):
+def ack_rows_to_events(rows, recorded_ts, episodes=None):
     """alarm_ack rows (acknowledged_at > watermark) -> audit.event_log rows. Deterministic event_id,
-    so a re-extract after a failed run yields the same ids (and the evaluator dedups on subject_id)."""
+    so a re-extract after a failed run yields the same ids (and the evaluator dedups on subject_id).
+    v1.7: with `episodes` ({event_id: ops.alarm_episode row}) the payload also carries the episode's
+    cdse_ack_required_at_open (snapshot at open, binding) and cdse_ack_required (current rule flag), so the audit
+    trail shows whether a CDSE acknowledgement was required. Recorded only; enforcement is the app's."""
     out = []
     for r in rows:
         if r.get("acknowledged_at") and r.get("acknowledged_by") and r["state"] in ("acknowledged", "closed"):
+            payload = {"source": "lakebase:alarm_ack", "state": r["state"]}
+            if episodes is not None:
+                ep = episodes.get(r["event_id"]) or {}
+                payload.update(cdse_ack_required_at_open=ep.get("cdse_ack_required_at_open"),
+                               cdse_ack_required=ep.get("cdse_ack_required"))
             out.append({"event_id": _sha("ALARM_ACK", r["event_id"], r["acknowledged_at"]), "dam_id": r["dam_id"],
                         "event_type": "ALARM_ACK", "subject_type": "alarm_transition", "subject_id": r["event_id"],
                         "actor": r["acknowledged_by"], "event_ts": dt.datetime.fromisoformat(r["acknowledged_at"]),
-                        "payload": json.dumps({"source": "lakebase:alarm_ack", "state": r["state"]}, sort_keys=True),
-                        "recorded_ts": recorded_ts})
+                        "payload": json.dumps(payload, sort_keys=True), "recorded_ts": recorded_ts})
     return out
 
 
@@ -313,7 +320,12 @@ def main():
         acked = cur.fetchall()
         cur.execute("SELECT * FROM alarm_ack WHERE closed_at >= %s ORDER BY closed_at", (wc["last_ts"] or "",))
         closed = cur.fetchall()
-        ev = ack_rows_to_events(acked, now) + close_rows_to_events(closed, now)
+        eps = {}
+        if acked:  # v1.7: CDSE-ack flags of the acknowledged episodes (snapshot + current) into the ALARM_ACK payload
+            ep_df = spark.table(f"{a.catalog}.ops.alarm_episode")
+            eps = {x.event_id: x.asDict() for x in ep_df.where(ep_df.event_id.isin([r["event_id"] for r in acked]))
+                   .select("event_id", "cdse_ack_required_at_open", "cdse_ack_required").collect()}
+        ev = ack_rows_to_events(acked, now, episodes=eps) + close_rows_to_events(closed, now)
         if ev:
             el = spark.table(f"{a.catalog}.audit.event_log")
             ids = {r.event_id for r in el.where(el.event_id.isin([e["event_id"] for e in ev])).select("event_id").collect()}

@@ -37,6 +37,7 @@ EXPECTED_COLS = {
         "prev_hash", "record_hash", "signature", "sig_alg", "key_id")] + [("ops.alarm_transition", "installation_version")],
     "v1_6_002_chain_head.sql": [],
     "v1_6_003_alarm_rule_flag.sql": [],
+    "v1_7_001_cdse_ack.sql": [("ref.threshold", "cdse_ack_required"), ("ops.alarm_transition", "cdse_ack_required_at_open")],
 }
 EXPECTED_CKS = {
     "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
@@ -44,7 +45,11 @@ EXPECTED_CKS = {
     "v1_6_001_audit_chain.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
     "v1_6_002_chain_head.sql": {"ck_chain_head"},
     "v1_6_003_alarm_rule_flag.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
+    "v1_7_001_cdse_ack.sql": set(),
 }
+# The only data change any migration may make: backfilling a column the same file just added, marked by a
+# '-- backfill-new-column: <table>.<col>' line right above an UPDATE ... SET <col> = <literal> WHERE <col> IS NULL.
+_BACKFILL = r"UPDATE (\w+\.\w+) SET (\w+) = (?:false|true|0|'[^']*') WHERE \2 IS NULL;"
 _ADD_CK = r"ALTER TABLE ([\w.]+) ADD CONSTRAINT (\w+)\s+CHECK"
 norm = lambda s: re.sub(r"\s+", " ", s)
 
@@ -72,6 +77,10 @@ def test_every_constraint_is_drop_if_exists_then_add(f):
     assert {n for _, n in adds} == EXPECTED_CKS[f]
     for table, name in adds:
         assert f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name};" in code
+    marked = re.findall(r"-- backfill-new-column: (\w+\.\w+)\n" + _BACKFILL, MIGS[f])
+    for table, t2, col in marked:
+        assert table == f"{t2}.{col}".rsplit(".", 1)[0] + "." + col and (t2, col) in {(t, c) for t, c in EXPECTED_COLS[f]}
+    code = re.sub(_BACKFILL, "", code, count=len(marked))
     assert not re.search(r"\b(DROP TABLE|DELETE FROM|UPDATE \w+\.\w+ SET|TRUNCATE)\b", code)
     assert "USE CATALOG IDENTIFIER(:catalog);" in code
 
@@ -109,3 +118,15 @@ def test_v1_6_002_creates_chain_head_exactly_as_the_ddl_and_append_only():
     assert "SET TBLPROPERTIES ('delta.appendOnly' = 'true')" in _code(MIGS["v1_6_002_chain_head.sql"])
     for s in ("v1_6_001_audit_chain.sql", "dam_uc_setup", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK"):
         assert s in MIGS["v1_6_002_chain_head.sql"], s
+def test_v1_7_threshold_flag_is_backfilled_then_not_null_with_default():
+    code = _code(MIGS["v1_7_001_cdse_ack.sql"])
+    order = ["ADD COLUMNS (cdse_ack_required BOOLEAN)", "'delta.feature.allowColumnDefaults' = 'supported'",
+             "ALTER COLUMN cdse_ack_required SET DEFAULT false",
+             "UPDATE ref.threshold SET cdse_ack_required = false WHERE cdse_ack_required IS NULL",
+             "ALTER COLUMN cdse_ack_required SET NOT NULL"]
+    pos = [code.index(o) for o in order]
+    assert pos == sorted(pos)
+    assert "ops.alarm_transition SET" not in code                    # append-only: legacy RAISE rows stay NULL
+    h = MIGS["v1_7_001_cdse_ack.sql"]
+    for s in ("v1_6_001", "dam_uc_setup", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK", "irreversible"):
+        assert s in h, s

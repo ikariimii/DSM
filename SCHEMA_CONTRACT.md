@@ -151,6 +151,7 @@ Tables named in the plan canvas or the app that are not in the FERC canvas:
 | `gold.instrument_latest` (app) | pipeline MV, read through the SQL warehouse OBO. **No synced table** (§7.3) | |
 | `gold.instrument_daily`, `gold.data_freshness` | pipeline MVs | |
 | `gold.threshold_exceedances` | view: **source of every SQL alert** | |
+| `gold.v_threshold_cdse_ack_changes` | view (v1.7): audit trail of `ref.threshold.cdse_ack_required` by version | 11 |
 | `gold.hst_fit`, `gold.anomaly_scores` | interpretation job tables | 12 |
 | `ops.alarm_state`, `ops.alarm_transition`, `ops.reading_erroneous_mark`, `ops.rule_finding` | job tables | 07 |
 | `audit.event_log`, `audit.recompute_log`, `audit.alarm_recompute_diff` | insert-only | 08 |
@@ -197,6 +198,31 @@ Tables named in the plan canvas or the app that are not in the FERC canvas:
   = that of the latest reading-driven transition. **UNVERIFIED / no feed yet:** the evaluator reads
   `silver.v_reading_current`; inclinometer results live in `silver.incl_reduced`, so until an inclinometer metric is
   fed to the evaluator no inclinometer alarm (and no non-NULL value) exists.
+- **v1.7 `cdse_ack_required` (DSSMP; Genie 2026-11-09, App Dev agreed).** `ref.threshold.cdse_ack_required BOOLEAN NOT
+  NULL DEFAULT false` (the alarm-rule table; per dam via `dam_id`, per rule `threshold_id`, versioned SCD2 with the
+  rule). Source: the dam's DSSMP. TRUE = the dam's CDSE (`ref.dam.cdse_id` or a CDSE membership,
+  `ref.v_dam_reviewer_authority`) must acknowledge this rule's alarms **at any level**. **Snapshot at open:**
+  `ops.alarm_transition.cdse_ack_required_at_open BOOLEAN` (last column) is written by `alarm_evaluator` on the
+  **RAISE** row only, from the rule version that raised (`threshold_id`, `threshold_version`, the version in effect
+  at evaluation; `alarms.cdse_ack_snapshot`); NULL on every other event. The table is append-only, so the snapshot is
+  immutable for the life of the episode; un-flagging the rule mid-episode does not change it
+  (`tests/test_cdse_ack_required.py`). If the flag cannot be read the alarm is still raised and the snapshot is TRUE
+  (conservative) with a logged issue. RAISE rows written before v1.7 stay NULL (unknown, never backfilled).
+  **`ops.alarm_episode`** exposes `cdse_ack_required_at_open` (binding snapshot), `cdse_ack_required` (CURRENT flag of
+  the opening rule's `is_current` version; NULL if the rule is gone), `raise_threshold_id`, `raise_threshold_version`.
+  **Extract:** the `ALARM_ACK` row in `audit.event_log` carries both in `payload` (recorded, not enforced).
+  **Enforcement (403 for a non-CDSE ack) is the app's** (c4a384c ORs the snapshot, the view's rule flag and the
+  current `ref.threshold` row). Migration `sql/migrations/v1_7_001_cdse_ack.sql`.
+- **v1.7 versioning rule (Genie decision).** `ref.threshold` is SCD2 on (`threshold_id`, `threshold_version`).
+  Changing `cdse_ack_required` (or any rule field) creates a NEW version: `threshold_version` = max + 1,
+  `effective_from` = the publication time (never back-dated), `set_by` = the publisher; the previous version keeps
+  every rule field and only gets `effective_to` / `is_current = false`. An in-place UPDATE of a rule field is a
+  contract violation. Writers use `dam_safety.threshold_publish.plan_threshold_publication` and may check with
+  `assert_versions_immutable`. Audit trail: `gold.v_threshold_cdse_ack_changes` (one row per version whose flag
+  differs from the previous version). Delta cannot block an UPDATE; detect one with
+  `table_changes('ref.threshold', <v>)` rows of `_change_type = 'update_postimage'` whose flag changed. The app's
+  go-live payload carries `cdse_ack_required` (bool, absent = false); the publisher job itself is not in this repo
+  yet (VERIFICATION THRESHOLD-VERSION).
 
 ## 5. Columns the app reads (agreed subset)
 | Object | Columns |
@@ -207,7 +233,7 @@ Tables named in the plan canvas or the app that are not in the FERC canvas:
 | `silver.v_reading_current` | reading_id, dam_id, instrument_id, sensor_id, ts_utc, raw_value, raw_unit, eng_value, eng_unit, corrected_value, corrected_unit, head_m, qa_flag, qa_reason, calib_id, cal_version, formula_id, formula_version, recompute_batch_id |
 | `silver.incl_reduced` | instrument_id, survey_id, survey_ts, depth_m, diff_a, diff_b, checksum_a, checksum_b, inc_a, inc_b, cum_a, cum_b, resultant, fixed_end, qa_flag, qa_reason, calib_id (NULL), formula_id, formula_version, *(v1.1)* depth_reference, baseline_survey_id, correction_record_ids, *(v1.2)* raw_depth_label, *(v1.4)* qc_rule_version, installation_version, probe_constants |
 | `ref.incl_installation` *(v1.1)* | instrument_id, probe_L_m, probe_K, casing_depth_m, depth_reference, sign_mult_A, sign_mult_B, baseline_survey_id, *(v1.2)* spiral_survey_id, stable_zone_top_m, effective_from, effective_to |
-| `ops.alarm_episode` / `ops.alarm_event` | event_id, dam_id, instrument_id, sensor_id, event_ts, cleared_ts, machine_state, threshold_id, threshold_version, value, *(v1.1 lineage)* reading_id, cal_version, calib_id, formula_version, raise_reading_id, raise_cal_version, mixed_calibration, *(v1.4)* formula_id, qa_flag, *(v1.5, episode only)* erroneous_mark, erroneous_reason, erroneous_marked_by, erroneous_marked_ts |
+| `ops.alarm_episode` / `ops.alarm_event` | event_id, dam_id, instrument_id, sensor_id, event_ts, cleared_ts, machine_state, threshold_id, threshold_version, value, *(v1.1 lineage)* reading_id, cal_version, calib_id, formula_version, raise_reading_id, raise_cal_version, mixed_calibration, *(v1.4)* formula_id, qa_flag, *(v1.5, episode only)* erroneous_mark, erroneous_reason, erroneous_marked_by, erroneous_marked_ts, *(v1.7, episode only)* raise_threshold_id, raise_threshold_version, cdse_ack_required_at_open, cdse_ack_required; *(v1.7, event)* cdse_ack_required_at_open (RAISE rows) |
 | `gold.incl_correction_status` *(v1.5)* | every `ref.incl_correction` column (`superseded_by` derived), approval_status (`proposed`/`approved`/`superseded`/`unreviewed_applied`), approved_by, approved_utc, review_rationale, review_signature_hash |
 | `gold.threshold_exceedances` | see `sql/ddl/11_gold_views.sql` |
 
@@ -488,6 +514,9 @@ name and fail loudly if it does not resolve.
   apply_proposal_missing, reject_proposal_missing, cdse_level_without_authority, rationale_missing,
   decision_action_mismatch. App roles are not in UC (the app records review_level 'engineer' for admins), so admin
   vs engineer is only distinguishable when an app-role source is passed; the job passes none yet.
+- **Upgrade (v1.7):** after v1_6_003, run `sql/migrations/v1_7_001_cdse_ack.sql` (idempotent) **before** `dam_uc_setup`
+  (`sql/ddl/11` selects `cdse_ack_required_at_open` / `cdse_ack_required`). It enables the irreversible Delta feature
+  `allowColumnDefaults` on `ref.threshold` and backfills the new column to false. UNVERIFIED (MIGRATION-3).
 
 ## 9. Sign-off
 | Party | Agent | Status |

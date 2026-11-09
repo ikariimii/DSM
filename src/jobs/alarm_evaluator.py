@@ -18,7 +18,7 @@ from datetime import datetime
 import _common  # noqa: F401
 from _common import args, spark as get_spark
 
-from dam_safety.alarms import evaluate_sensor_batch
+from dam_safety.alarms import cdse_ack_snapshot, evaluate_sensor_batch
 from dam_safety.inclinometer.batch import installation_version_at
 from dam_safety.spark.engine import fq
 
@@ -108,10 +108,17 @@ for sid in sensors:
         src = by_ts.get(t.ts, {}) if t.event != "ACK" else {}
         rid = src.get("reading_id")
         iv = inst_version(sid, t.ts, log) if t.event != "ACK" else None
+        # v1.7: RAISE opens the episode -> snapshot ref.threshold.cdse_ack_required of the raising rule version
+        try:
+            ca = cdse_ack_snapshot(t.event, t.threshold_id, t.threshold_version, ok_specs)
+        except ValueError as e:  # never stop alarming over the flag: raise the alarm, conservatively require CDSE
+            log.append({"sensor_id": sid, "threshold_id": t.threshold_id, "issue": f"cdse_ack_required: {e}; "
+                        "snapshot set TRUE (conservative)"})
+            ca = True
         tr_rows.append((tid, t.key, dam_of[sid], sid, t.ts, t.event, t.from_state, t.to_state, t.value, t.metric_value,
                         t.threshold_id, t.threshold_version, t.actor, t.comment, rid, run_id, now,
                         src.get("calib_id"), src.get("cal_version"), src.get("formula_id"), src.get("formula_version"),
-                        src.get("recompute_batch_id"), src.get("qa_flag"), iv))
+                        src.get("recompute_batch_id"), src.get("qa_flag"), iv, ca))
         if t.event in ("RAISE", "ESCALATE") and rid:
             spec = next(s for s in ok_specs if s["threshold_id"] == t.threshold_id)
             ex_rows.append((f"ex-{tid[:32]}", dam_of[sid], rid, tid, t.threshold_id, t.threshold_version, t.ts,

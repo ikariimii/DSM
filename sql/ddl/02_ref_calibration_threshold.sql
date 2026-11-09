@@ -65,8 +65,9 @@ CREATE TABLE IF NOT EXISTS ref.threshold (
   effective_from   TIMESTAMP NOT NULL,
   effective_to     TIMESTAMP,
   is_current       BOOLEAN NOT NULL,
+  cdse_ack_required BOOLEAN NOT NULL DEFAULT false COMMENT 'v1.7 (DSSMP): when true the dam''s CDSE (ref.v_dam_reviewer_authority) must acknowledge alarms of this rule at ANY level. Per rule version (SCD2). Enforcement: app. Snapshot at episode open: ops.alarm_transition.cdse_ack_required_at_open',
   CONSTRAINT pk_threshold PRIMARY KEY (threshold_id, threshold_version)
-) TBLPROPERTIES (delta.enableChangeDataFeed = true);
+) TBLPROPERTIES (delta.enableChangeDataFeed = true, 'delta.feature.allowColumnDefaults' = 'supported');
 
 -- QC rule parameters per sensor (site settings; defaults UNVERIFIED, see VERIFICATION.md)
 CREATE TABLE IF NOT EXISTS ref.qc_rule (
