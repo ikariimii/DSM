@@ -479,18 +479,171 @@ def test_signed_chain_detects_a_forged_signature():
     st._conn.close()
 
 
-@pytest.mark.xfail(strict=True, reason="QA-045: verify_chain accepts a stripped signature when a real Signer is "
-                                       "configured (signature/sig_alg/key_id are outside record_hash)")
+# QA-045a closed (App Dev 6cb95c9 / 113060c, verified 2026-11-09): with a real Signer, signature/sig_alg/key_id
+# are mandatory even though they sit outside record_hash. Strict xfail removed; adversarial coverage below.
+class _KeyAwareSigner(_HmacSigner):
+    """Rejects a mismatched key_id (the base HMAC helper only checked the signature bytes)."""
+    key_id = "k1"
+
+    def verify(self, record_hash, signature, key_id):
+        return key_id == self.key_id and super().verify(record_hash, signature, key_id)
+
+
+def _rows_head(st, signer):
+    return st.chain_rows("CRD"), st.chain_head("CRD"), signer
+
+
 def test_signed_chain_detects_a_stripped_signature():
     st, signer = _signed_store()
     _unguard(st)
     st.execute("UPDATE review_signoff SET signature = NULL, sig_alg = NULL, key_id = NULL WHERE chain_seq = 2")
+    v = ac.verify_chain(*_rows_head(st, signer))
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_downgrade")
+    assert v["signatures_required"] is True
+
+
+@pytest.mark.parametrize("blank", [None, "", "   ", chr(9)])
+@pytest.mark.parametrize("cols", [("signature",), ("sig_alg",), ("key_id",), ("signature", "sig_alg", "key_id")])
+def test_qa045a_blank_or_missing_signature_fields_fail(cols, blank):
+    st, signer = _signed_store()
+    _unguard(st)
+    st.execute(f"UPDATE review_signoff SET {', '.join(c + ' = %s' for c in cols)} WHERE chain_seq = 2",
+               tuple(blank for _ in cols))
+    v = ac.verify_chain(*_rows_head(st, signer))
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_downgrade")
+    assert all(c in v["detail"] for c in cols)
+
+
+def test_qa045a_borrowed_signature_from_another_row_fails():
+    st, signer = _signed_store()
+    rows = {int(r["chain_seq"]): r for r in st.chain_rows("CRD")}
+    _unguard(st)
+    st.execute("UPDATE review_signoff SET signature = %s WHERE chain_seq = 2", (rows[1]["signature"],))
+    v = ac.verify_chain(*_rows_head(st, signer))
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_invalid")
+
+
+def test_qa045a_truncated_signature_fails():
+    st, signer = _signed_store()
+    rows = {int(r["chain_seq"]): r for r in st.chain_rows("CRD")}
+    _unguard(st)
+    st.execute("UPDATE review_signoff SET signature = %s WHERE chain_seq = 2", (rows[2]["signature"][:-4],))
+    v = ac.verify_chain(*_rows_head(st, signer))
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_invalid")
+
+
+def test_qa045a_wrong_key_id_fails():
+    st, _ = _signed_store()
+    signer = _KeyAwareSigner()
+    # Re-sign with the key-aware helper so key_id is checked on verify.
+    st2 = StateStore("sqlite")
+    base = lambda n: {"review_id": f"RS-{n}", "dam_id": "CRD", "subject_type": "alarm_event", "subject_id": f"E{n}",
+                      "review_level": "engineer", "decision": "acknowledge", "comment": "c", "reviewer_id": "uid-1",
+                      "reviewer_pe_license": None, "signed_ts": "2026-11-02T00:00:00.000000+00:00",
+                      "signature_hash": "c" * 64, "action_type": "alarm_ack", "reviewer_email": "a@x",
+                      "reviewer_sub": None, "original_value": "{}", "corrected_value": "{}"}
+    for n in range(3):
+        st2.append_chained("CRD", ac.GENESIS, ac.finalizer(base(n), signer))
+    _unguard(st2)
+    st2.execute("UPDATE review_signoff SET key_id = %s WHERE chain_seq = 2", ("k-other",))
+    v = ac.verify_chain(st2.chain_rows("CRD"), st2.chain_head("CRD"), signer)
+    st._conn.close(); st2._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_invalid")
+
+
+def test_qa045a_signature_key_removed_from_row_dict_fails():
+    st, signer = _signed_store()
+    rows = [dict(r) for r in st.chain_rows("CRD")]
+    head = st.chain_head("CRD")
+    for f in ("signature", "sig_alg", "key_id"):
+        rows[1].pop(f, None)
+    v = ac.verify_chain(rows, head, signer)
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_downgrade")
+    assert "signature" in v["detail"]
+
+
+def test_qa045a_unsigned_row_inserted_mid_chain_fails():
+    st, signer = _signed_store()
+    # Append an unsigned record after signed ones (Noop finalizer), then verify under the real signer.
+    base = {"review_id": "RS-99", "dam_id": "CRD", "subject_type": "alarm_event", "subject_id": "E99",
+            "review_level": "engineer", "decision": "acknowledge", "comment": "c", "reviewer_id": "uid-1",
+            "reviewer_pe_license": None, "signed_ts": "2026-11-02T00:00:00.000000+00:00",
+            "signature_hash": "c" * 64, "action_type": "alarm_ack", "reviewer_email": "a@x",
+            "reviewer_sub": None, "original_value": "{}", "corrected_value": "{}"}
+    st.append_chained("CRD", ac.GENESIS, ac.finalizer(base))  # NoopSigner -> unsigned
+    v = ac.verify_chain(*_rows_head(st, signer))
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 4, "signature_downgrade")
+
+
+def test_qa045a_verify_with_signer_unset_cannot_silently_accept_claimed_signatures():
+    """Downgrade attack: rows claim signatures, but verification is invoked without a real signer.
+    NoopSigner cannot vouch for any signature, so every claimed signature fails; this is not a bypass."""
+    st, _ = _signed_store()
+    for signer in (None, ac.NoopSigner()):
+        v = ac.verify_chain(st.chain_rows("CRD"), st.chain_head("CRD"), signer)
+        assert v["ok"] is False and v["reason"] == "signature_invalid"
+        assert v.get("signatures_required") is False
+    st._conn.close()
+
+
+def test_qa045a_demo_noop_path_still_accepts_unsigned_and_rejects_tampered_hash():
+    """Documented demo/no-signer path: unsigned chains verify; content/prev tampering still breaks the hash chain."""
+    st = StateStore("sqlite")
+    base = lambda n: {"review_id": f"RS-{n}", "dam_id": "CRD", "subject_type": "alarm_event", "subject_id": f"E{n}",
+                      "review_level": "engineer", "decision": "acknowledge", "comment": "c", "reviewer_id": "uid-1",
+                      "reviewer_pe_license": None, "signed_ts": "2026-11-02T00:00:00.000000+00:00",
+                      "signature_hash": "c" * 64, "action_type": "alarm_ack", "reviewer_email": "a@x",
+                      "reviewer_sub": None, "original_value": "{}", "corrected_value": "{}"}
+    for n in range(3):
+        st.append_chained("CRD", ac.GENESIS, ac.finalizer(base(n)))  # Noop default
+    v = ac.verify_chain(st.chain_rows("CRD"), st.chain_head("CRD"), None)
+    assert v["ok"] and v["signed_records"] == 0 and v["signatures_required"] is False
+    _unguard(st)
+    st.execute("UPDATE review_signoff SET comment = %s WHERE chain_seq = 2", ("tampered",))
+    v = ac.verify_chain(st.chain_rows("CRD"), st.chain_head("CRD"), None)
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "hash_mismatch")
+    st._conn.close()
+
+
+def test_qa045a_hash_chain_checks_not_weakened_under_real_signer():
+    st, signer = _signed_store()
+    _unguard(st)
+    st.execute("UPDATE review_signoff SET comment = %s WHERE chain_seq = 2", ("tampered",))
+    v = ac.verify_chain(*_rows_head(st, signer))
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "hash_mismatch")
+    st.execute("UPDATE review_signoff SET prev_hash = %s WHERE chain_seq = 3", ("f" * 64,))
+    # restore comment so hash of seq2 is valid again, then break prev on seq3
+    # (comment already tampered; re-write from a fresh store for a clean prev_mismatch)
+    st._conn.close()
+    st, signer = _signed_store()
+    _unguard(st)
+    st.execute("UPDATE review_signoff SET prev_hash = %s WHERE chain_seq = 3", ("f" * 64,))
+    v = ac.verify_chain(*_rows_head(st, signer))
+    st._conn.close()
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 3, "prev_mismatch")
+
+
+def test_qa045a_noop_cannot_be_swapped_in_to_accept_a_stripped_prod_chain():
+    """Stripping all signatures and verifying with NoopSigner succeeds (demo path), but that path is only
+    the default when no real signer is configured. A prod catalog that installs a real signer still fails
+    the stripped chain. Settings.demo_mode against dam_prod remains separately refused (QA-041 xfail)."""
+    st, signer = _signed_store()
+    _unguard(st)
+    st.execute("UPDATE review_signoff SET signature = NULL, sig_alg = NULL, key_id = NULL")
+    assert ac.verify_chain(st.chain_rows("CRD"), st.chain_head("CRD"), ac.NoopSigner())["ok"] is True
     v = ac.verify_chain(st.chain_rows("CRD"), st.chain_head("CRD"), signer)
     st._conn.close()
-    assert not v["ok"]
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 1, "signature_missing")
+    assert ac.is_enforcing(signer) and not ac.is_enforcing(ac.NoopSigner())
 
 
-@pytest.mark.xfail(strict=True, reason="QA-045: the Postgres append-only guard is a row-level UPDATE/DELETE trigger; "
+@pytest.mark.xfail(strict=True, reason="QA-045b: the Postgres append-only guard is a row-level UPDATE/DELETE trigger; "
                                        "TRUNCATE review_signoff (+ DELETE of the mutable head row) is not refused")
 def test_postgres_guard_also_refuses_truncate():
     src = (ROOT / "app" / "backend" / "repos" / "state.py").read_text()

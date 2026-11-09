@@ -786,3 +786,11 @@ Scope: the 3 VDV Helpcenter exports in dam-refs `vendor_export_samples_vdv/` (ma
   - QA-045: Postgres append-only guard does not refuse TRUNCATE
   - QA-046: contract.approval_status demo fallback compares reviewed_by case-sensitively
 - **Still open:** QA-044, QA-005e. Vendor reduction parity remains UNVERIFIED. No deployment sign-off.
+
+## 2026-11-09 10:29 EST: QA-045a closed (App Dev 6cb95c9 ≡ 113060c content; HEAD 113060c = origin)
+- **Local vs origin:** HEAD and origin/app/v1.5-audit-chain both at 113060c. 6cb95c9 is the same QA-045a patch (same tree for the three files) on a parallel ancestry line; 98fab6c (QA-045b TRUNCATE) is NOT on this HEAD. No merge/reset done.
+- **Fix verified:** with a real Signer, verify_chain requires signature, sig_alg and key_id on every record (outside record_hash). Reasons: signature_missing / signature_downgrade / signature_invalid. NoopSigner path unchanged for unsigned chains; claimed signatures under Noop still fail (cannot vouch).
+- **Independent adversarial tests** added in qa/test_qa039_chain_adversarial.py (strict xfail removed from test_signed_chain_detects_a_stripped_signature): missing/empty/None/whitespace fields; borrowed signature; truncated signature; wrong key_id; signature fields deleted from the row dict; unsigned row appended mid-chain; verify with signer unset while rows claim signatures; demo/Noop unsigned OK + hash_mismatch still caught; hash/prev checks intact under a real signer; stripping all sigs + Noop would pass (demo) but the same stripped chain fails under a real signer (signature_missing). No bypass found for an enforcing signer.
+- **QA-045b kept open** (TRUNCATE xfail retained; 98fab6c not on this branch tip).
+- **Still open:** QA-044, QA-005e (vendor parity UNVERIFIED), QA-041, QA-046.
+- **Suites:** root 705 passed / 2 skipped (.venv-dsm); app 341 passed (app/.venv); qa/ 230 passed / 3 xfailed; guard 0.
