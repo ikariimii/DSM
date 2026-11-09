@@ -60,10 +60,13 @@ def verify_all(records, heads, signer=None, catalog=None):
     return out
 
 
-def authority_failures(records, authority, app_roles=None, require_second_approver=None):
+def authority_failures(records, authority, app_roles=None, require_second_approver=None, threshold_dssmp=None,
+                       dssmp_versions=None):
     """§7.13: alarm_rule records re-checked against ref.v_dam_reviewer_authority at signed_ts. Returns (errors, warns).
-    require_second_approver None = read CDSE_FLAG_REQUIRE_SECOND_APPROVER from the environment (app parsing)."""
-    probs = rule_flag_authority_problems(records, authority, app_roles, require_second_approver)
+    require_second_approver None = read CDSE_FLAG_REQUIRE_SECOND_APPROVER from the environment (app parsing).
+    threshold_dssmp / dssmp_versions: DSSMP version of each applied rule must be approved and in effect (v1.7)."""
+    probs = rule_flag_authority_problems(records, authority, app_roles, require_second_approver,
+                                         threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions)
     return [p for p in probs if p["severity"] == "error"], [p for p in probs if p["severity"] != "error"]
 
 
@@ -95,7 +98,13 @@ def main():
     second = second_approver_required({SECOND_APPROVER_SETTING: getattr(a, SECOND_APPROVER_ARG)}
                                       if getattr(a, SECOND_APPROVER_ARG) is not None else {})
     print(json.dumps({SECOND_APPROVER_SETTING: second}))
-    errors, warns = authority_failures(records, authority, require_second_approver=second)
+    threshold_dssmp = {(r.threshold_id, r.threshold_version): r.dssmp_version_id for r in spark.sql(
+        f"SELECT threshold_id, threshold_version, dssmp_version_id FROM {a.catalog}.ref.threshold").collect()}
+    dssmp_versions = {r.dssmp_version_id: r.asDict() for r in spark.sql(
+        f"SELECT dssmp_version_id, dam_id, status, effective_from, effective_to FROM {a.catalog}.ref.dssmp_version"
+    ).collect()}
+    errors, warns = authority_failures(records, authority, require_second_approver=second,
+                                       threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions)
     for p in errors + warns:
         print(json.dumps(p, default=str))
     bad = [v for v in res if not v["ok"]]

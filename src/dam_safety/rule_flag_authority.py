@@ -43,6 +43,7 @@ import os
 from typing import Callable, Iterable, List, Mapping, Optional
 
 from dam_safety.audit_chain import ACTOR_ROLE_FIELD, actor_role_problem, actor_roles, canon_of
+from dam_safety.dssmp_check import dssmp_problem
 
 ADMIN_ROLES = ("dam_admin", "admin")
 
@@ -62,6 +63,15 @@ CODES = {
     "rationale_missing": "error",           # defence in depth (the UC CHECK also refuses it)
     "decision_action_mismatch": "error",
     "apply_by_proposer": "error",           # CDSE_FLAG_REQUIRE_SECOND_APPROVER on: applier == proposer of the proposal
+    # v1.7 (Genie): an apply against a rule whose DSSMP version was not approved / in effect at signed_ts
+    "dssmp_not_found": "error",
+    "dssmp_other_dam": "error",
+    "dssmp_draft": "error",
+    "dssmp_superseded": "error",
+    "dssmp_not_yet_effective": "error",
+    "dssmp_status_unknown": "error",
+    "dssmp_missing": "error",
+    "dssmp_unverifiable": "warn",           # the rule version's ref.threshold row was not supplied / not found
 }
 SECOND_APPROVER_SETTING = "CDSE_FLAG_REQUIRE_SECOND_APPROVER"
 
@@ -108,10 +118,16 @@ def _cv(rec) -> dict:
 
 def rule_flag_authority_problems(records: Iterable[Mapping], authority: Iterable[Mapping],
                                  app_roles: Optional[Callable[[str, str, dt.datetime], Optional[str]]] = None,
-                                 require_second_approver: Optional[bool] = None) -> List[dict]:
+                                 require_second_approver: Optional[bool] = None,
+                                 threshold_dssmp: Optional[Mapping] = None,
+                                 dssmp_versions: Optional[Mapping] = None) -> List[dict]:
     """Check every alarm_rule record. Returns [{review_id, dam_id, chain_seq, action_type, code, severity, detail}]
     (empty = all authorised). `authority`: ref.v_dam_reviewer_authority rows (dam_id, principal, granted_ts,
-    revoked_ts). `app_roles(dam_id, principal_lower, signed_ts)` -> 'dam_admin' | 'admin' | other role | None."""
+    revoked_ts). `app_roles(dam_id, principal_lower, signed_ts)` -> 'dam_admin' | 'admin' | other role | None.
+    DSSMP (Genie 2026-11-09): with threshold_dssmp {(threshold_id, threshold_version): dssmp_version_id} (ref.threshold)
+    and dssmp_versions {dssmp_version_id: ref.dssmp_version row}, every apply is checked against the DSSMP version of
+    the rule version it changes (original_value.threshold_version, i.e. N; N+1 copies it) at signed_ts (historical:
+    superseded = effective_to <= signed_ts); codes from dam_safety.dssmp_check. Omitted = not checked."""
     authority = list(authority)
     second = second_approver_required() if require_second_approver is None else bool(require_second_approver)
     recs = sorted((r for r in records if r.get("subject_type") == "alarm_rule"),
@@ -175,6 +191,18 @@ def rule_flag_authority_problems(records: Iterable[Mapping], authority: Iterable
         direct_or_own = verb == "apply" and (not proposer or proposer in _who(r))
         if not direct_or_own and (dam, pid) not in proposals:
             bad(r, f"{verb}_proposal_missing", f"proposal {pid!r} is not recorded earlier in the chain")
+        if verb == "apply" and threshold_dssmp is not None and dssmp_versions is not None:
+            try:
+                ver = int(json.loads(r.get("original_value") or "{}").get("threshold_version"))
+            except (TypeError, ValueError, AttributeError):
+                ver = None
+            key = (r.get("subject_id"), ver)
+            if ver is None or key not in threshold_dssmp:
+                bad(r, "dssmp_unverifiable", f"no ref.threshold row for {key} to find its DSSMP version")
+            else:
+                p = dssmp_problem(threshold_dssmp[key], dam, dssmp_versions, r["signed_ts"], historical=True)
+                if p:
+                    bad(r, p[0], f"apply of {key[0]} v{ver}: {p[1]}")
         if second and verb == "apply" and (dam, pid) in proposals:
             prop = proposals[(dam, pid)]
             proposer_ids = _who(prop) | ({proposer} if proposer else set())

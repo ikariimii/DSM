@@ -222,3 +222,45 @@ def test_verify_job_passes_the_setting_from_the_bundle_variable(monkeypatch):
                      app_res)
     bundle = open(os.path.join(ROOT, "databricks.yml")).read()
     assert re.search(r"cdse_flag_require_second_approver:\n(?:\s+.*\n)*?\s+default: \"false\"", bundle)
+
+
+# ------------------------------------------------------------------ v1.7: apply only against an approved, in-effect DSSMP
+DV = {"DS-OK": {"dam_id": D, "status": "approved", "effective_from": "2026-01-01T00:00:00Z", "effective_to": None},
+      "DS-DRAFT": {"dam_id": D, "status": "draft", "effective_from": "2026-01-01T00:00:00Z", "effective_to": None},
+      "DS-OLD": {"dam_id": D, "status": "superseded", "effective_from": "2025-01-01T00:00:00Z",
+                 "effective_to": "2026-06-01T00:00:00Z"},
+      "DS-B": {"dam_id": D2, "status": "approved", "effective_from": "2026-01-01T00:00:00Z", "effective_to": None}}
+
+
+@pytest.mark.parametrize("dv,want", [("DS-OK", []), ("DS-DRAFT", ["dssmp_draft"]), ("DS-OLD", ["dssmp_superseded"]),
+                                     ("DS-B", ["dssmp_other_dam"]), ("DS-NONE", ["dssmp_not_found"])])
+def test_apply_record_is_checked_against_the_rules_dssmp_version(dv, want):
+    r = rec("apply", CDSE, {"proposal_id": "RFP-DS", "proposed_by": CDSE})
+    r["original_value"] = json.dumps({"threshold_id": "T-1", "threshold_version": 3, "cdse_ack_required": False})
+    probs = rfa.rule_flag_authority_problems([r], AUTH, roles, False, threshold_dssmp={("T-1", 3): dv},
+                                             dssmp_versions=DV)
+    assert [p["code"] for p in probs] == want
+    # without the lookups nothing changes (callers that do not pass them)
+    assert rfa.rule_flag_authority_problems([r], AUTH, roles, False) == []
+    # rule version not found: a warning, not silence
+    probs = rfa.rule_flag_authority_problems([r], AUTH, roles, False, threshold_dssmp={}, dssmp_versions=DV)
+    assert [(p["code"], p["severity"]) for p in probs] == [("dssmp_unverifiable", "warn")]
+
+
+def test_superseded_after_the_apply_is_fine_historically():
+    r = rec("apply", CDSE, {"proposal_id": "RFP-DH", "proposed_by": CDSE}, ts="2026-05-01T00:00:00Z")
+    r["original_value"] = json.dumps({"threshold_id": "T-1", "threshold_version": 1})
+    assert rfa.rule_flag_authority_problems([r], AUTH, roles, False, threshold_dssmp={("T-1", 1): "DS-OLD"},
+                                            dssmp_versions=DV) == []
+
+
+@pytest.mark.parametrize("dv,want", [("DS-FUT", "dssmp_not_yet_effective"), ("DS-ODD", "dssmp_status_unknown"),
+                                     (None, "dssmp_missing")])
+def test_apply_dssmp_remaining_codes(dv, want):
+    dvs = {**DV, "DS-FUT": {"dam_id": D, "status": "approved", "effective_from": "2027-01-01T00:00:00Z"},
+           "DS-ODD": {"dam_id": D, "status": "retired", "effective_from": "2026-01-01T00:00:00Z"}}
+    r = rec("apply", CDSE, {"proposal_id": "RFP-DX", "proposed_by": CDSE})
+    r["original_value"] = json.dumps({"threshold_id": "T-1", "threshold_version": 2})
+    probs = rfa.rule_flag_authority_problems([r], AUTH, roles, False, threshold_dssmp={("T-1", 2): dv},
+                                             dssmp_versions=dvs)
+    assert [p["code"] for p in probs] == [want]

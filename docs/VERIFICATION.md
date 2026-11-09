@@ -152,3 +152,26 @@ The QA failure is `qa/test_inclinometer_bias_rules.py::test_qa020_bias_qc_never_
 its cumulative-displacement assertion calls `abs()` on a null value. It is outside this landing change;
 no inclinometer or QA files were modified to hide/fix it. App and QA also emit the existing
 Starlette TestClient/httpx deprecation warning. Workspace validation/deployment was not run.
+
+## PUBLISHER (ref_change_publication -> ref.threshold, v1.7)
+
+- `src/dam_safety/ref_change_publish.py` (pure plan) + `src/jobs/publish_ref_changes.py`, own bundle job
+  `dam_ref_publish` (every 5 min, max 1 concurrent run). One conditional MERGE per run: closes version N
+  (effective_to, is_current only) and inserts N+1, guarded inside the statement by "N is still current" (stale
+  re-check). Post-check that no existing version's rule fields changed, then the outbox status is written back.
+- Outcomes: `applied`, `already_applied` (re-run), `rejected_stale`, `rejected_invalid`, `deferred` (second pending row
+  for the same rule). Rejections carry `<code>: <detail>`; codes `unknown_kind`, `payload_invalid`,
+  `missing_required_column` (dssmp_version_id, tier, deadband, persistence_on, persistence_off),
+  `missing_not_null_column`, `unknown_columns`, `invalid_value`, and the DSSMP codes `dssmp_missing`,
+  `dssmp_not_found`, `dssmp_other_dam`, `dssmp_draft`, `dssmp_superseded`, `dssmp_not_yet_effective`,
+  `dssmp_status_unknown` (`src/dam_safety/dssmp_check.py`, checked against `ref.dssmp_version` at the new version's
+  effective_from).
+- The same DSSMP check runs in the §7.13 verifier on every `alarm_rule_flag_apply` (historically, at signed_ts, on the
+  DSSMP version of rule version N); a missing ref.threshold row is the warning `dssmp_unverifiable`.
+- Evidence: tests/test_dssmp_check.py, tests/test_ref_change_publish.py (incl. an outbox row written by the app's own
+  demo apply path, and the MERGE text executed on local PostgreSQL 17 for apply / idempotent re-run / concurrent
+  stale), tests/test_rule_flag_authority.py.
+- Finding for App Dev: the demo seed's threshold rows carry `output_name`, which is not a `ref.threshold` column, so a
+  demo outbox row is rejected `unknown_columns` (live rows come from `SELECT t.*` on ref.threshold and lack it).
+- UNVERIFIED: Delta MERGE with the EXISTS subquery over the target (only PostgreSQL executed it); the run_as
+  principal's MODIFY on ref.threshold; the Lakebase publisher grants on a deployed Lakebase.

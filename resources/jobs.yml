@@ -115,6 +115,28 @@ resources:
             environment_version: "2"
             dependencies: [ "psycopg[binary]>=3.1", "databricks-sdk>=0.60" ]
 
+    dam_ref_publish:
+      name: dam_ref_publish_${var.catalog}
+      description: App outboxes (Lakebase ref_change_publication; dssmp_registration_outbox) -> NEW ref.threshold /
+        ref.dssmp_version versions (one conditional MERGE each; stale / invalid rows rejected with a reason written back)
+      schedule:
+        quartz_cron_expression: "0 4/5 * * * ?"
+        timezone_id: UTC
+        pause_status: UNPAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: publish_ref_changes
+          environment_key: pg
+          spark_python_task:
+            python_file: ../src/jobs/publish_ref_changes.py
+            parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
+                          "--lb_branch", "production", "--lb_endpoint", "primary" ]
+      environments:
+        - environment_key: pg
+          spec:
+            environment_version: "2"
+            dependencies: [ "psycopg[binary]>=3.1", "databricks-sdk>=0.60" ]
+
     dam_interpretation:
       name: dam_interpretation_${var.catalog}
       description: Nightly HST fit, anomaly scoring, sensor-fault classification, PFM rules, draft commentary (requires_engineer_review)

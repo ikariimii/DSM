@@ -147,6 +147,7 @@ targets:
         dam_heartbeat:        {permissions: *portfolio_view}
         dam_recompute:        {permissions: *portfolio_view}
         dam_lakebase_extract: {permissions: *portfolio_view}
+        dam_ref_publish:      {permissions: *portfolio_view}
         dam_interpretation:   {permissions: *portfolio_view}
         dam_uc_setup:         {permissions: *portfolio_view}
       pipelines:
