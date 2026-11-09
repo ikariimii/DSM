@@ -624,7 +624,14 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - **LIFECYCLE-CITATIONS — UNVERIFIED-pending:** 13 of the 15 citation rows (all but `transfer_final_9_3_12_12c` and
   `surrender_effective_6_2_6_5`). Gap: no code covers suspension_reason `other` (every `other` suspension is refused
   `lifecycle_citation_invalid` until one is added as data).
-- **LIFECYCLE-BACKFILL — UNVERIFIED** on Databricks (separate commit): `v1_8_002_lifecycle_backfill.sql`.
+- **LIFECYCLE-BACKFILL — UNVERIFIED** on Databricks: `v1_8_002_lifecycle_backfill.sql` (raise_error guards,
+  `CAST(... AS TIMESTAMP)` on an invalid date under ANSI mode, `row_number()` window, `split` for the evidence array,
+  the MERGE). Verified on PG 17.11 (tests/test_lifecycle_backfill.py, same translation as the full-chain migration
+  test): at-least-once copies deduplicated on pk, ONE event per dam (earliest ts, then lowest pk), event_hash
+  recomputed in Python equals the SQL hash, chain verifies, SCD-2 row + ref.dam mirror, idempotent (re-run and a
+  late earlier copy change nothing), and 8 malformed cases (non-strict ts, offset, fraction, Feb 30, NULL ts,
+  unreadable payload, no dam_id, envelope dam mismatch) each fail the whole run with nothing written. hash_sql nests
+  one concat per field (PostgreSQL caps a call at 100 arguments; Spark has no such cap; same bytes hashed).
 - Design choices to confirm: "new DSSMP" = effective_from >= the current state's effective_from; the 60-day notice is
   measured from the approve record's signed_ts; a ref.dam row without any lifecycle event is `lifecycle_unverifiable`
   (no ref.dam row: implicit draft); the transfer counterpart event carries the transfer's citation; voided dams are

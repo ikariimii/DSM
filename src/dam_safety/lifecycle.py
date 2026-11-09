@@ -185,11 +185,13 @@ def event_hash(event: Mapping) -> str:
 
 def hash_sql(expr: Mapping[str, str]) -> str:
     """The same hash in Spark SQL: expr maps each HASH_FIELDS name to a STRING-valued SQL expression already in the
-    canonical form (NULL allowed). Used by the backfill migration (tests assert the file carries exactly this)."""
+    canonical form (NULL allowed). Used by the backfill migration (tests assert the file carries exactly this). One
+    concat per field inside the outer concat: 32 arguments, not 128 (PostgreSQL caps a call at 100 arguments; the
+    tests run the same SQL there)."""
     parts = []
     for f in HASH_FIELDS:
         x = expr.get(f, "CAST(NULL AS STRING)")
-        parts.append(f"coalesce(CAST(length({x}) AS STRING), '-1'), ':', coalesce({x}, ''), '|'")
+        parts.append(f"concat(coalesce(CAST(length({x}) AS STRING), '-1'), ':', coalesce({x}, ''), '|')")
     return "sha2(concat(\n    " + ",\n    ".join(parts) + "), 256)"
 
 

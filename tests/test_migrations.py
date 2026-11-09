@@ -45,6 +45,7 @@ EXPECTED_COLS = {
         "document_sha256", "approved_by", "approved_at", "approval_record_hash", "loaded_from_outbox_id",
         "volume_uri")],
     "v1_8_001_dam_lifecycle.sql": [("ref.dam", "lifecycle_state"), ("ref.dam", "lifecycle_effective_from")],
+    "v1_8_002_lifecycle_backfill.sql": [],
 }
 EXPECTED_CKS = {
     "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
@@ -58,6 +59,7 @@ EXPECTED_CKS = {
                                         "ck_review_record_subject_decision", "ck_review_record_chain"},
     "v1_8_001_dam_lifecycle.sql": {"ck_lifecycle_citation", "ck_dam_lifecycle_state", "ck_lifecycle_event",
                                    "ck_review_record_subject_decision", "ck_review_record_chain"},
+    "v1_8_002_lifecycle_backfill.sql": set(),
 }
 # The only data change any migration may make: backfilling a column the same file just added, marked by a
 # '-- backfill-new-column: <table>.<col>' line right above an UPDATE ... SET <col> = <literal> WHERE <col> IS NULL.
