@@ -280,6 +280,20 @@ ALTER TABLE ref_change_publication OWNER TO dam_lakebase_owner;
 ALTER TABLE onboarding_publication OWNER TO dam_lakebase_owner;
 ALTER TABLE dssmp_registration_outbox OWNER TO dam_lakebase_owner;
 ALTER TABLE dam_cdse_outbox OWNER TO dam_lakebase_owner;
+-- BEGIN v1_7_007 block (QA-056 belt and braces on owner-owned tables; names and predicates = app/backend/repos/state.py
+-- UNIQUE_GUARDS / PUB_GUARD: the app creates the same indexes on the tables it owns and skips these)
+CREATE UNIQUE INDEX IF NOT EXISTS dam_cdse_outbox_one_pending ON dam_cdse_outbox (dam_id) WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS dssmp_outbox_one_pending ON dssmp_registration_outbox (dssmp_version_id)
+  WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS ref_change_publication_one_version ON ref_change_publication
+  (dam_id, (payload::jsonb ->> 'threshold_id'), (payload::jsonb -> 'insert' ->> 'threshold_version'))
+  WHERE kind = 'ref.threshold.new_version' AND status IN ('pending', 'applied');
+-- DA (single schema source): the app-owned tables that lakebase/001 also creates carry the app's own guards, same
+-- names and predicates as app UNIQUE_GUARDS (the app creates them too, IF NOT EXISTS; dssmp_registration is created by
+-- the app only, so its dssmp_registration_one_open stays app-side)
+CREATE UNIQUE INDEX IF NOT EXISTS dam_cdse_change_one_pending ON dam_cdse_change (dam_id) WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS rule_reversion_one_pending ON rule_reversion_proposal (dam_id) WHERE status = 'pending';
+-- END v1_7_007 block
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dam_lakebase_publisher') THEN
     CREATE ROLE dam_lakebase_publisher NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;

@@ -319,6 +319,9 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   legacy row in step; app/tests/test_audit_chain.py updated for the new behaviour). Re-based on the app at 9000bf7
   (append_chained now has also_row; OUTBOX_GUARDED): with the patch, a copy of the app suite passes (725) and the app
   live test passes on the new 001.
+- Re-based again on the app at 0aed4c4 (QA-056): the chain advisory lock (class 4702046) is taken AFTER the app's
+  `lock_dam` (class 4702047) and `check(q)`, so the lock order stays dam -> chain. Patched copy of the app suite: 740
+  passed (QA-056 live concurrency tests included).
 - Migration for an existing Lakebase: `lakebase/migrations/v1_7_006_chain_head_log.sql` (block byte-identical to 001,
   owner, ENABLE ALWAYS guards, app SELECT + INSERT, extract SELECT); rollback `_down.sql` drops nothing (table, rows
   and guards stay) and only revokes the app role's INSERT. Roll back the app patch first.
@@ -345,4 +348,18 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   checked after each, rows / columns / audit.chain_head / ref.dam_cdse_assignment kept, every up again.
 - UNVERIFIED: none of the downs ran on Delta (`ALTER COLUMN ... DROP DEFAULT` / `DROP NOT NULL`, SQL scripting); the
   PG translation does not cover Delta-specific semantics (appendOnly, table features, volumes).
+
+## QA-056 (unique guard indexes, App Dev 0aed4c4, lakebase block v1_7_007)
+
+- App Dev's tools/patches/qa056_unique_guards.patch applied unchanged (owner-owned tables:
+  `dam_cdse_outbox_one_pending`, `dssmp_outbox_one_pending`, `ref_change_publication_one_version`), plus, for the
+  single schema source, the app's own guards on the app-owned tables lakebase/001 also creates:
+  `dam_cdse_change_one_pending`, `rule_reversion_one_pending` (names / predicates = app UNIQUE_GUARDS). The down drops
+  only the three owner-table indexes (the app recreates its own at start-up).
+- Evidence (PG 17.11): tests/test_lakebase_qa056_guards.py: blocks identical and equal to the app's predicates; fresh
+  001 refuses a second pending outbox row and a second pending CDSE change for the app role; down / re-apply; upgrade
+  from 001@d150288 by the migration (twice) -> validator 0 rows.
+- Note: the 0aed4c4 commit message says lock class 4702046; the code and app SCHEMA_CONTRACT use DAM_LOCK_NS 4702047
+  (4702046 is the DA chain-lock class). The code is right; the message is not.
+- UNVERIFIED: not run on Lakebase; PRE-CHECK duplicates must be resolved before the migration on a live database.
 
