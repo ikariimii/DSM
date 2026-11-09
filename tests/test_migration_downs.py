@@ -139,6 +139,8 @@ def _bind_guard(code, catalog, session, resolved, break_glass):
         use = "" if resolved is not None else "SELECT pg_temp.raise_error('CATALOG_NOT_FOUND');"
         code = before.replace("current_catalog()", _lit(session)) + use + after.replace("current_catalog()",
                                                                                        _lit(resolved))
+    else:
+        code = code.replace("current_catalog()", _lit(session))
     return code.replace("raise_error(", "pg_temp.raise_error(").replace("pg_temp.pg_temp.", "pg_temp.")
 
 

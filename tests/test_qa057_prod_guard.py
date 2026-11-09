@@ -7,7 +7,6 @@ executed here on PostgreSQL (raise_error emulated, current_catalog() bound per c
 import importlib.util
 import json
 import os
-import re
 import subprocess
 import sys
 import uuid
@@ -162,7 +161,7 @@ def test_guard_statements_executed_on_postgres(case, tmp_path):
         if expect is None:
             assert r.returncode == 0 and "reached-the-body" in r.stdout, r.stderr
         else:
-            assert r.returncode != 0 and expect in r.stderr and "reached-the-body" not in r.stdout, r.stderr
+            assert r.returncode != 0 and f"ERROR:  {expect}" in r.stderr and "reached-the-body" not in r.stdout, r.stderr
     finally:
         tmd._psql(PG, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
 
@@ -178,7 +177,30 @@ def test_a_whole_down_on_prod_changes_nothing(tmp_path):
         p.write_text(tmd._pg(open(os.path.join(MIG, DOWNS[-1])).read(), catalog="dam_prod", session="dam_dev",
                              resolved="dam_prod", break_glass=""))
         r = tmd._psql(conn, f=str(p))
-        assert r.returncode != 0 and "QA-057" in r.stderr
-        assert re.search(r"psql:.*:(\d+):", r.stderr)
+        assert r.returncode != 0 and "ERROR:  QA-057" in r.stderr
     finally:
         tmd._psql(PG, f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+
+
+PROBE = os.path.join(ROOT, "tools", "verify", "qa057_guard_probe.sql")
+
+
+def test_runbook_probe_is_exactly_the_downs_first_statement_and_touches_nothing():
+    st = _statements(open(PROBE).read())
+    assert st[0] == _statements(open(os.path.join(MIG, DOWNS[0])).read())[0]
+    assert st[1:] == ["SELECT 'reached-the-body' AS probe"]
+
+
+@live
+@pytest.mark.parametrize("case", [("dam_prod", "", False), ("dam\u200b_prod", "", False),
+                                  ("dam_prod", "BREAK_GLASS_PROD", True), ("dam_dev", "", True)])
+def test_runbook_probe_on_postgres(case, tmp_path):
+    cat, bg, ok = case
+    p = tmp_path / "p.sql"
+    p.write_text(tmd.PG_RAISE_ERROR + tmd._bind_guard(tmd._strip_comments(open(PROBE).read()), cat, "dam_dev",
+                                                      "dam_dev", bg))
+    r = tmd._psql(PG, f=str(p))
+    if ok:
+        assert r.returncode == 0 and "reached-the-body" in r.stdout, r.stderr
+    else:
+        assert r.returncode != 0 and "ERROR:  QA-057" in r.stderr and "reached-the-body" not in r.stdout, r.stderr

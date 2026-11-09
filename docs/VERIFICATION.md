@@ -399,3 +399,15 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   public; with it to dam_app only, survives commit, isolation repeatable read; missing / inaccessible schema fails
   closed; `_connect` with the SDK faked uses the set-up and closes on failure; jobs.yml / databricks.yml wiring.
 - UNVERIFIED: on Lakebase (the jobs' OAuth role must have USAGE on dam_app, i.e. the extract / publisher roles).
+
+## RUNBOOK-PRIMITIVES (QA item 2, 2026-11-09)
+
+- docs/DEV_WORKSPACE_RUNBOOK.md step 4b: one step per UNVERIFIED primitive (P1 MERGE with subquery source, P2 SQL UDF
+  raise_error + assert_dam_go_live_ready, P3 table function ref.dssmp_affected_rules, P4 Delta ALTER COLUMN DROP
+  DEFAULT / DROP NOT NULL, P5 advisory locks + hashtext(), P6 PG version / role attributes / REPEATABLE READ /
+  search_path, P7 run_as grants, P8 QA-057 down guard), each with copy-pasteable commands and the exact PASS output.
+  Lakebase order now includes v1_7_007 (up and down).
+- Checked locally: P1 MERGE result on PG 17.11 (a|1|f, a|2|t); P5 / P6 psql commands and outputs on PG 17.11; P8
+  layer-1 commands and outputs; tools/verify/qa057_guard_probe.sql = the downs' first statement (test) and its PG
+  emulation. NOT checked: every Databricks-side expected output (Statement Execution API JSON shape, DESCRIBE FUNCTION
+  text, information_schema column names, jobs submit exit codes) - the steps themselves are the verification.

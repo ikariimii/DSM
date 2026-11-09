@@ -134,6 +134,7 @@ Existing database at the v1_7_003-era 001, step by step instead (same end state)
 psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql
 psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_005_cdse_reversion_tables.sql
 psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_006_chain_head_log.sql
+psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_007_qa056_unique_guards.sql   # run its PRE-CHECK first
 ```
 
 Validator (read only):
@@ -144,10 +145,189 @@ python tools/validate_lakebase.py --app-role $APP_ROLE --lb-endpoint $EP
 
 Expected: the single line `lakebase append-only/ownership: OK`, exit code 0 (each violation prints a
 `FAIL <check>: <detail>` line and exit 1; exit 2 = cannot connect). Closes LB-OWNER, LB-PUBLISHER, OUTBOX-CONTRACT, LB-CDSE-TABLES, LB-HEAD-LOG (role model, advisory locks and
-hashtext() on Lakebase), LB-PG14, LAKEBASE-AUTH (deployer path).
+hashtext() on Lakebase: step 4b P5), LB-PG14 (step 4b P6), LAKEBASE-AUTH (deployer path).
 
 The app patch for the head log (`tools/patches/v17_chain_head_log_state.patch`) is App Dev's to apply AFTER
 v1_7_006; an unpatched app keeps working.
+
+## 4b. UNVERIFIED primitives: one step each, with a pass/fail check (dev only, after step 4)
+
+Run these in **dev** before step 5. Each step is independent; stop at the first FAIL and record the output in
+docs/VERIFICATION.md. UC steps use a scratch schema `zz_verify` in the dev catalog (dropped at the end); Lakebase
+steps use the `psql` environment of step 4. Never run P1 to P4 or P8's probe against dam_prod.
+
+Helper for the UC steps (one statement per call through the SQL Statement Execution API; prints
+`["<state>", "<error message if any>", <rows>]`, every value as a string):
+
+```bash
+q() { databricks api post /api/2.0/sql/statements --json "$(jq -n --arg s "$1" --arg w "$WH" --arg c "$CATALOG" \
+  '{warehouse_id: $w, catalog: $c, statement: $s, wait_timeout: "50s", on_wait_timeout: "CANCEL"}')" \
+  | jq -c '[.status.state, (.status.error.message // ""), (.result.data_array // [])]'; }
+q "SELECT current_catalog()"                    # expected: ["SUCCEEDED","",[["dam_dev"]]]
+q "CREATE SCHEMA IF NOT EXISTS zz_verify"       # expected: ["SUCCEEDED","",[]]
+```
+
+### P1. Delta MERGE with a subquery source (MIGRATION-3, PUBLISHER, DSSMP-REG, CDSE-ASSIGNMENT)
+
+Same shape as `ref_change_publish.merge_sql`: the source is a subquery with an EXISTS over the target.
+
+```bash
+q "CREATE OR REPLACE TABLE zz_verify.m_t (id STRING, v INT, cur BOOLEAN)"
+q "INSERT INTO zz_verify.m_t VALUES ('a', 1, true)"
+q "CREATE OR REPLACE TABLE zz_verify.m_s AS SELECT * FROM VALUES ('a', 2, 1, 'insert'), ('a', 1, 1, 'close'), ('b', 2, 1, 'insert') AS s(id, v, supersedes, act)"
+q "MERGE INTO zz_verify.m_t AS t USING (SELECT s.* FROM zz_verify.m_s AS s WHERE EXISTS (SELECT 1 FROM zz_verify.m_t AS c WHERE c.id = s.id AND c.cur AND c.v = s.supersedes)) AS s ON t.id = s.id AND t.v = s.v WHEN MATCHED AND s.act = 'close' AND t.cur THEN UPDATE SET cur = false WHEN NOT MATCHED AND s.act = 'insert' THEN INSERT (id, v, cur) VALUES (s.id, s.v, true)"
+q "SELECT id, v, cur FROM zz_verify.m_t ORDER BY id, v"
+```
+
+PASS: the MERGE returns `SUCCEEDED` and the last line is exactly
+`["SUCCEEDED","",[["a","1","false"],["a","2","true"]]]` (the stale `b` row is filtered by the EXISTS).
+FAIL: any `FAILED` (e.g. subqueries not allowed in the MERGE source), or a `b` row, or `a 1` still `true`.
+
+### P2. SQL UDF using raise_error, incl. ref.assert_dam_go_live_ready (CDSE-ASSIGNMENT)
+
+```bash
+q "CREATE OR REPLACE FUNCTION zz_verify.must_be_pos(x INT) RETURNS BOOLEAN RETURN CASE WHEN x > 0 THEN true ELSE raise_error(concat('zz_neg: ', x)) END"
+q "SELECT zz_verify.must_be_pos(1)"
+q "SELECT zz_verify.must_be_pos(-1)"
+q "SELECT ref.assert_dam_go_live_ready('zz_no_such_dam')"
+q "SELECT dam_id FROM ref.v_dam_reviewer_authority WHERE revoked_ts IS NULL LIMIT 1"   # a dam with a CDSE, if any
+q "SELECT ref.assert_dam_go_live_ready('<dam_id from the previous line>')"
+```
+
+PASS, in order: `["SUCCEEDED","",[]]`; `["SUCCEEDED","",[["true"]]]`; `["FAILED","...zz_neg: -1...",[]]`;
+`["FAILED","...dam_go_live_not_ready: zz_no_such_dam has no CDSE in force in ref.v_dam_reviewer_authority...",[]]`;
+(after step 7.2 only) `["SUCCEEDED","",[["true"]]]` for a dam with a CDSE in force.
+FAIL: the CREATE FUNCTION fails (raise_error not allowed in a SQL UDF), `-1` returns `null` / `false`, or the readiness
+function returns anything but `true` / the `dam_go_live_not_ready` error.
+
+### P3. SQL table function ref.dssmp_affected_rules (RULE-REVERSION)
+
+```bash
+q "DESCRIBE FUNCTION EXTENDED ref.dssmp_affected_rules"
+q "SELECT count(*) FROM ref.dssmp_affected_rules('zz_no_such_dam', 'zz_none')"
+q "SELECT (SELECT count(*) FROM ref.dssmp_affected_rules(d.dam_id, 'zz_none')) = (SELECT count(*) FROM ref.threshold t WHERE t.is_current AND t.dam_id = d.dam_id) FROM (SELECT min(dam_id) AS dam_id FROM ref.threshold) d"
+```
+
+PASS: the DESCRIBE output contains `Type: TABLE` (or `TABLE` in the type row) and the five return columns `dam_id`,
+`threshold_id`, `threshold_version`, `dssmp_version_id`, `cdse_ack_required`; the count is `[["0"]]`; the comparison is
+`[["true"]]` (or `[["null"]]` / `[[null]]` when ref.threshold is still empty: then re-run after the first publication).
+FAIL: `FAILED` on any line (table-function syntax, or a correlated table-function argument not supported: then run the
+third line with a literal dam_id instead before calling it a FAIL) or `false`.
+
+### P4. ALTER COLUMN DROP DEFAULT / DROP NOT NULL on Delta (MIGRATION-DOWN, v1_7_001 down)
+
+```bash
+q "CREATE OR REPLACE TABLE zz_verify.d (id INT, f BOOLEAN) TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')"
+q "ALTER TABLE zz_verify.d ALTER COLUMN f SET DEFAULT false"
+q "INSERT INTO zz_verify.d (id) VALUES (1)"
+q "ALTER TABLE zz_verify.d ALTER COLUMN f SET NOT NULL"
+q "ALTER TABLE zz_verify.d ALTER COLUMN f DROP NOT NULL"
+q "ALTER TABLE zz_verify.d ALTER COLUMN f DROP DEFAULT"
+q "ALTER TABLE zz_verify.d ALTER COLUMN f DROP DEFAULT"
+q "INSERT INTO zz_verify.d (id) VALUES (2)"
+q "SELECT id, f FROM zz_verify.d ORDER BY id"
+```
+
+PASS: every statement `SUCCEEDED` (the second DROP DEFAULT too: the down is re-run safe) and the last line is
+`["SUCCEEDED","",[["1","false"],["2",null]]]` (row 1 kept its value; row 2 got no default and NULL was accepted).
+FAIL: any `FAILED`, or row 2 reads `"false"` (default not dropped). If only the repeated DROP DEFAULT fails, the
+v1_7_001 down is not re-run safe: record it.
+
+### P5. Lakebase advisory locks and hashtext() (LB-HEAD-LOG, QA-045c, QA-056)
+
+```bash
+psql -X -At -c "SELECT hashtext('zz_verify') = hashtext('zz_verify'), pg_typeof(hashtext('zz_verify'))"
+psql -X -q -At -c "BEGIN" -c "SELECT pg_advisory_xact_lock(4702046, hashtext('zz_verify'))" -c "SELECT pg_sleep(8)" -c "COMMIT" &
+sleep 3
+psql -X -At -c "SELECT pg_try_advisory_xact_lock(4702046, hashtext('zz_verify'))"
+psql -X -At -c "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND classid = 4702046 AND granted"
+wait
+psql -X -At -c "SELECT pg_try_advisory_xact_lock(4702046, hashtext('zz_verify'))"
+psql -X -At -c "SELECT pg_try_advisory_xact_lock(4702045)"
+```
+
+PASS, in order: `t|integer`; (the background session prints two empty lines); `f` (held by the other session); `1`; after
+`wait`: `t`; `t`. FAIL: an error on hashtext / pg_advisory_xact_lock (function missing or not permitted), or `t`
+while the other session holds the lock (locks not shared across connections, e.g. a pooler in front of the endpoint).
+
+### P6. PostgreSQL version, role attributes and REPEATABLE READ (LB-PG14, LB-OWNER, LB-PUBLISHER, QA-045d)
+
+```bash
+psql -X -At -c "SELECT current_setting('server_version_num')::int >= 140000, current_setting('server_version')"
+psql -X -At -c "SELECT rolname, rolcanlogin, rolsuper, rolreplication, rolbypassrls, rolcreaterole, rolcreatedb FROM pg_roles WHERE rolname IN ('dam_lakebase_owner', 'dam_lakebase_publisher') ORDER BY 1"
+psql -X -At -c "SELECT r, rolsuper, rolreplication, rolbypassrls, pg_has_role(r, 'dam_lakebase_owner', 'MEMBER') FROM (VALUES ('$APP_ROLE'), ('$EXTRACT_ROLE'), ('$PUBLISH_LOGIN')) v(r) JOIN pg_roles ON rolname = r ORDER BY 1"
+psql -X -q -At -c "BEGIN ISOLATION LEVEL REPEATABLE READ" -c "SHOW transaction_isolation" -c "COMMIT"
+(cd src/jobs && python -c "import lakebase_extract as lx; c = lx._connect('dam-safety-$TARGET', 'production', 'primary'); print(c.execute('SHOW search_path').fetchone()[0], c.execute('SHOW transaction_isolation').fetchone()[0], c.execute('SELECT count(*) FROM extract_watermark').fetchone()[0] >= 0)")
+```
+
+PASS, in order: `t|<version>` (e.g. `t|17.x`); `dam_lakebase_owner|f|f|f|f|f|f` and
+`dam_lakebase_publisher|f|f|f|f|f|f`; three lines `<role>|f|f|f|f` (no superuser / replication / bypassrls, none a
+member of the owner); `repeatable read`; `dam_app repeatable read True` (LB-SEARCH-PATH: the shared job connection
+resolves unqualified names in dam_app). FAIL: `f` in the first column, any `t` in the role lines, a missing role line,
+another isolation level, or a `RuntimeError: Lakebase schema 'dam_app' missing or not accessible`.
+
+### P7. run_as grants (UC-GRANTS, PUBLISHER, DSSMP-DOC, CDSE-ASSIGNMENT)
+
+The jobs run as the target's `run_as` (dev: the deployer; prod: `$PROD_SP`). Set `RUN_AS` to that principal
+(`RUN_AS=$(databricks current-user me -o json | jq -r .userName)` in dev). As a catalog owner / metastore admin:
+
+```bash
+q "SHOW GRANTS \`$RUN_AS\` ON CATALOG $CATALOG"
+q "SELECT table_schema, table_name, table_owner FROM information_schema.tables WHERE table_schema IN ('audit', 'ref', 'ops', 'silver', 'gold', 'rpt') AND table_type <> 'VIEW' AND table_owner <> '$RUN_AS' ORDER BY 1, 2"
+q "SELECT volume_schema, volume_name, volume_owner FROM information_schema.volumes WHERE volume_owner <> '$RUN_AS'"
+q "SELECT table_schema, table_name, privilege_type FROM information_schema.table_privileges WHERE grantee = '$RUN_AS' AND privilege_type IN ('MODIFY', 'SELECT') ORDER BY 1, 2, 3"
+```
+
+PASS: line 1 lists `USE_CATALOG` (and `CREATE_SCHEMA` on a fresh catalog) or the principal owns the catalog; line 2
+and 3 are `[]` (the run_as owns every table and volume it writes, because `dam_uc_setup` created them as that same
+principal), or every table they list appears in line 4 with both `MODIFY` and `SELECT` (inherited grants included) and
+every listed volume has `READ VOLUME` + `WRITE VOLUME` (`SHOW GRANTS \`$RUN_AS\` ON VOLUME <schema>.<volume>`).
+FAIL: a table written by a job (audit.review_record, audit.chain_head, audit.event_log, ref.threshold,
+ref.dssmp_version, ref.dam_cdse_assignment, ...) owned by someone else and without MODIFY for the run_as, or
+ref.dssmp_documents without WRITE VOLUME. Grants through a group do not show under the principal's own name: repeat
+line 4 with the group name. The authoritative end-to-end check is step 6 SUCCESS under the target's run_as.
+
+### P8. Down-script prod guard (QA-057)
+
+Layer 1, locally (no workspace contact):
+
+```bash
+python tools/run_migration.py --catalog dam_prod --file sql/migrations/v1_7_003_dssmp_registration_down.sql --dry-run; echo "rc=$?"
+python tools/run_migration.py --catalog $'dam\u200b_prod' --file sql/migrations/v1_7_003_dssmp_registration_down.sql --dry-run; echo "rc=$?"
+python tools/run_migration.py --catalog dam_dev --file sql/migrations/v1_7_003_dssmp_registration_down.sql --dry-run >/dev/null; echo "rc=$?"
+python tools/run_migration.py --catalog dam_prod --file sql/migrations/v1_7_003_dssmp_registration_down.sql --dry-run --break-glass-prod "runbook P8 dry run only" --log-file /tmp/bg.log >/dev/null; echo "rc=$?"; tail -1 /tmp/bg.log
+```
+
+PASS: `REFUSED: QA-057: refusing v1_7_003_dssmp_registration_down.sql on dam_prod ...` + `rc=3` (twice); `rc=0`;
+`rc=0` and a JSON line with `"event": "QA-057_BREAK_GLASS_PROD"` and the reason.
+
+Layer 2 on the warehouse, with `tools/verify/qa057_guard_probe.sql` (the downs' first statement verbatim + a
+`SELECT 'reached-the-body'` marker; no USE CATALOG, touches nothing, synced by the bundle):
+
+```bash
+probe() { databricks jobs submit --json "$(jq -n --arg w "$WH" --arg p "$FILES/tools/verify/qa057_guard_probe.sql" \
+  --argjson params "$1" '{run_name: "qa057 probe", tasks: [{task_key: "p", sql_task: {warehouse_id: $w,
+  file: {path: $p, source: "WORKSPACE"}, parameters: $params}}]}')" > /tmp/probe.out 2>&1
+  echo "rc=$? qa057=$(grep -c 'QA-057' /tmp/probe.out)"; }
+probe '{"catalog": "dam_prod", "break_glass": ""}'
+probe "{\"catalog\": \"dam$(printf '\u200b')_prod\", \"break_glass\": \"\"}"
+probe '{"catalog": "dam_prod"}'
+probe '{"catalog": "dam_prod", "break_glass": "BREAK_GLASS_PROD"}'
+probe '{"catalog": "dam_dev", "break_glass": ""}'
+```
+
+PASS, in order: `rc=` non-zero and `qa057=` >= 1 (refused); the same for the zero-width name (the `\p{Cf}` class
+works); `rc=` non-zero (unbound `:break_glass` fails the statement: refused; `qa057=0` is fine here); `rc=0 qa057=0`;
+`rc=0 qa057=0`. FAIL: `rc=0` on any of the first three (the guard does not stop a prod rollback: do NOT use the downs
+on prod until fixed), or non-zero on the last two (the guard blocks legitimate runs). Then, in dev only, one real
+down through the tool (e.g. `v1_7_003_dssmp_registration_down.sql`, `--catalog dam_dev`) must end SUCCESS and be
+re-applied with its up (step 3).
+
+Clean-up: `q "DROP SCHEMA zz_verify CASCADE"` -> `["SUCCEEDED","",[]]`.
+
+Closes MIGRATION-3 (MERGE), CDSE-ASSIGNMENT / RULE-REVERSION (UDF, table function), MIGRATION-DOWN (Delta ALTER),
+LB-HEAD-LOG / QA-056 (locks), LB-PG14 / LB-OWNER / LB-PUBLISHER / QA-045d / LB-SEARCH-PATH, UC-GRANTS (run_as) and
+QA-057 on Databricks.
 
 ## 5. App
 
@@ -209,7 +389,8 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
   a PRE-CHECK; if it returns rows (newer audit records exist), STOP: those records are never deleted and that
   migration stays. Data-level fallback: `DESCRIBE HISTORY <table>` then `RESTORE TABLE <table> TO VERSION AS OF <n>`.
   Views / functions in 10b: re-run the previous `sql/ddl/10b_reviewer_authority.sql` from git.
-* Lakebase, newest first: `lakebase/migrations/v1_7_006_chain_head_log_down.sql` (roll back the app patch first),
+* Lakebase, newest first: `lakebase/migrations/v1_7_007_qa056_unique_guards_down.sql`,
+  `v1_7_006_chain_head_log_down.sql` (roll back the app patch first),
   `v1_7_005_cdse_reversion_tables_down.sql`, `v1_7_004_dssmp_outbox_contract_down.sql`. Data-level fallback: a
   Lakebase point-in-time branch / restore.
 * Code: `databricks bundle deploy -t $TARGET` from the previous commit.
@@ -219,5 +400,6 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
 BUNDLE-1, LB-REF (v1.4), QA-037 / LB-REF (v1.5), LAKEBASE-AUTH, LAKEBASE-HA, APP-ACL, UC-GRANTS, MIGRATION-1,
 MIGRATION-2, MIGRATION-2b, MIGRATION-2c, MIGRATION-3, MIGRATION-DOWN (if step 8 is exercised in dev), V15-LB-EXTRACT,
 V16-CHAIN, QA-045d, LB-OWNER, LB-PG14, LB-PUBLISHER, OUTBOX-CONTRACT, PUBLISHER, DSSMP-REG, DSSMP-DOC, LB-CDSE-TABLES,
-CDSE-ASSIGNMENT, RULE-REVERSION, LB-HEAD-LOG, PROD-SIGNER (prod target only). Not closed here: engineering defaults
+CDSE-ASSIGNMENT, RULE-REVERSION, LB-HEAD-LOG, QA-056, QA-057, LB-SEARCH-PATH (step 4b), PROD-SIGNER (prod
+target only). Not closed here: engineering defaults
 (section 4 of VERIFICATION.md), INC-WIRE (needs a pyspark run of `reduce_inclinometers`), CANARI-1, DEP-*.
