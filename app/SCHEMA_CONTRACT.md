@@ -707,3 +707,33 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       the chain (DA request).
     - **New dams:** before go-live the dam has no stored app roles, so a platform admin proposes. The DA must expose
       the new dam's CDSE in `ref.v_dam_reviewer_authority` BEFORE go-live, or nobody can approve (fail closed).
+    - **CONFLICT with the DA's 86993d0 / 18ebff2 (committed after the contract above; NOT resolved in the app).**
+      `lakebase/001` creates `dssmp_registration_outbox` owner-owned. The app has INSERT/SELECT only, so the app's
+      CREATE TABLE IF NOT EXISTS and guard DDL are no-ops/skipped there. Its columns differ from the agreed contract:
+
+      | DA 86993d0 (lakebase/001, `dssmp_registration.OUTBOX_COLS`) | Agreed contract (what the app inserts) |
+      |---|---|
+      | `requested_by`, `requested_at` | `proposed_by` |
+      | `supersedes_dssmp_version_id` (NULL = first version; stale re-check) | (none) |
+      | `applied_at` | `processed_at` |
+      | (no column) | `reason_code` |
+      | status `pending\|applied\|rejected_stale\|rejected_invalid` | status `pending\|loaded\|rejected` |
+
+      `document_sha256` is NOT NULL in the DA table; the load job's codes go into `message` as `<code>: <detail>`.
+      **Until one side changes, the app's approve INSERT fails against the DA-provisioned table in live Lakebase**
+      (the approve transaction rolls back, chain record included, so nothing is half-written). Decision needed from
+      Genie/DA: either the DA renames to the contract, or the app inserts `requested_by`/`requested_at`/
+      `supersedes_dssmp_version_id` (from `ref.dssmp_version`, fail closed) and reads `applied_at`/`message`. The
+      UI already shows both status spellings.
+    - **Already aligned with 86993d0 (compatible with both):**
+      - `approved_at` / `approved_by` = the approve record's `signed_ts` / reviewer (load-job
+        `approval_record_mismatch`);
+      - `document_sha256` required for URI documents too (DA NOT NULL, engine `dssmp_approval_fields_missing`);
+      - `corrected_value` carries `dam_id` and `proposal_id` (= `registration_id`), so the engine links
+        approve/reject to the propose record. `app/tests/test_dssmp_registration.py` runs the app's records through
+        `dam_safety.dssmp_authority.dssmp_authority_problems`: no findings, and a forged dam_admin approve is
+        caught.
+    - **Proposer rule:** the engine (86993d0) lets the dam's CDSE propose or approve directly, with no proposal.
+      The app requires a dam_admin/admin proposal followed by a CDSE decision; that is a subset the engine accepts.
+      Genie: should the app also let the CDSE register directly? That would also give new dams a path without the
+      platform admin.

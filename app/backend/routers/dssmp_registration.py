@@ -126,8 +126,11 @@ def _record(c: Ctx, request: Request, an, dam_id: str, version_id: str, action: 
 
 
 def _snapshot(r: dict) -> dict:
-    return {k: r.get(k) for k in REG_FIELDS} | {"registration_id": r["registration_id"],
-                                                "proposed_by": r["proposed_by"]}
+    """corrected_value of every dssmp_version record, in the engine's shape (src/dam_safety/dssmp_authority, 86993d0):
+    {dssmp_version_id, dam_id, version_no, effective_from, document_uri, document_sha256, proposal_id, proposed_by}
+    plus change_reason / source_ref; proposal_id = registration_id links approve / reject to the propose record."""
+    return {k: r.get(k) for k in REG_FIELDS} | {"dam_id": r["dam_id"], "registration_id": r["registration_id"],
+                                                "proposal_id": r["registration_id"], "proposed_by": r["proposed_by"]}
 
 
 def _pending(st, dam_id: str, registration_id: str) -> dict:
@@ -252,9 +255,11 @@ def propose(dam_id: str, body: ProposeBody, request: Request, c: Ctx = Depends(c
         reg.update(document_uri=document_uri(d["document_id"]), document_sha256=d["sha256"],
                    document_id=d["document_id"])
     else:
-        sha = (body.document_sha256 or "").strip().lower() or None
-        if sha is not None and not SHA256_RE.match(sha):
-            raise HTTPException(422, "document_sha256 must be 64 lowercase hex characters")
+        # required for a URI too: the DA's outbox has document_sha256 NOT NULL and the engine requires it on approve
+        sha = (body.document_sha256 or "").strip().lower()
+        if not SHA256_RE.match(sha):
+            raise HTTPException(422, "document_sha256 (64 hex characters) is required with a document_uri - or "
+                                     "upload the document and the server computes it")
         reg.update(document_uri=body.document_uri.strip(), document_sha256=sha, document_id=None)
     live = [r for r in st.dssmp_registrations(dam_id)
             if r["dssmp_version_id"] == vid and r["status"] in ("pending", "approved")]
@@ -295,20 +300,21 @@ def approve(dam_id: str, registration_id: str, body: DecisionBody, request: Requ
                                   "setting": "CDSE_FLAG_REQUIRE_SECOND_APPROVER",
                                   "message": f"A second approver is required: {c.email} proposed {registration_id} "
                                              "and cannot approve it; it can only be rejected (withdrawn)"})
-    now = sg.now_utc()
     outbox_id = f"DSO-{uuid.uuid4().hex}"
     base = _record(c, request, an, dam_id, r["dssmp_version_id"], "dssmp_version_approve", "approve", rationale,
                    _snapshot(r) | {"state": "pending"},
                    _snapshot(r) | {"state": "approved", "outbox_id": outbox_id})
 
     def also_row(q, rec):  # same transaction as the chain append: decision + ONE pending outbox row
-        st.decide_dssmp_registration(q, registration_id, "approved", c.email, who["reviewer_id"], now, rationale,
-                                     outbox_id, rec["record_hash"])
+        # approved_at / approved_by are the approve record's own signed_ts / reviewer: the DA load job refuses a row
+        # whose values differ from the record (approval_record_mismatch)
+        st.decide_dssmp_registration(q, registration_id, "approved", c.email, who["reviewer_id"], rec["signed_ts"],
+                                     rationale, outbox_id, rec["record_hash"])
         st.insert_dssmp_outbox(q, {
             "outbox_id": outbox_id, "dam_id": dam_id, "dssmp_version_id": r["dssmp_version_id"],
             "version_no": r["version_no"], "effective_from": r["effective_from"], "change_reason": r["change_reason"],
             "source_ref": r["source_ref"], "document_uri": r["document_uri"], "document_sha256": r["document_sha256"],
-            "proposed_by": r["proposed_by"], "approved_by": c.email, "approved_at": now,
+            "proposed_by": r["proposed_by"], "approved_by": c.email, "approved_at": rec["signed_ts"],
             "approval_record_hash": rec["record_hash"], "status": "pending", "reason_code": None, "message": None,
             "processed_at": None})
 

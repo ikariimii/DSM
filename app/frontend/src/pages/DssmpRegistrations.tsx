@@ -7,7 +7,8 @@ import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
 
 const REG_BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad" };
-const OUTBOX_BADGE: Record<string, string> = { pending: "warn", loaded: "ok", rejected: "bad", rejected_invalid: "bad" };
+// contract spellings (loaded / rejected) and the DA load job's (applied / rejected_stale / rejected_invalid)
+const OUTBOX_BADGE: Record<string, string> = { pending: "warn", loaded: "ok", applied: "ok", rejected: "bad", rejected_invalid: "bad", rejected_stale: "bad" };
 
 function ProvisionalNote({ policy }: { policy: any }) {
   return <div className="muted"><span className="badge warn">provisional</span> {policy?.note ?? "Approval rule provisional: currently the dam CDSE may self-approve"} (DSSMP registrations follow the same rule).</div>;
@@ -110,8 +111,8 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
           <label>Effective from * (UTC date) <input type="date" value={f.effective_from || ""} onChange={set("effective_from")} /></label>
           <label>Change reason * <input value={f.change_reason || ""} onChange={set("change_reason")} /></label>
           <label>Source ref * (DSSMR or IC recommendation id) <input value={f.source_ref || ""} onChange={set("source_ref")} /></label>
-          <label>Document URI <input value={f.document_uri || ""} onChange={set("document_uri")} disabled={!!file} /></label>
-          <label>Document sha256 (optional, for a URI) <input value={f.document_sha256 || ""} onChange={set("document_sha256")} disabled={!!file} /></label>
+          <label>Document URI (or upload below) <input value={f.document_uri || ""} onChange={set("document_uri")} disabled={!!file} /></label>
+          <label>Document sha256 * (64 hex, required with a URI) <input value={f.document_sha256 || ""} onChange={set("document_sha256")} disabled={!!file} /></label>
           <label>…or upload the document (max 20 MB; sha256 computed by the server) <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
           <label>Rationale * <input value={f.rationale || ""} onChange={set("rationale")} /></label>
           <button onClick={submit}>Submit for CDSE approval</button>

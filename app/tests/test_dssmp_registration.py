@@ -43,7 +43,7 @@ def _st(c):
 def body(vid="DSSMP-CRD-2027", **kw):
     b = {"dssmp_version_id": vid, "version_no": 2, "effective_from": "2026-11-01", "change_reason": "Annual review",
          "source_ref": "DSSMR-2026-14", "document_uri": "https://docs.example/dssmp-crd-2027.pdf",
-         "rationale": "Revised per 2026 DSSMR"}
+         "document_sha256": "ab" * 32, "rationale": "Revised per 2026 DSSMR"}
     b.update(kw)
     return {k: v for k, v in b.items() if v is not None}
 
@@ -86,7 +86,8 @@ def test_rationale_required(k):
     ({"version_no": None}, "version_no"), ({"version_no": 0}, "version_no"),
     ({"effective_from": None}, "effective_from"), ({"effective_from": "next week"}, "effective_from"),
     ({"change_reason": " "}, "change_reason"), ({"source_ref": None}, "source_ref"),
-    ({"document_uri": None}, "exactly one"), ({"document_sha256": "XYZ"}, "64 lowercase hex"),
+    ({"document_uri": None}, "exactly one"), ({"document_sha256": "XYZ"}, "document_sha256"),
+    ({"document_sha256": None}, "document_sha256"),
     ({"vid": "bad id!"}, "dssmp_version_id")])
 def test_required_fields(k, kw, msg):
     r = propose(k, **kw)
@@ -171,7 +172,7 @@ def test_upload_hash_and_use(k):
     dl = k.get(f"/api/dams/CRD/dssmp-documents/{d['document_id']}", user=ENG)
     assert dl.content == raw and dl.headers["x-content-sha256"] == d["sha256"]
     assert propose(k, document_uri=None, document_id=d["document_id"], document_sha256="0" * 64).status_code == 422
-    rid = propose(k, document_uri=None, document_id=d["document_id"]).json()["registration_id"]
+    rid = propose(k, document_uri=None, document_sha256=None, document_id=d["document_id"]).json()["registration_id"]
     decide(k, rid)
     o = _st(k).dssmp_outbox("CRD")[0]
     assert o["document_sha256"] == d["sha256"] and o["document_uri"].endswith(d["document_id"])
@@ -261,3 +262,32 @@ def test_superseded_dssmp_blocks_flag_apply(k):
     r = k.post("/api/dams/CRD/alarm-rules/CRD-PZ-2-T1/cdse-flag", user=CDSE,
                json={"cdse_ack_required": True, "rationale": "x"})
     assert r.status_code == 409 and "dssmp_superseded" in r.text
+
+
+# ------------------------------------------------------------------ cross-check with the DA engine (86993d0)
+def test_records_pass_the_engine_dssmp_authority_check(k):
+    import sys
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[2] / "src"
+    if not (src / "dam_safety" / "dssmp_authority.py").is_file():
+        pytest.skip("engine dssmp_authority not in this checkout")
+    sys.path.insert(0, str(src))
+    try:
+        from dam_safety.dssmp_authority import dssmp_authority_problems
+    finally:
+        sys.path.remove(str(src))
+    rid = propose(k).json()["registration_id"]
+    decide(k, rid)
+    rid2 = propose(k, vid="DSSMP-CRD-2028", version_no=3).json()["registration_id"]
+    decide(k, rid2, "reject")
+    rows = _st(k).chain_rows("CRD")
+    assert [r["action_type"] for r in rows] == ["dssmp_version_propose", "dssmp_version_approve",
+                                                "dssmp_version_propose", "dssmp_version_reject"]
+    authority = [{"principal": CDSE, "dam_id": "CRD", "granted_ts": None, "revoked_ts": None}]
+    assert dssmp_authority_problems(rows, authority) == []
+    o = _st(k).dssmp_outbox("CRD")[0]                   # load job: approved_at / approved_by match the record
+    assert o["approved_at"] == rows[1]["signed_ts"] and o["approved_by"] == rows[1]["reviewer_email"]
+    assert o["approval_record_hash"] == rows[1]["record_hash"]
+    # engine view of a forged approve by the dam_admin: refused
+    bad = dict(rows[1], reviewer_id="demo:" + DAMADMIN, reviewer_email=DAMADMIN, actor_app_role="dam_admin")
+    assert {p["code"] for p in dssmp_authority_problems([rows[0], bad], authority)} == {"dssmp_approve_by_admin"}
