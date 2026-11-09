@@ -284,6 +284,69 @@ def test_pluggable_signer():
     assert noop.sign("h") is None and noop.verify("h", "s", None) is False
 
 
+# ------------------------------------------------------------------ QA-045a: signatures mandatory with a real signer
+def _signed(st, k=3, signer=None):
+    return [st.append_chained("CRD", ac.GENESIS, ac.finalizer(_base(n=i), signer or _FakeSigner())) for i in range(k)]
+
+
+@pytest.mark.parametrize("cols", [("signature", "sig_alg", "key_id"), ("signature",), ("sig_alg",), ("key_id",)])
+@pytest.mark.parametrize("blank", [None, "", "  "])
+@pytest.mark.parametrize("seq,reason", [(1, "signature_missing"), (2, "signature_downgrade"),
+                                        (3, "signature_downgrade")])
+def test_stripped_or_blank_signature_fields_fail_with_real_signer(cols, blank, seq, reason):
+    st = _store()
+    _signed(st)
+    _unguard(st)
+    st.execute(f"UPDATE review_signoff SET {', '.join(c + ' = %s' for c in cols)} WHERE chain_seq = %s",
+               tuple([blank] * len(cols)) + (seq,))
+    v = _verify(st, signer=_FakeSigner())
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, seq, reason)
+    assert all(c in v["detail"] for c in cols) and v["signatures_required"] is True
+
+
+def test_unsigned_chain_fails_under_real_signer():
+    st = _store()
+    _chain(st, k=2)  # written with the no-op default
+    v = _verify(st, signer=_FakeSigner())
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 1, "signature_missing")
+
+
+def test_downgrade_unsigned_append_after_signed_records_fails():
+    st = _store()
+    _signed(st, k=2)
+    st.append_chained("CRD", ac.GENESIS, ac.finalizer(_base(n=9)))  # later record written with NoopSigner
+    v = _verify(st, signer=_FakeSigner())
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 3, "signature_downgrade")
+    assert "first signed seq 1" in v["detail"]
+
+
+@pytest.mark.parametrize("col,val", [("signature", "sig:forged"), ("key_id", "k2"), ("sig_alg", "other-alg")])
+def test_nonverifying_signature_metadata_fails(col, val):
+    st = _store()
+    _signed(st)
+    _unguard(st)
+    st.execute(f"UPDATE review_signoff SET {col} = %s WHERE chain_seq = 2", (val,))
+    v = _verify(st, signer=_FakeSigner())
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_invalid")
+
+
+def test_real_signer_accepts_fully_signed_chain_and_noop_default_unchanged():
+    st = _store()
+    _signed(st)
+    v = _verify(st, signer=_FakeSigner())
+    assert v["ok"] and v["signed_records"] == 3 and v["signatures_required"] is True
+    plain = _store()
+    _chain(plain, k=3)
+    for signer in (None, ac.NoopSigner()):
+        v = _verify(plain, signer=signer)
+        assert v["ok"] and v["signed_records"] == 0 and v["signatures_required"] is False
+    _unguard(st)  # no-op default: a stripped record passes as before; a remaining signature still cannot be vouched for
+    st.execute("UPDATE review_signoff SET signature = NULL, sig_alg = NULL, key_id = NULL WHERE chain_seq = 1")
+    v = _verify(st)
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 2, "signature_invalid")
+    assert not ac.is_enforcing(None) and not ac.is_enforcing(ac.NoopSigner()) and ac.is_enforcing(_FakeSigner())
+
+
 # ------------------------------------------------------------------ identity
 def test_token_sub_edge_cases():
     assert ac.token_sub(_jwt({"sub": "abc-123"})) == "abc-123"

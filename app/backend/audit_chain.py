@@ -61,6 +61,18 @@ class NoopSigner:
         return False  # cannot vouch for a signature it did not make
 
 
+SIGNATURE_FIELDS = ("signature", "sig_alg", "key_id")
+
+
+def is_enforcing(signer) -> bool:
+    """A real (non-no-op) signer makes signatures mandatory on every record (QA-045a)."""
+    return signer is not None and not isinstance(signer, NoopSigner)
+
+
+def _present(v) -> bool:
+    return v is not None and str(v).strip() != ""
+
+
 def canon_json(obj) -> str:
     """Canonical JSON text for original_value / corrected_value (stored as text so the hash is stable)."""
     return _canon({k: canonical_value(v) for k, v in obj.items()} if isinstance(obj, dict) else canonical_value(obj))
@@ -88,7 +100,8 @@ def finalizer(base: dict, signer: Signer | None = None):
 def verify_chain(rows: list[dict], head: dict | None, signer: Signer | None = None) -> dict:
     """Recompute a whole chain. rows: the chain's records (any order). Reports ok, or the FIRST broken seq and its
     reason: gap (missing / duplicate seq), prev_mismatch (prev_hash != previous record_hash, or genesis), hash_mismatch
-    (content changed), signature_invalid, head_missing, head_mismatch (head does not point at the last record, e.g. the
+    (content changed), signature_missing / signature_downgrade (a real signer is configured but signature, sig_alg or
+    key_id is empty or absent; downgrade = after an earlier signed record), signature_invalid, head_missing, head_mismatch (head does not point at the last record, e.g. the
     tail was deleted)."""
     signer = signer or NoopSigner()
     rows = sorted(rows, key=lambda r: (int(r["chain_seq"]), str(r["review_id"])))
@@ -100,7 +113,9 @@ def verify_chain(rows: list[dict], head: dict | None, signer: Signer | None = No
         out.update(first_broken_seq=seq, reason=reason, detail=detail)
         return out
 
-    expected, prev = 1, GENESIS
+    enforce = is_enforcing(signer)
+    out["signatures_required"] = enforce
+    expected, prev, signed_seen = 1, GENESIS, 0
     for r in rows:
         seq = int(r["chain_seq"])
         if seq != expected:
@@ -110,7 +125,23 @@ def verify_chain(rows: list[dict], head: dict | None, signer: Signer | None = No
                           if seq > 1 else "first record does not start at GENESIS")
         if record_hash(r) != r.get("record_hash"):
             return broken(seq, "hash_mismatch", "recomputed record_hash differs from the stored one")
-        if r.get("signature"):
+        if enforce:
+            # QA-045a: signature/sig_alg/key_id sit outside record_hash, so stripping them leaves the hash chain intact.
+            # With a real signer every record must carry all three and verify; nothing unsigned is accepted.
+            missing = [f for f in SIGNATURE_FIELDS if not _present(r.get(f))]
+            if missing:
+                if signed_seen:
+                    return broken(seq, "signature_downgrade", "unsigned record after signed record(s) "
+                                  f"(first signed seq {signed_seen}); missing {', '.join(missing)}")
+                return broken(seq, "signature_missing", f"real signer configured but record lacks {', '.join(missing)}")
+            if r["sig_alg"] != signer.alg:
+                return broken(seq, "signature_invalid", f"sig_alg {r['sig_alg']!r} does not match the configured "
+                              f"signer ({signer.alg!r})")
+            if not signer.verify(r["record_hash"], r["signature"], r["key_id"]):
+                return broken(seq, "signature_invalid", f"signature ({r['sig_alg']}, key {r['key_id']}) does not verify")
+            out["signed_records"] += 1
+            signed_seen = signed_seen or seq
+        elif r.get("signature"):  # NoopSigner: unchanged behaviour - it cannot vouch for any signature
             if not signer.verify(r["record_hash"], r["signature"], r.get("key_id")):
                 return broken(seq, "signature_invalid", f"signature ({r.get('sig_alg')}) does not verify")
             out["signed_records"] += 1

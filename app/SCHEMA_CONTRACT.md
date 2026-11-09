@@ -142,7 +142,10 @@ original_value object. The profile returns `bias_signoffs` with `signature_verif
   (engineer+ on that dam). They recompute the whole chain and return `ok`, or `first_broken_seq` with `reason`: `gap`
   (missing or duplicate seq), `prev_mismatch` (link or genesis), `hash_mismatch` (content changed), `signature_invalid`,
   `head_missing`, `head_mismatch` (tail deleted or head altered). Tampering, deleting (middle or tail) and reordering
-  are all detected (tests).
+  are all detected (tests). QA-045a: when a real (non-`NoopSigner`) signer is configured, every record must carry a
+  non-blank `signature`, `sig_alg` (equal to the signer's) and `key_id` that verify; otherwise `signature_missing`, or
+  `signature_downgrade` when an earlier record was signed. The response also reports `signatures_required`.
+  With the no-op default, behaviour is unchanged.
 - Future key-based signature: `backend/audit_chain.Signer` (`alg`, `key_id`, `sign(record_hash)`, `verify(...)`),
   `NoopSigner` by default (`create_app(signer=...)`). FERC confirmed no in-app crypto signature is needed; PDF /
   certificate signing of exports is backlog (`docs/BACKLOG.md`).
@@ -284,7 +287,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
    e. **`docs/api_contract.md` (proposal):** add `POST /api/instruments/{id}/incl/corrections/{record_id}/review`,
       `GET /api/audit/signoffs/verify` (admin) and `GET /api/dams/{dam_id}/audit/signoffs/verify` (ACL). Response:
       `{ok, chain_id, n, first_broken_seq, reason}` per chain, with reason one of gap | prev_mismatch | hash_mismatch |
-      head_missing | head_mismatch | signature_invalid.
+      head_missing | head_mismatch | signature_invalid | signature_missing | signature_downgrade.
    f. **Rebase:** this branch (`app/v1.5-audit-chain`) is built on e01e1ab → a9e7d56. a9e7d56 + e01e1ab must be rebased onto
       QA's fe4ed7b before any push (the DA reports a `docs/VERIFICATION.md` conflict). The app did not rebase.
 11. **QA-043 a/b/c: inclinometer depth-grid QC (engine and app guard implemented).**
