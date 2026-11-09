@@ -188,3 +188,17 @@ LEFT JOIN audit.review_record r
  AND r.reviewer_id = c.reviewed_by AND lower(r.reviewer_id) <> lower(c.`user`)
  AND r.subject_id IN (c.record_id, c.supersedes)
 LEFT JOIN gold.v_review_level_check lc ON lc.review_id = r.review_id;
+
+-- v1.7 audit trail of ref.threshold.cdse_ack_required (Genie decision: a flag change is a NEW threshold_version,
+-- never an in-place UPDATE; src/dam_safety/threshold_publish.py). One row per version whose flag differs from the
+-- previous version of the same rule (first versions with the flag true are listed too, prev_flag NULL).
+-- An in-place UPDATE would not show here: detect it from the change data feed (update_postimage rows of
+-- ref.threshold whose cdse_ack_required changed), see SCHEMA_CONTRACT section 4.
+CREATE OR REPLACE VIEW gold.v_threshold_cdse_ack_changes AS
+SELECT * FROM (
+  SELECT threshold_id, threshold_version, dam_id, instrument_id, level,
+         lag(cdse_ack_required) OVER (PARTITION BY threshold_id ORDER BY threshold_version) AS prev_flag,
+         cdse_ack_required AS new_flag, set_by, effective_from, effective_to, is_current
+  FROM ref.threshold
+) v
+WHERE (prev_flag IS NULL AND new_flag) OR prev_flag <> new_flag;
