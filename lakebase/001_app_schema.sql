@@ -606,4 +606,16 @@ BEGIN
   END IF;
 END $$;
 -- END v1_8_001 block
+-- BEGIN v1_8_002 block (v1.8.003 lifecycle safety flag, Genie 2026-11-09 15:27 + 15:35 and FERC Specialist 15:27:
+-- dam_app.lifecycle_transition_outbox gains safety_related_ops_event BOOLEAN DEFAULT false, set by the CDSE; NULL is
+-- treated as false by the loader (dam_safety.lifecycle.safety_flag), which writes false into audit.lifecycle_event.
+-- ck_lifecycle_outbox_evidence: the evidence list is a JSON array, non-empty unless suspension_reason = 'other'
+-- (citation suspend_other_internal: evidence optional, the CDSE's cdse_basis is required instead; checked by the
+-- loader). The app's privileges are unchanged (SELECT + INSERT on the table: the new column is insertable).)
+ALTER TABLE dam_app.lifecycle_transition_outbox ADD COLUMN IF NOT EXISTS safety_related_ops_event BOOLEAN DEFAULT false;
+ALTER TABLE dam_app.lifecycle_transition_outbox DROP CONSTRAINT IF EXISTS ck_lifecycle_outbox_evidence;
+ALTER TABLE dam_app.lifecycle_transition_outbox ADD CONSTRAINT ck_lifecycle_outbox_evidence CHECK (
+  jsonb_typeof(evidence_uri::jsonb) = 'array'
+  AND (jsonb_array_length(evidence_uri::jsonb) > 0 OR coalesce(suspension_reason, '') = 'other'));
+-- END v1_8_002 block
 COMMIT;

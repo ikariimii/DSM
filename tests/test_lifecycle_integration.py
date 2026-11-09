@@ -4,6 +4,7 @@ Fake Spark / cursor only: UNVERIFIED on a workspace. Synthetic data only."""
 import datetime as dt
 import json
 import os
+import re
 import sys
 
 from dam_safety import lifecycle as L
@@ -70,11 +71,14 @@ def test_archived_split_and_audit_rows():
                            history("LIVE", PATH_TO[L.LIVE]) + history("VOID", PATH_TO[L.VOID]))
     pending = [{"outbox_id": f"O-{d}", "dam_id": d} for d in ("OLD", "GONE", "LIVE", "VOID", "NEW")]
     keep, refused = LL.archived_split(pending, cur, "outbox_id")
-    assert [r["dam_id"] for r in keep] == ["LIVE", "VOID", "NEW"]
-    assert [(x["id"], x["message"].split(":")[0]) for x in refused] == [("O-OLD", "dam_archived"),
-                                                                       ("O-GONE", "dam_archived")]
+    assert [r["dam_id"] for r in keep] == ["LIVE", "NEW"]
+    assert [(x["id"], x["message"]) for x in refused] == [
+        ("O-OLD", "dam_archived: dam OLD lifecycle_state=transferred (read-only)"),
+        ("O-GONE", "dam_archived: dam GONE lifecycle_state=decommissioned_archived (read-only)"),
+        ("O-VOID", "dam_archived: dam VOID lifecycle_state=voided_in_error (read-only)")]
     rows = LL.archived_audit_rows(refused, "job", "dam_cdse_outbox", "r1", U("2026-11-09T20:00:00Z"))
-    assert [r["event_id"] for r in rows] == ["dam_archived:dam_cdse_outbox:O-OLD", "dam_archived:dam_cdse_outbox:O-GONE"]
+    assert [r["event_id"] for r in rows] == ["dam_archived:dam_cdse_outbox:O-OLD", "dam_archived:dam_cdse_outbox:O-GONE",
+                                             "dam_archived:dam_cdse_outbox:O-VOID"]
     assert {r["event_type"] for r in rows} == {"DAM_ARCHIVED_REFUSAL"} and set(rows[0]) == set(LL.LOG_COLS)
     assert json.loads(rows[0]["payload"])["reason_code"] == "dam_archived"
     assert LL.archived_split(pending, None, "outbox_id") == (pending, [])          # unreadable: nothing blocked here
@@ -133,17 +137,75 @@ class _Cur:
         self.calls.append((sql, args))
 
 
-def test_refuse_archived_writes_back_and_audits_for_each_loader():
-    import _lifecycle_guard as G
+LOADERS = ("apply_cdse_assignments", "load_dssmp_registrations", "publish_ref_changes")
+
+
+def _loaders():
     import apply_cdse_assignments as cdse
     import load_dssmp_registrations as dssmp
     import publish_ref_changes as pub
-    evs = history("OLD", PATH_TO[L.TRANSFERRED])
-    for job, key, outbox, args in (
-            (cdse, "outbox_id", "dam_cdse_outbox", lambda x, t: ("rejected", "dam_archived", x["message"], t, x["id"])),
+    return ((cdse, "outbox_id", "dam_cdse_outbox", lambda x, t: ("rejected", "dam_archived", x["message"], t, x["id"])),
             (dssmp, "outbox_id", "dssmp_registration_outbox",
              lambda x, t: ("rejected", "dam_archived", x["message"], t, x["id"])),
-            (pub, "pub_id", "ref_change_publication", lambda x, t: ("rejected_invalid", x["message"], None, x["id"]))):
+            (pub, "pub_id", "ref_change_publication", lambda x, t: ("rejected_invalid", x["message"], None, x["id"])))
+
+
+def test_every_per_dam_reference_loader_uses_the_guard():
+    """Every src/jobs file that writes per-dam reference data from a Lakebase outbox goes through refuse_archived (or,
+    for lifecycle transitions, the engine's dam_archived check)."""
+    jobs = os.path.join(ROOT, "src", "jobs")
+    guarded = sorted(f[:-3] for f in os.listdir(jobs) if f.endswith(".py") and "refuse_archived(" in open(
+        os.path.join(jobs, f)).read() and f != "_lifecycle_guard.py")
+    assert guarded == sorted(LOADERS)
+    outbox_readers = sorted(f[:-3] for f in os.listdir(jobs) if f.endswith(".py") and re.search(
+        r"FROM (?:dam_app\.)?\w*(?:outbox|publication)\b", open(os.path.join(jobs, f)).read()))
+    assert set(outbox_readers) <= set(LOADERS) | {"apply_lifecycle_transitions", "lakebase_extract"}, outbox_readers
+
+
+def test_voided_dam_every_write_alarm_and_ingestion():
+    """Genie 2026-11-09 15:27: voided_in_error is read-only with alarms stopped, like transferred /
+    decommissioned_archived. Writes: every loader refuses 409-style 'dam_archived' with lifecycle_state in the message;
+    the lifecycle loader refuses any transition out of it. Alarms: off from the void's effective_ts. Ingestion
+    (decision, reported): readings are never dropped (raw landing, manual-reading extract and the reduction keep them,
+    as for transferred / decommissioned dams: permanent records); they are just never alarmed."""
+    import _lifecycle_guard as G
+    import lakebase_extract as X
+    evs = history("VOID", PATH_TO[L.VOID])
+    msg = "dam_archived: dam VOID lifecycle_state=voided_in_error (read-only)"
+    for job, key, outbox, args in _loaders():
+        spark, cur = _Spark(evs), _Cur()
+        keep = G.refuse_archived(spark, "dam_dev", cur, [{key: "1", "dam_id": "VOID"}, {key: "2", "dam_id": "D1"}],
+                                 id_key=key, outbox=outbox, job="j", update_sql=job.UPDATE_SQL, update_args=args)
+        assert keep == [{key: "2", "dam_id": "D1"}], job
+        (sql, a), = cur.calls
+        assert msg in a and a[-1] == "1"
+        assert json.loads(spark.frames[0][0][LL.LOG_COLS.index("payload")])["reason_code"] == "dam_archived"
+    # the lifecycle loader: any transition out of a voided record
+    cur = L.current_states(evs)
+    for to in L.STATES:
+        res = L.check_transition({"dam_id": "VOID", "from_state": L.VOID, "to_state": to}, current=cur,
+                                 citations={}, reasons=set())
+        assert res["codes"] == ["dam_archived"] and res["messages"] == [msg]
+    assert L.archived_refusal("VOID", L.VOID) == {"code": "dam_archived", "dam_id": "VOID",
+                                                  "lifecycle_state": "voided_in_error", "message": msg}
+    # alarms: off from the void on (and test_only before it: it never went live)
+    hist = [{"dam_id": "VOID", "lifecycle_state": L.VOID, "effective_from": "2026-02-01T00:00:00Z", "effective_to": None}]
+    rd = [{"reading_id": t, "ts_utc": U(t)} for t in ("2026-01-15T00:00:00Z", "2026-03-01T00:00:00Z")]
+    kept, issues = L.alarm_filter({"S1": rd}, {"S1": "VOID"}, hist)
+    assert kept == {"S1": []} and "dam VOID alarms off" in " ".join(i["issue"] for i in issues)
+    # ingestion: nothing filters readings by lifecycle state (never dropped)
+    csv = X.manual_rows_to_csv([{"id": 1, "dam_id": "VOID", "sensor_id": "S1", "ts_utc": "2026-03-01T00:00:00Z",
+                                 "raw_value": 1.0, "raw_unit": "m", "entered_by": "u"}])
+    assert "VOID" in csv and csv["VOID"].count("\n") == 2
+    for f in ("reduce_readings.py", "reduce_inclinometers.py", "lakebase_extract.py"):
+        assert "lifecycle" not in open(os.path.join(ROOT, "src", "jobs", f)).read().replace(
+            "app lifecycle open", ""), f
+
+
+def test_refuse_archived_writes_back_and_audits_for_each_loader():
+    import _lifecycle_guard as G
+    evs = history("OLD", PATH_TO[L.TRANSFERRED])
+    for job, key, outbox, args in _loaders():
         src = open(job.__file__).read()
         assert f'refuse_archived(spark, a.catalog, cur, pending, id_key="{key}", outbox="{outbox}"' in src
         assert src.index("refuse_archived(") < src.index(" = plan(")
@@ -152,7 +214,7 @@ def test_refuse_archived_writes_back_and_audits_for_each_loader():
                                  id_key=key, outbox=outbox, job="j", update_sql=job.UPDATE_SQL, update_args=args)
         assert keep == [{key: "2", "dam_id": "D1"}]
         (sql, a), = cur.calls
-        assert sql == job.UPDATE_SQL and a[-1] == "1" and "dam_archived: OLD is transferred" in " ".join(map(str, a))
+        assert sql == job.UPDATE_SQL and a[-1] == "1" and "dam_archived: dam OLD lifecycle_state=transferred (read-only)" in " ".join(map(str, a))
         assert sql.count("%s") == len(a)
         assert len(spark.frames) == 1 and "dam_dev.audit.event_log" in spark.sqls[0] and "WHERE NOT EXISTS" in spark.sqls[0]
         spark, cur = _Spark(None), _Cur()                                    # table missing: nothing refused

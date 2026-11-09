@@ -25,7 +25,7 @@ OUTBOX_COLS = ("outbox_id", "dam_id", "from_state", "to_state", "trigger_code", 
                "dssmp_version_id", "transition_reason_code", "suspension_reason", "incident_report_uri",
                "sworn_verification_12_13", "sworn_verification_uri", "cdse_basis", "cdse_basis_by",
                "re_directive_uri", "withdrawal_filed_date", "counterpart_dam_id", "created_at", "status",
-               "reason_code", "message", "processed_at")
+               "reason_code", "message", "processed_at", "safety_related_ops_event")
 REQUIRED = ("outbox_id", "dam_id", "from_state", "to_state", "trigger_code", "authorizer_role", "authorizer_user_id",
             "effective_ts", "citation_code", "proposed_by", "proposed_at", "approved_by", "approved_at",
             "proposal_record_hash", "approval_record_hash")
@@ -70,8 +70,9 @@ def row_problems(r: Mapping) -> List[str]:
             out.append(f"invalid_value: {c} {r.get(c)!r} is not a lifecycle state")
     if not _blank(r.get("withdrawal_filed_date")) and L._date(r["withdrawal_filed_date"]) is None:
         out.append(f"invalid_value: withdrawal_filed_date {r.get('withdrawal_filed_date')!r} is not a date")
-    if r.get("sworn_verification_12_13") not in (None, True, False):
-        out.append("invalid_value: sworn_verification_12_13 must be a boolean")
+    for c in ("sworn_verification_12_13", "safety_related_ops_event"):
+        if r.get(c) is not None and not isinstance(r.get(c), bool):
+            out.append(f"invalid_value: {c} must be a boolean")
     if not _blank(r.get("notification_checklist")):
         try:
             json.loads(r["notification_checklist"])
@@ -106,6 +107,7 @@ def to_request(r: Mapping) -> dict:
     reason_code is load bookkeeping)."""
     q = {f: r.get(f) for f in L.HASH_FIELDS if f in r}
     q["reason_code"] = r.get("transition_reason_code")
+    q["safety_related_ops_event"] = r.get("safety_related_ops_event")         # NULL -> treated as false
     q["evidence_uri"] = L.uri_list(r.get("evidence_uri"))
     return q
 
@@ -168,7 +170,7 @@ def plan(pending: Iterable[Mapping], records: Iterable[Mapping], events, *, has_
         if res["codes"]:
             decide(r, "rejected_" + res["codes"][0], "rejected", res["messages"], res["warnings"])
             continue
-        evs = L.build_events(req, current or {}, created_by, now, f"lc:{h}")
+        evs = L.build_events(req, current or {}, created_by, now, f"lc:{h}", citations)
         for e in evs:
             current[e["dam_id"]] = {"state": e["to_state"], "effective_from": e["effective_ts"],
                                     "event_id": e["event_id"], "event_hash": e["event_hash"]}

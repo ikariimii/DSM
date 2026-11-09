@@ -6,6 +6,9 @@
 -- ref.lifecycle_citation / ref.lifecycle_suspension_reason: UC-owned enums stored as DATA (seeded here and in
 -- migration v1_8_001 only where missing; a later data change is never overwritten). Existing catalog: run
 -- sql/migrations/v1_8_001_dam_lifecycle.sql then v1_8_002_lifecycle_backfill.sql first.
+-- v1.8.003 (sql/migrations/v1_8_003_lifecycle_safety_flag.sql): safety_related_ops_event / derived_citation,
+-- ref.lifecycle_citation.safety_derived_citation, citation suspend_other_internal, ck_lifecycle_event allows an empty
+-- evidence list for suspension_reason 'other' only, view audit.v_lifecycle_permanent_ops_history.
 -- UNVERIFIED: not run on a workspace.
 USE CATALOG IDENTIFIER(:catalog);
 
@@ -24,6 +27,7 @@ CREATE TABLE IF NOT EXISTS ref.lifecycle_citation (
   verification_status STRING NOT NULL COMMENT 'VERIFIED | UNVERIFIED-pending (per row)',
   withdrawal_notice   BOOLEAN NOT NULL COMMENT 'true: requires withdrawal_filed_date; 15-day warning (385.216)',
   active              BOOLEAN NOT NULL,
+  safety_derived_citation STRING COMMENT 'v1.8.003: cite recorded ONLY when the CDSE sets safety_related_ops_event = true (12.12(a)(1)(iii)(A))',
   CONSTRAINT pk_lifecycle_citation PRIMARY KEY (citation_code)
 );
 CREATE TABLE IF NOT EXISTS ref.dam_lifecycle_state (
@@ -70,6 +74,8 @@ CREATE TABLE IF NOT EXISTS audit.lifecycle_event (
   counterpart_dam_id       STRING COMMENT 'transfer: the other record (new licensee <-> old)',
   prev_event_hash          STRING NOT NULL COMMENT 'event_hash of the previous event of the dam; first = 64 x 0',
   event_hash               STRING NOT NULL COMMENT 'sha256 of dam_safety.lifecycle.hash_input (length-prefixed fields)',
+  safety_related_ops_event BOOLEAN COMMENT 'v1.8.003: set by the CDSE; default false (NULL = false; the loader writes false)',
+  derived_citation         STRING COMMENT 'v1.8.003: the citation safety_derived_citation, ONLY when safety_related_ops_event = true',
   CONSTRAINT pk_lifecycle_event PRIMARY KEY (event_id)
 ) TBLPROPERTIES (delta.appendOnly = true);
 
@@ -86,11 +92,12 @@ ALTER TABLE audit.lifecycle_event DROP CONSTRAINT IF EXISTS ck_lifecycle_event;
 ALTER TABLE audit.lifecycle_event ADD CONSTRAINT ck_lifecycle_event CHECK (
   from_state IN ('draft_commissioning', 'live', 'suspended_monitoring_modified', 'pending_transfer', 'transferred', 'pending_surrender', 'decommissioned_archived', 'voided_in_error')
   AND to_state IN ('draft_commissioning', 'live', 'suspended_monitoring_modified', 'pending_transfer', 'transferred', 'pending_surrender', 'decommissioned_archived', 'voided_in_error')
-  AND size(evidence_uri) > 0 AND length(trim(citation_code)) > 0 AND length(trim(created_by)) > 0
+  AND (size(evidence_uri) > 0 OR coalesce(suspension_reason, '') = 'other') AND length(trim(citation_code)) > 0 AND length(trim(created_by)) > 0
   AND length(trim(trigger_code)) > 0 AND length(trim(authorizer_role)) > 0
   AND prev_event_hash RLIKE '^[0-9a-f]{64}$' AND event_hash RLIKE '^[0-9a-f]{64}$'
   AND (to_state <> 'suspended_monitoring_modified' OR suspension_reason IS NOT NULL)
-  AND (to_state = 'suspended_monitoring_modified' OR suspension_reason IS NULL));
+  AND (to_state = 'suspended_monitoring_modified' OR suspension_reason IS NULL)
+  AND (derived_citation IS NULL OR coalesce(safety_related_ops_event, false)));
 
 INSERT INTO ref.lifecycle_suspension_reason (suspension_reason, description, active)
 SELECT s.suspension_reason, s.description, s.active FROM VALUES
@@ -98,28 +105,29 @@ SELECT s.suspension_reason, s.description, s.active FROM VALUES
   ('emergency_modification', 'Emergency modification (incident report + sworn 12.13; no 60-day rule)', true),
   ('drawdown', 'Reservoir drawdown (per license or RE direction; CDSE basis required)', true),
   ('monitoring_change', 'Monitoring change (per license or RE direction; CDSE basis required)', true),
-  ('other', 'Other (rationale required; NO citation code seeded yet)', true),
+  ('other', 'Other (no specific Part 12 basis: citation suspend_other_internal; the CDSE records cdse_basis of at least 20 characters + cdse_basis_by; evidence optional)', true),
   ('re_directed', 'Directed by the FERC Regional Engineer (12.4(b)(2); RE directive evidence required)', true) AS s(suspension_reason, description, active)
 WHERE NOT EXISTS (SELECT 1 FROM ref.lifecycle_suspension_reason t WHERE t.suspension_reason = s.suspension_reason);
 INSERT INTO ref.lifecycle_citation (citation_code, from_states, to_state, suspension_reasons, citation,
-                                    verification_status, withdrawal_notice, active)
+                                    verification_status, withdrawal_notice, active, safety_derived_citation)
 SELECT s.citation_code, s.from_states, s.to_state, s.suspension_reasons, s.citation, s.verification_status,
-       s.withdrawal_notice, s.active FROM VALUES
-  ('go_live_dssmp_12_12', split('draft_commissioning', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'INTERNAL: DSSMP (Ch14 App J) + permanent records 12.12(a)(1)(ii)', 'UNVERIFIED-pending', false, true),
-  ('modify_project_works_12_11', split('live', ','), 'suspended_monitoring_modified', split('construction_modification,emergency_modification', ','), '12.11, sworn 12.13; emergency also 12.10(a)(2); 12.24(b)-(c) if EAP changes', 'UNVERIFIED-pending', false, true),
-  ('suspend_re_directed_12_4', split('live', ','), 'suspended_monitoring_modified', split('re_directed', ','), '12.4(b)(2)', 'UNVERIFIED-pending', false, true),
-  ('suspend_ops_drawdown_internal', split('live', ','), 'suspended_monitoring_modified', split('drawdown,monitoring_change', ','), 'INTERNAL: license articles; record under 12.12(a)(1)(iii)(A)', 'UNVERIFIED-pending', false, true),
-  ('resume_dssmp_internal', split('suspended_monitoring_modified', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'INTERNAL', 'UNVERIFIED-pending', false, true),
-  ('transfer_filed_fpa8_9_1', split('live', ','), 'pending_transfer', CAST(NULL AS ARRAY<STRING>), 'FPA 8; 9.1-9.2', 'UNVERIFIED-pending', false, true),
-  ('transfer_withdrawn_385_216', split('pending_transfer', ','), 'live', CAST(NULL AS ARRAY<STRING>), '385.216', 'UNVERIFIED-pending', true, true),
-  ('transfer_denied_order', split('pending_transfer', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'Commission order', 'UNVERIFIED-pending', false, true),
-  ('transfer_final_9_3_12_12c', split('pending_transfer', ','), 'transferred', CAST(NULL AS ARRAY<STRING>), '9.3; 12.12(c)', 'VERIFIED', false, true),
-  ('surrender_filed_6_1', split('live,suspended_monitoring_modified', ','), 'pending_surrender', CAST(NULL AS ARRAY<STRING>), '6.1; 12.1', 'UNVERIFIED-pending', false, true),
-  ('surrender_withdrawn_385_216', split('pending_surrender', ','), 'live', CAST(NULL AS ARRAY<STRING>), '385.216', 'UNVERIFIED-pending', true, true),
-  ('surrender_denied_order', split('pending_surrender', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'Commission order', 'UNVERIFIED-pending', false, true),
-  ('surrender_effective_6_2_6_5', split('pending_surrender', ','), 'decommissioned_archived', CAST(NULL AS ARRAY<STRING>), '6.2; 6.5; 12.1', 'VERIFIED', false, true),
-  ('void_from_draft_internal', split('draft_commissioning', ','), 'voided_in_error', CAST(NULL AS ARRAY<STRING>), 'INTERNAL', 'UNVERIFIED-pending', false, true),
-  ('void_from_live_internal', split('live', ','), 'voided_in_error', CAST(NULL AS ARRAY<STRING>), 'INTERNAL', 'UNVERIFIED-pending', false, true) AS s(citation_code, from_states, to_state, suspension_reasons, citation, verification_status, withdrawal_notice, active)
+       s.withdrawal_notice, s.active, s.safety_derived_citation FROM VALUES
+  ('go_live_dssmp_12_12', split('draft_commissioning', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'INTERNAL: DSSMP (Ch14 App J) + permanent records 12.12(a)(1)(ii)', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('modify_project_works_12_11', split('live', ','), 'suspended_monitoring_modified', split('construction_modification,emergency_modification', ','), '12.11, sworn 12.13; emergency also 12.10(a)(2); 12.24(b)-(c) if EAP changes', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('suspend_re_directed_12_4', split('live', ','), 'suspended_monitoring_modified', split('re_directed', ','), '12.4(b)(2)', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('suspend_ops_drawdown_internal', split('live', ','), 'suspended_monitoring_modified', split('drawdown,monitoring_change', ','), 'INTERNAL: license articles; no unconditional Part 12 cite (12.12(a)(1)(iii)(A) only when the CDSE sets safety_related_ops_event = true)', 'UNVERIFIED-pending', false, true, '12.12(a)(1)(iii)(A)'),
+  ('suspend_other_internal', split('live', ','), 'suspended_monitoring_modified', split('other', ','), 'Internal: no specific Part 12 basis; CDSE rationale required', 'UNVERIFIED-pending', false, true, '12.12(a)(1)(iii)(A)'),
+  ('resume_dssmp_internal', split('suspended_monitoring_modified', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'INTERNAL', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('transfer_filed_fpa8_9_1', split('live', ','), 'pending_transfer', CAST(NULL AS ARRAY<STRING>), 'FPA 8; 9.1-9.2', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('transfer_withdrawn_385_216', split('pending_transfer', ','), 'live', CAST(NULL AS ARRAY<STRING>), '385.216', 'UNVERIFIED-pending', true, true, CAST(NULL AS STRING)),
+  ('transfer_denied_order', split('pending_transfer', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'Commission order', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('transfer_final_9_3_12_12c', split('pending_transfer', ','), 'transferred', CAST(NULL AS ARRAY<STRING>), '9.3; 12.12(c)', 'VERIFIED', false, true, CAST(NULL AS STRING)),
+  ('surrender_filed_6_1', split('live,suspended_monitoring_modified', ','), 'pending_surrender', CAST(NULL AS ARRAY<STRING>), '6.1; 12.1', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('surrender_withdrawn_385_216', split('pending_surrender', ','), 'live', CAST(NULL AS ARRAY<STRING>), '385.216', 'UNVERIFIED-pending', true, true, CAST(NULL AS STRING)),
+  ('surrender_denied_order', split('pending_surrender', ','), 'live', CAST(NULL AS ARRAY<STRING>), 'Commission order', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('surrender_effective_6_2_6_5', split('pending_surrender', ','), 'decommissioned_archived', CAST(NULL AS ARRAY<STRING>), '6.2; 6.5; 12.1', 'VERIFIED', false, true, CAST(NULL AS STRING)),
+  ('void_from_draft_internal', split('draft_commissioning', ','), 'voided_in_error', CAST(NULL AS ARRAY<STRING>), 'INTERNAL', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)),
+  ('void_from_live_internal', split('live', ','), 'voided_in_error', CAST(NULL AS ARRAY<STRING>), 'INTERNAL', 'UNVERIFIED-pending', false, true, CAST(NULL AS STRING)) AS s(citation_code, from_states, to_state, suspension_reasons, citation, verification_status, withdrawal_notice, active, safety_derived_citation)
 WHERE NOT EXISTS (SELECT 1 FROM ref.lifecycle_citation t WHERE t.citation_code = s.citation_code);
 
 CREATE OR REPLACE VIEW ref.v_dam_lifecycle_current
@@ -132,3 +140,9 @@ CREATE OR REPLACE VIEW ref.v_dam_go_live
 COMMENT 'v1.8: go_live_at derived from the lifecycle (no column): the effective_from of the dam''s first live state'
 AS SELECT dam_id, min(effective_from) AS go_live_at FROM ref.dam_lifecycle_state
 WHERE lifecycle_state = 'live' AND effective_from <= current_timestamp() GROUP BY dam_id;
+
+CREATE OR REPLACE VIEW audit.v_lifecycle_permanent_ops_history
+COMMENT 'v1.8.003: lifecycle events the CDSE flagged safety_related_ops_event = true (cite derived_citation, 12.12(a)(1)(iii)(A)): the permanent operational history. NULL / false = purely internal, not listed'
+AS SELECT event_id, dam_id, from_state, to_state, effective_ts, citation_code, derived_citation, suspension_reason,
+          cdse_basis, cdse_basis_by, approved_by, evidence_uri, event_hash
+FROM audit.lifecycle_event WHERE safety_related_ops_event = true;

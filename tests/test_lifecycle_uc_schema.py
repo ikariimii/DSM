@@ -1,5 +1,6 @@
-"""v1.8 UC schema (sql/ddl/14_dam_lifecycle.sql = sql/migrations/v1_8_001_dam_lifecycle.sql): identical table DDL,
-CHECKs and seeds; the 15 citation codes / 6 suspension reasons as data with a per-row verification status; no
+"""v1.8 UC schema (sql/ddl/14_dam_lifecycle.sql = sql/migrations/v1_8_001_dam_lifecycle.sql + v1_8_003_lifecycle_
+safety_flag.sql): identical table DDL (v1_8_001's plus the columns v1_8_003 adds), CHECKs (latest definition) and seeds
+(v1_8_003's); the 16 citation codes / 6 suspension reasons as data with a per-row verification status; no
 go_live_at column (derived view); ref.dam mirror columns; review_record accepts the dam_lifecycle actions; the CHECK
 bodies executed on PostgreSQL (DAM_TEST_PG) against good and bad rows. Static + PG only: UNVERIFIED on Databricks."""
 import os
@@ -13,6 +14,8 @@ from lifecycle_fixtures import seed_citations, seed_reasons
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DDL = open(os.path.join(ROOT, "sql", "ddl", "14_dam_lifecycle.sql")).read()
 MIG = open(os.path.join(ROOT, "sql", "migrations", "v1_8_001_dam_lifecycle.sql")).read()
+MIG3 = open(os.path.join(ROOT, "sql", "migrations", "v1_8_003_lifecycle_safety_flag.sql")).read()
+ADDED3 = re.findall(r"'ALTER TABLE (\w+\.\w+) ADD COLUMNS \((\w+) (\w+)\)'", MIG3)
 TABLES = ("ref.lifecycle_suspension_reason", "ref.lifecycle_citation", "ref.dam_lifecycle_state",
           "audit.lifecycle_event")
 CKS = ("ck_lifecycle_citation", "ck_dam_lifecycle_state", "ck_lifecycle_event")
@@ -36,13 +39,23 @@ def _seed(s, t):
 
 
 def test_tables_checks_and_seeds_are_identical_in_ddl_and_migration():
+    assert ADDED3 == [("ref.lifecycle_citation", "safety_derived_citation", "STRING"),
+                      ("audit.lifecycle_event", "safety_related_ops_event", "BOOLEAN"),
+                      ("audit.lifecycle_event", "derived_citation", "STRING")]
     for t in TABLES:
-        assert _create(DDL, t) == _create(MIG, t), t
+        ddl = _create(DDL, t)
+        new = [(c, ty) for tt, c, ty in ADDED3 if tt == t]
+        for c, ty in new:
+            assert re.search(rf"^  {c} +{ty} COMMENT 'v1\.8\.003", ddl, re.M), (t, c)
+        stripped = "\n".join(l for l in ddl.split("\n") if not any(l.startswith(f"  {c} ") for c, _ in new))
+        assert stripped == _create(MIG, t), t
     for c in CKS:
-        assert _ck(DDL, c) == _ck(MIG, c), c
+        assert _ck(DDL, c) == _ck(MIG3 if c == "ck_lifecycle_event" else MIG, c), c
+    assert _ck(DDL, "ck_lifecycle_event") != _ck(MIG, "ck_lifecycle_event")
     for t in ("ref.lifecycle_suspension_reason", "ref.lifecycle_citation"):
-        assert _seed(DDL, t) == _seed(MIG, t)
+        assert _seed(DDL, t) == _seed(MIG3, t)
         assert "WHERE NOT EXISTS" in _seed(DDL, t)                  # data changes are never overwritten
+    assert "UPDATE " not in "\n".join(l.split("--")[0] for l in MIG3.splitlines())
     assert "delta.appendOnly = true" in _create(DDL, "audit.lifecycle_event")
     for st in L.STATES:
         for c in CKS:
@@ -57,7 +70,7 @@ def test_event_table_carries_every_hashed_column():
 
 
 def test_enum_rows():
-    assert len(seed_citations()) == 15 and len(seed_reasons()) == 6
+    assert len(seed_citations()) == 16 and len(seed_reasons()) == 6
     assert all(r["active"] for r in seed_citations())
     assert sorted({r["verification_status"] for r in seed_citations()}) == ["UNVERIFIED-pending", "VERIFIED"]
 
@@ -132,7 +145,7 @@ def _checks(psycopg, dsn):
                 seed = seed.replace("CAST(NULL AS TEXT[])", "CAST(NULL AS TEXT[])")
                 c.execute(seed)
                 c.execute(seed)                                      # idempotent
-            assert c.execute("SELECT count(*) FROM ref.lifecycle_citation").fetchone()[0] == 15
+            assert c.execute("SELECT count(*) FROM ref.lifecycle_citation").fetchone()[0] == 16
             assert c.execute("SELECT count(*) FROM ref.lifecycle_suspension_reason").fetchone()[0] == 6
 
             def ins(**over):
@@ -141,6 +154,22 @@ def _checks(psycopg, dsn):
 
             ins()
             ins(event_id="'e2'", to_state="'suspended_monitoring_modified'", suspension_reason="'drawdown'")
+            ins(event_id="'e3'", to_state="'suspended_monitoring_modified'", suspension_reason="'other'",
+                evidence_uri="ARRAY[]::TEXT[]", safety_related_ops_event="true",
+                derived_citation="'12.12(a)(1)(iii)(A)'")                     # 'other': evidence optional
+            ins(event_id="'e4'", to_state="'suspended_monitoring_modified'", suspension_reason="'drawdown'",
+                safety_related_ops_event="false")
+            view = re.search(r"CREATE OR REPLACE VIEW audit\.v_lifecycle_permanent_ops_history\n.*?;", DDL, re.S).group(0)
+            c.execute(re.sub(r"COMMENT '(?:[^']|'')*'\n", "", view))
+            assert c.execute("SELECT event_id, derived_citation FROM audit.v_lifecycle_permanent_ops_history"
+                             ).fetchall() == [("e3", "12.12(a)(1)(iii)(A)")]
+            for over in ({"derived_citation": "'12.12(a)(1)(iii)(A)'"},
+                         {"derived_citation": "'12.12(a)(1)(iii)(A)'", "safety_related_ops_event": "false"},
+                         {"to_state": "'suspended_monitoring_modified'", "suspension_reason": "'drawdown'",
+                          "evidence_uri": "ARRAY[]::TEXT[]"},
+                         {"evidence_uri": "ARRAY[]::TEXT[]", "safety_related_ops_event": "false"}):   # reason NULL
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    ins(event_id="'bad'", **over)
             for over in ({"to_state": "'active'"}, {"evidence_uri": "ARRAY[]::TEXT[]"},
                          {"event_hash": "'ABC'"}, {"citation_code": "' '"},
                          {"to_state": "'suspended_monitoring_modified'"}, {"suspension_reason": "'drawdown'"}):

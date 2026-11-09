@@ -10,18 +10,22 @@ dam_ref_publish task apply_lifecycle_transitions (dam_safety.lifecycle_load).
 Refusal codes (HTTP 409 on the app side; check order = CODES order, the first is reason_code):
   lifecycle_unverifiable             the dam's lifecycle state (or the citation / reason enums) cannot be read, or its
                                      chain does not verify -> no lifecycle write; alarms stay on (rule 7)
-  dam_archived                       the dam is transferred or decommissioned_archived: read-only (rules 2, 5)
+  dam_archived                       the dam is transferred, decommissioned_archived or voided_in_error: read-only
+                                     (rules 2, 5; voided_in_error since the Genie decision of 2026-11-09 15:27). Body:
+                                     archived_refusal() -> {code, dam_id, lifecycle_state, message}
   lifecycle_stale                    from_state is not the dam's current state
   lifecycle_transition_invalid       (from_state, to_state) is not an edge; voided_in_error is terminal
-  lifecycle_evidence_required        no evidence reference (rule 8)
+  lifecycle_evidence_required        no evidence reference (rule 8); optional for suspension_reason 'other' only
   lifecycle_suspension_reason_required  a transition into suspended_monitoring_modified without a known reason
-  lifecycle_citation_invalid         citation_code missing / unknown / not for this edge (or this suspension reason)
+  lifecycle_citation_invalid         citation_code missing / unknown / not for this edge (or this suspension reason),
+                                     or safety_related_ops_event = true on a code with no safety_derived_citation
   lifecycle_withdrawal_date_required a *_withdrawn_* citation (withdrawal_notice row) without withdrawal_filed_date
   lifecycle_incident_report_required emergency_modification without incident_report_uri
   lifecycle_sworn_verification_required construction / emergency modification without sworn_verification_12_13 = true
                                      and sworn_verification_uri (18 CFR 12.13)
   lifecycle_cdse_basis_required      drawdown / monitoring_change without cdse_basis + cdse_basis_by
-  lifecycle_rationale_required       reason 'other' without a rationale
+  lifecycle_rationale_required       reason 'other' without the CDSE's recorded rationale: cdse_basis (>= 20 characters
+                                     after trimming) and cdse_basis_by holding CDSE authority for the dam at approved_at
   lifecycle_re_directive_required    reason re_directed without re_directive_uri
   lifecycle_dssmp_required           into suspended: no NEW approved DSSMP version in effect at effective_ts;
                                      suspended -> live: no approved DSSMP version in effect at effective_ts
@@ -30,7 +34,13 @@ Refusal codes (HTTP 409 on the app side; check order = CODES order, the first is
                                      draft record
   lifecycle_approval_invalid         the approver (and for void the proposer) lacks the authority at decision time, or
                                      the void is not two distinct people covering CDSE + platform_admin
-Warnings (never block): lifecycle_notice_60_day (construction_modification, effective_ts less than 60 days after the
+safety_related_ops_event (set by the CDSE; FERC Specialist 2026-11-09 15:27, Genie amendment 15:35): defaults to
+FALSE; NULL is TREATED AS FALSE (never refused) and the loader writes false. Only when it is true on a citation whose
+ref.lifecycle_citation.safety_derived_citation is set (seeded: the two internal suspension codes, drawdown and other) does the
+event carry derived_citation = that cite (12.12(a)(1)(iii)(A)), land in audit.v_lifecycle_permanent_ops_history and
+raise the warning lifecycle_12_10_review. False / NULL: purely internal, no 12.12 cite.
+Warnings (never block): lifecycle_12_10_review (safety_related_ops_event = true: the CDSE must decide whether a 18 CFR
+12.10 condition-affecting-safety report is also due); lifecycle_notice_60_day (construction_modification, effective_ts less than 60 days after the
 approval; 18 CFR 12.11(b)(2)); lifecycle_withdrawal_15_day (effective_ts less than 15 days after withdrawal_filed_date;
 18 CFR 385.216(b)). drawdown / monitoring_change lead time is per license or RE direction: no CFR lead-time check.
 Authority per edge is PROVISIONAL (docs/VERIFICATION.md LIFECYCLE-AUTHORITY): see APPROVER_ROLES.
@@ -53,7 +63,7 @@ EDGES = frozenset({
     (P_SURRENDER, LIVE), (P_SURRENDER, DECOM),
     (LIVE, VOID),
 })
-READ_ONLY = frozenset({TRANSFERRED, DECOM})            # 409 dam_archived on every write
+READ_ONLY = frozenset({TRANSFERRED, DECOM, VOID})      # 409 dam_archived on every write (void: Genie 2026-11-09)
 ALARMS_OFF = frozenset({VOID, DECOM, TRANSFERRED})     # rule 1: alarms stop
 SUSPENSION_REASONS = ("construction_modification", "emergency_modification", "drawdown", "monitoring_change", "other",
                       "re_directed")
@@ -63,11 +73,12 @@ CODES = ("lifecycle_unverifiable", "dam_archived", "lifecycle_stale", "lifecycle
          "lifecycle_sworn_verification_required", "lifecycle_cdse_basis_required", "lifecycle_rationale_required",
          "lifecycle_re_directive_required", "lifecycle_dssmp_required", "dam_go_live_not_ready",
          "lifecycle_transfer_target_invalid", "lifecycle_approval_invalid")
-WARNINGS = ("lifecycle_notice_60_day", "lifecycle_withdrawal_15_day")
+WARNINGS = ("lifecycle_12_10_review", "lifecycle_notice_60_day", "lifecycle_withdrawal_15_day")
+OTHER_BASIS_MIN = 20                                   # 'other': cdse_basis length after trimming
 NOTICE_60 = dt.timedelta(days=60)
 WITHDRAWAL_15 = dt.timedelta(days=15)
 GENESIS = "0" * 64
-# PROVISIONAL: who may approve each edge (roles resolved at the approve record's signed_ts). 'cdse' = CDSE of the dam
+# PROVISIONAL (pending the user's decision; SCHEMA_CONTRACT 7.1f): who may approve each edge (roles resolved at the approve record's signed_ts). 'cdse' = CDSE of the dam
 # in ref.v_dam_reviewer_authority; 'platform_admin' = ref.project_membership ADMIN on '*'. Void: two people (VOID_ROLES).
 APPROVER_ROLES = {
     (DRAFT, LIVE): ("cdse", "platform_admin"),
@@ -88,7 +99,11 @@ HASH_FIELDS = ("prev_event_hash", "event_id", "dam_id", "from_state", "to_state"
                "reason_code", "suspension_reason", "incident_report_uri", "sworn_verification_12_13",
                "sworn_verification_uri", "cdse_basis", "cdse_basis_by", "re_directive_uri", "withdrawal_filed_date",
                "counterpart_dam_id")
-EVENT_COLS = ("event_id",) + tuple(f for f in HASH_FIELDS if f != "event_id") + ("created_ts", "event_hash")
+# v1.8.003 extension, hashed as 'name=<len>:<value>|' AFTER the fields above and ONLY when not NULL, so every event
+# written before it (the v1_8_002 backfill: both NULL) keeps its hash and v1_8_002's SQL is unchanged
+EXT_HASH_FIELDS = ("safety_related_ops_event", "derived_citation")
+EVENT_COLS = ("event_id",) + tuple(f for f in HASH_FIELDS if f != "event_id") + EXT_HASH_FIELDS + ("created_ts",
+                                                                                                  "event_hash")
 
 
 # ---------------------------------------------------------------- small helpers
@@ -166,7 +181,7 @@ def canon_value(field, v) -> Optional[str]:
     if field == "withdrawal_filed_date":
         d = _date(v)
         return None if d is None else d.isoformat()
-    if field == "sworn_verification_12_13":
+    if field in ("sworn_verification_12_13", "safety_related_ops_event"):
         return "true" if v is True or str(v).lower() == "true" else "false"
     return str(v)
 
@@ -176,6 +191,10 @@ def hash_input(event: Mapping) -> str:
     for f in HASH_FIELDS:
         s = canon_value(f, event.get(f))
         out.append(f"{-1 if s is None else len(s)}:{'' if s is None else s}|")
+    for f in EXT_HASH_FIELDS:
+        s = canon_value(f, event.get(f))
+        if s is not None:
+            out.append(f"{f}={len(s)}:{s}|")
     return "".join(out)
 
 
@@ -187,11 +206,16 @@ def hash_sql(expr: Mapping[str, str]) -> str:
     """The same hash in Spark SQL: expr maps each HASH_FIELDS name to a STRING-valued SQL expression already in the
     canonical form (NULL allowed). Used by the backfill migration (tests assert the file carries exactly this). One
     concat per field inside the outer concat: 32 arguments, not 128 (PostgreSQL caps a call at 100 arguments; the
-    tests run the same SQL there)."""
+    tests run the same SQL there). EXT_HASH_FIELDS are appended only when expr names them (a NULL value adds '')."""
     parts = []
     for f in HASH_FIELDS:
         x = expr.get(f, "CAST(NULL AS STRING)")
         parts.append(f"concat(coalesce(CAST(length({x}) AS STRING), '-1'), ':', coalesce({x}, ''), '|')")
+    for f in EXT_HASH_FIELDS:
+        if f in expr:
+            x = expr[f]
+            parts.append(f"CASE WHEN {x} IS NULL THEN '' ELSE concat('{f}=', CAST(length({x}) AS STRING), ':', {x}, "
+                         "'|') END")                   # no reliance on concat's NULL handling (Spark vs PostgreSQL)
     return "sha2(concat(\n    " + ",\n    ".join(parts) + "), 256)"
 
 
@@ -341,7 +365,7 @@ def alarm_filter(readings_by_sensor: Mapping[str, list], dam_of: Mapping[str, st
 # ---------------------------------------------------------------- citations / reasons (data from UC)
 def load_citations(rows: Optional[Iterable[Mapping]]) -> Optional[dict]:
     """ref.lifecycle_citation rows -> {code: {from_states:set, to_state, suspension_reasons:set|None, citation, status,
-    withdrawal_notice}}; None (unreadable) -> None."""
+    withdrawal_notice, safety_derived_citation}}; None (unreadable) -> None."""
     if rows is None:
         return None
     out = {}
@@ -352,7 +376,9 @@ def load_citations(rows: Optional[Iterable[Mapping]]) -> Optional[dict]:
         out[r["citation_code"]] = {
             "from_states": set(r.get("from_states") or ()), "to_state": r.get("to_state"),
             "suspension_reasons": set(sr) if sr else None, "citation": r.get("citation"),
-            "status": r.get("verification_status"), "withdrawal_notice": bool(r.get("withdrawal_notice"))}
+            "status": r.get("verification_status"), "withdrawal_notice": bool(r.get("withdrawal_notice")),
+            "safety_derived_citation": None if _blank(r.get("safety_derived_citation"))
+            else str(r.get("safety_derived_citation")).strip()}
     return out
 
 
@@ -439,7 +465,7 @@ def check_transition(req: Mapping, *, current, has_ref_dam=(), citations=None, r
         bad("lifecycle_unverifiable", f"{what} cannot be read or verified for {dam}")
         return _result(msgs, warns, now_state)
     if now_state in READ_ONLY:
-        bad("dam_archived", f"{dam} is {now_state} (read-only)")
+        bad("dam_archived", archived_detail(dam, now_state))
         return _result(msgs, warns, now_state)
     if frm != now_state:
         bad("lifecycle_stale", f"{dam} is {now_state}, not {frm}")
@@ -454,9 +480,9 @@ def check_transition(req: Mapping, *, current, has_ref_dam=(), citations=None, r
     if info and info.get("effective_from") and eff < info["effective_from"]:
         bad("lifecycle_stale", f"effective_ts {ts_text(eff)} is before the current state's {ts_text(info['effective_from'])}")
         return _result(msgs, warns, now_state)
-    if not uri_list(req.get("evidence_uri")):
-        bad("lifecycle_evidence_required", "evidence_uri is empty")
     reason = req.get("suspension_reason")
+    if not uri_list(req.get("evidence_uri")) and not (to == SUSP and reason == "other"):
+        bad("lifecycle_evidence_required", "evidence_uri is empty")
     if to == SUSP and reason not in reasons:
         bad("lifecycle_suspension_reason_required", f"suspension_reason {reason!r} is not in "
             "ref.lifecycle_suspension_reason")
@@ -466,6 +492,16 @@ def check_transition(req: Mapping, *, current, has_ref_dam=(), citations=None, r
     if cp and not any(m.startswith("lifecycle_suspension_reason_required") for m in msgs):
         bad("lifecycle_citation_invalid", cp)
     cit = citations.get(req.get("citation_code")) or {}
+    flag = safety_flag(req)
+    if flag is None:
+        bad("lifecycle_citation_invalid", "safety_related_ops_event must be a boolean (NULL is treated as false)")
+    elif flag and not cp and not cit.get("safety_derived_citation"):
+        bad("lifecycle_citation_invalid", f"safety_related_ops_event = true on citation_code "
+            f"{req.get('citation_code')!r}, which has no safety_derived_citation")
+    elif flag and not cp:
+        warns.append(f"lifecycle_12_10_review: safety-related operational event recorded under "
+                     f"{cit['safety_derived_citation']}; the CDSE must decide whether a 18 CFR 12.10 "
+                     "condition-affecting-safety report is also due")
     if not cp and cit.get("withdrawal_notice"):
         wd = _date(req.get("withdrawal_filed_date"))
         if wd is None:
@@ -483,8 +519,14 @@ def check_transition(req: Mapping, *, current, has_ref_dam=(), citations=None, r
         if reason in ("drawdown", "monitoring_change") and (_blank(req.get("cdse_basis"))
                                                              or _blank(req.get("cdse_basis_by"))):
             bad("lifecycle_cdse_basis_required", f"{reason} needs cdse_basis and cdse_basis_by")
-        if reason == "other" and _blank(req.get("rationale")):
-            bad("lifecycle_rationale_required", "suspension_reason other needs a rationale")
+        if reason == "other":
+            basis, by = str(req.get("cdse_basis") or "").strip(), req.get("cdse_basis_by")
+            if len(basis) < OTHER_BASIS_MIN:
+                bad("lifecycle_rationale_required", f"suspension_reason other needs cdse_basis of at least "
+                    f"{OTHER_BASIS_MIN} characters after trimming (got {len(basis)})")
+            elif "cdse" not in roles_at(by, dam, _ts(approved_at), authority, ()):
+                bad("lifecycle_rationale_required", f"suspension_reason other: cdse_basis_by {by!r} is not a CDSE of "
+                    f"{dam} at {ts_text(approved_at)}")
         if reason == "re_directed" and _blank(req.get("re_directive_uri")):
             bad("lifecycle_re_directive_required", "re_directed needs re_directive_uri (the RE directive)")
         if reason == "construction_modification" and _ts(approved_at) and eff < _ts(approved_at) + NOTICE_60:
@@ -523,14 +565,29 @@ def _result(msgs, warns, now_state):
 
 
 # ---------------------------------------------------------------- events
-def build_events(req: Mapping, current: Mapping, created_by: str, created_ts, event_id: str) -> List[dict]:
+def safety_flag(req: Mapping):
+    """safety_related_ops_event: True / False; NULL (absent) -> False (the default); anything else -> None (invalid)."""
+    v = req.get("safety_related_ops_event")
+    if v is None:
+        return False
+    return v if isinstance(v, bool) else None
+
+
+def build_events(req: Mapping, current: Mapping, created_by: str, created_ts, event_id: str,
+                 citations: Optional[Mapping] = None) -> List[dict]:
     """The audit.lifecycle_event row(s) for an accepted transition: one, or two for pending_transfer -> transferred
-    (the old record -> transferred and the new record draft -> live at the same effective_ts, one transaction)."""
+    (the old record -> transferred and the new record draft -> live at the same effective_ts, one transaction).
+    safety_related_ops_event is written as a boolean (NULL -> false); derived_citation = the citation's
+    safety_derived_citation when the flag is true, else NULL."""
     eff = _utc(req["effective_ts"]).replace(microsecond=0)
     base = {f: req.get(f) for f in HASH_FIELDS if f not in ("prev_event_hash", "event_id", "created_by")}
     base.update(effective_ts=eff, created_by=created_by, evidence_uri=uri_list(req.get("evidence_uri")),
                 withdrawal_filed_date=_date(req.get("withdrawal_filed_date")),
                 sworn_verification_12_13=req.get("sworn_verification_12_13"))
+    flag = bool(safety_flag(req))
+    cit = (citations or {}).get(req.get("citation_code")) or {}
+    base.update(safety_related_ops_event=flag,
+                derived_citation=cit.get("safety_derived_citation") if flag else None)
     out = []
 
     def add(ev):
@@ -565,17 +622,30 @@ def fold_go_live(markers: Mapping, go_live_rows: Optional[Iterable[Mapping]], am
     return out
 
 
+def archived_detail(dam_id, state) -> str:
+    return f"dam {dam_id} lifecycle_state={state} (read-only)"
+
+
+def archived_refusal(dam_id, state) -> dict:
+    """THE dam_archived refusal shape (app: HTTPException(409, archived_refusal(...)) -> body {"detail": {...}};
+    loaders: outbox reason_code = code, message = message)."""
+    return {"code": "dam_archived", "dam_id": dam_id, "lifecycle_state": state,
+            "message": f"dam_archived: {archived_detail(dam_id, state)}"}
+
+
 def write_refusal(dam_id, current: Optional[Mapping], has_ref_dam=()) -> Optional[str]:
-    """For the OTHER loaders (DSSMP, CDSE, ref publications): 'dam_archived: ...' when the dam is read-only, else None.
-    An unreadable lifecycle does not block them (rule 7 refuses lifecycle writes only); the job fails if the table
-    itself cannot be read."""
+    """For the OTHER loaders (DSSMP, CDSE, ref publications): 'dam_archived: dam <id> lifecycle_state=<state>
+    (read-only)' when the dam is read-only (transferred, decommissioned_archived, voided_in_error), else None. An
+    unreadable lifecycle does not block them (rule 7 refuses lifecycle writes only); the job fails if the table itself
+    cannot be read."""
     st, _ = state_of(dam_id, current or {}, ())
     if st in READ_ONLY:
-        return f"dam_archived: {dam_id} is {st} (read-only)"
+        return archived_refusal(dam_id, st)["message"]
     return None
 
 
-__all__ = ["STATES", "EDGES", "CODES", "WARNINGS", "SUSPENSION_REASONS", "HASH_FIELDS", "EVENT_COLS", "GENESIS",
+__all__ = ["STATES", "EDGES", "CODES", "WARNINGS", "EXT_HASH_FIELDS", "READ_ONLY", "archived_refusal",
+           "safety_flag", "SUSPENSION_REASONS", "HASH_FIELDS", "EVENT_COLS", "GENESIS",
            "UNREADABLE", "APPROVER_ROLES", "alarm_filter", "alarm_mode", "alarm_mode_at", "build_events", "check_transition",
            "citation_ok", "current_states", "fold_go_live", "event_hash", "hash_input", "hash_sql", "load_citations", "roles_at",
            "state_of", "uri_list", "verify_chain", "write_refusal", "ts_text"]

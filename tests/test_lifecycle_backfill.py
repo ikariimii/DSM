@@ -138,3 +138,22 @@ def test_any_malformed_go_live_record_fails_the_whole_backfill(db, bad):
     assert r.returncode != 0 and any(m in r.stderr for m in ("v1_8_002", "timestamp", "out of range")), r.stderr
     assert _psql(conn, "SELECT count(*) FROM audit.lifecycle_event").stdout.strip() == "0"
     assert _psql(conn, "SELECT count(*) FROM ref.dam_lifecycle_state").stdout.strip() == "0"
+
+
+@live
+def test_hash_sql_with_the_extension_fields_matches_python_on_postgres(db):
+    """v1.8.003: EXT_HASH_FIELDS hash only when not NULL (so v1_8_002 rows keep their hash); hash_sql agrees."""
+    base = {"prev_event_hash": L.GENESIS, "event_id": "e1", "dam_id": "D1", "from_state": "live",
+            "to_state": "suspended_monitoring_modified", "trigger_code": "t", "authorizer_role": "cdse",
+            "evidence_uri": ["uri:1"], "effective_ts": "2026-11-20T12:00:00Z", "created_by": "job",
+            "citation_code": "suspend_other_internal", "suspension_reason": "other"}
+    lit = lambda v: "CAST(NULL AS STRING)" if v is None else "'" + v.replace("'", "''") + "'"
+    conn, tmp = db
+    for i, (flag, cite) in enumerate(((None, None), (False, None), (True, "12.12(a)(1)(iii)(A)"))):
+        ev = dict(base, safety_related_ops_event=flag, derived_citation=cite)
+        expr = {f: lit(L.canon_value(f, ev.get(f))) for f in L.HASH_FIELDS + L.EXT_HASH_FIELDS}
+        p = tmp / f"h{i}.sql"
+        p.write_text(_pg(f"SELECT {L.hash_sql(expr)} AS h;"))
+        r = _psql(conn, f=str(p))
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.split()[-1] == L.event_hash(ev), (flag, cite)

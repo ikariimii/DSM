@@ -249,3 +249,50 @@ def test_a_transfer_is_written_all_or_nothing():
     finally:
         with psycopg.connect(PG, autocommit=True) as root:
             root.execute(f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
+
+
+# ---------------------------------------------------------------- v1.8.003: safety flag, 'other', voided dams
+def _drawdown(flag="absent"):
+    r = req(L.LIVE, L.SUSP)
+    row = outbox(r)
+    if flag != "absent":
+        row["safety_related_ops_event"] = flag
+    return row
+
+
+def test_safety_flag_from_the_outbox_null_is_false_true_derives_the_cite_and_warns_12_10():
+    for flag in (None, False, "absent"):
+        row = _drawdown(flag)
+        out, _ = plan([row], records(row), {"D1": PATH_TO[L.LIVE]})
+        (d,), (e,) = out["decisions"], out["events"]
+        assert d["status"] == "loaded" and "lifecycle_12_10_review" not in d["message"], flag
+        assert e["safety_related_ops_event"] is False and e["derived_citation"] is None
+    row = _drawdown(True)
+    out, evs = plan([row], records(row), {"D1": PATH_TO[L.LIVE]})
+    (d,), (e,) = out["decisions"], out["events"]
+    assert d["status"] == "loaded" and "warning lifecycle_12_10_review" in d["message"] and "12.10" in d["message"]
+    assert e["safety_related_ops_event"] is True and e["derived_citation"] == "12.12(a)(1)(iii)(A)"
+    assert L.verify_chain(evs + [e]) == {"D1": None}
+    assert set(L.EXT_HASH_FIELDS) <= set(e) and LL.OUTBOX_COLS[-1] == "safety_related_ops_event"
+    row = _drawdown("true")
+    out, _ = plan([row], records(row), {"D1": PATH_TO[L.LIVE]})
+    assert out["decisions"][0]["message"] == "invalid_value: safety_related_ops_event must be a boolean"
+
+
+def test_other_from_the_outbox_with_empty_evidence_and_the_cdse_basis():
+    r = req(L.LIVE, L.SUSP, suspension_reason="other", citation_code="suspend_other_internal", evidence_uri=[],
+            cdse_basis="Unplanned survey after a felt earthquake nearby", cdse_basis_by=CDSE)
+    row = outbox(r)
+    out, _ = plan([row], records(row), {"D1": PATH_TO[L.LIVE]})
+    assert out["decisions"][0]["status"] == "loaded" and out["events"][0]["evidence_uri"] == []
+    row = outbox(dict(r, cdse_basis="too short"))
+    out, _ = plan([row], records(row), {"D1": PATH_TO[L.LIVE]})
+    assert out["decisions"][0]["reason_code"] == "lifecycle_rationale_required" and out["events"] == []
+
+
+def test_a_voided_dam_refuses_every_transition_with_dam_archived():
+    row = outbox(req(L.VOID, L.LIVE, citation_code="go_live_dssmp_12_12"))
+    out, _ = plan([row], records(row), {"D1": PATH_TO[L.VOID]})
+    (d,) = out["decisions"]
+    assert (d["status"], d["reason_code"]) == ("rejected", "dam_archived")
+    assert d["message"] == "dam_archived: dam D1 lifecycle_state=voided_in_error (read-only)"

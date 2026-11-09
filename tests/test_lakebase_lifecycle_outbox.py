@@ -1,5 +1,6 @@
 """v1.8 Lakebase dam_app.lifecycle_transition_outbox (lakebase/001 block v1_8_001 = lakebase/migrations/
-v1_8_001_lifecycle_outbox.sql): owned by dam_lakebase_owner; the app has EXACTLY SELECT + INSERT (no UPDATE of any
+v1_8_001_lifecycle_outbox.sql, plus block v1_8_002 = v1_8_002_lifecycle_safety_flag.sql: safety_related_ops_event
+BOOLEAN DEFAULT false, evidence optional for suspension_reason 'other' only): owned by dam_lakebase_owner; the app has EXACTLY SELECT + INSERT (no UPDATE of any
 column, no DELETE / TRUNCATE / TRIGGER / REFERENCES); dam_lakebase_publisher SELECT + UPDATE (status, reason_code,
 message, processed_at); status pending -> loaded | rejected only (ENABLE ALWAYS); one pending row per dam; the INSERT
 needs the dam lock (4702047, hashtext('dam_app.dam:' || dam_id)) held by the inserting transaction (lock order dam ->
@@ -21,6 +22,8 @@ DDL = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 VAL = os.path.join(ROOT, "lakebase", "validate_append_only.sql")
 MIG = os.path.join(ROOT, "lakebase", "migrations", "v1_8_001_lifecycle_outbox.sql")
 DOWN = os.path.join(ROOT, "lakebase", "migrations", "v1_8_001_lifecycle_outbox_down.sql")
+MIG2 = os.path.join(ROOT, "lakebase", "migrations", "v1_8_002_lifecycle_safety_flag.sql")
+DOWN2 = os.path.join(ROOT, "lakebase", "migrations", "v1_8_002_lifecycle_safety_flag_down.sql")
 T = "dam_app.lifecycle_transition_outbox"
 APP_GRANT = "GRANT SELECT, INSERT ON dam_app.lifecycle_transition_outbox TO %I"
 PUB_COLS = ("status", "reason_code", "message", "processed_at")
@@ -31,11 +34,12 @@ COLS = ("outbox_id", "dam_id", "from_state", "to_state", "trigger_code", "author
         "transition_reason_code", "suspension_reason", "incident_report_uri", "sworn_verification_12_13",
         "sworn_verification_uri", "cdse_basis", "cdse_basis_by", "re_directive_uri", "withdrawal_filed_date",
         "counterpart_dam_id", "created_at", "status", "reason_code", "message", "processed_at")
+COLS_V18_002 = ("safety_related_ops_event",)
 
 
-def _block(path):
+def _block(path, tag="v1_8_001"):
     s = open(path).read()
-    return s[s.index("-- BEGIN v1_8_001 block"):s.index("-- END v1_8_001 block")]
+    return s[s.index(f"-- BEGIN {tag} block"):s.index(f"-- END {tag} block")]
 
 
 def test_001_and_the_migration_carry_the_same_block_with_the_exact_grants():
@@ -51,9 +55,22 @@ def test_001_and_the_migration_carry_the_same_block_with_the_exact_grants():
     assert not re.search(r"\bDROP TABLE\b|\bDELETE\b|\bTRUNCATE\b|OWNER TO", code)
 
 
+def test_v1_8_002_block_is_identical_adds_the_flag_and_relaxes_evidence_for_other_only():
+    blk = _block(DDL, "v1_8_002")
+    assert _block(MIG2, "v1_8_002") == blk
+    assert open(DDL).read().index("-- END v1_8_001 block") < open(DDL).read().index("-- BEGIN v1_8_002 block")
+    code = "\n".join(l for l in blk.splitlines() if not l.lstrip().startswith("--"))
+    assert re.findall(r"ADD COLUMN IF NOT EXISTS (\w+) BOOLEAN DEFAULT false;", code) == list(COLS_V18_002)
+    assert "(jsonb_array_length(evidence_uri::jsonb) > 0 OR coalesce(suspension_reason, '') = 'other')" in code
+    assert not re.search(r"\bGRANT\b|\bREVOKE\b|OWNER TO|\bUPDATE\b|\bDELETE\b|DROP TABLE|DROP COLUMN", code)
+    down = "\n".join(l for l in open(DOWN2).read().splitlines() if not l.lstrip().startswith("--"))
+    assert not re.search(r"\bDROP TABLE\b|\bDELETE\b|\bTRUNCATE\b|OWNER TO|DROP COLUMN", down)
+    assert "jsonb_array_length(evidence_uri::jsonb) > 0);" in down
+
+
 def test_the_loader_reads_exactly_the_outbox_columns():
     from dam_safety.lifecycle_load import OUTBOX_COLS
-    assert OUTBOX_COLS == COLS
+    assert OUTBOX_COLS == COLS + COLS_V18_002
 
 
 PG = os.environ.get("DAM_TEST_PG")
@@ -127,9 +144,15 @@ def test_fresh_001_privileges_lock_order_status_guard_and_checks(env):
     for bad in (_ins_sql("O3", "D3", h="c" * 64, reason="NULL"),      # into suspended needs a reason
                 _ins_sql("O3", "D3", h="c" * 64, to="pending_surrender"),   # a reason on another edge
                 _ins_sql("O3", "D3", h="c" * 64, evidence="'[]'"),
+                _ins_sql("O3", "D3", h="c" * 64, evidence="'{}'", reason="'other'"),      # not an array
+                _ins_sql("O3", "D3", h="c" * 64, evidence="'[]'", reason="NULL", to="pending_surrender"),
                 _ins_sql("O3", "D3", h="XYZ")):
         r = _locked(env, bad, "D3")
         assert r.returncode != 0 and "violates check constraint" in r.stderr, (bad, r.stderr)
+    # v1_8_002: an empty evidence list only with suspension_reason 'other'; safety_related_ops_event defaults false
+    assert _locked(env, _ins_sql("O5", "D5", h="d" * 64, evidence="'[]'", reason="'other'"), "D5").returncode == 0
+    assert _psql(env["su"], "-At", "-c", f"SELECT safety_related_ops_event FROM {T} WHERE outbox_id = 'O5'"
+                 ).stdout.strip() == "f"
     for stmt, err in ((f"UPDATE {T} SET status = 'loaded'", "permission denied"),
                       (f"UPDATE {T} SET reason_code = 'x'", "permission denied"),
                       (f"DELETE FROM {T}", "permission denied"), (f"TRUNCATE {T}", "permission denied"),
@@ -214,7 +237,7 @@ def test_runner_orders_migrations_numerically():
     names = ["v1_10_001_x.sql", "v1_8_001_lifecycle_outbox.sql", "v1_7_011_migration_ledger.sql", "v1_9_002_y.sql"]
     assert sorted(names, key=rm.mig_key) == ["v1_7_011_migration_ledger.sql", "v1_8_001_lifecycle_outbox.sql",
                                              "v1_9_002_y.sql", "v1_10_001_x.sql"]
-    assert rm.lakebase_files()[-1] == "v1_8_001_lifecycle_outbox.sql"
+    assert rm.lakebase_files()[-2:] == ["v1_8_001_lifecycle_outbox.sql", "v1_8_002_lifecycle_safety_flag.sql"]
     lb = os.path.join(ROOT, "lakebase", "migrations")
     ok = rm.decide_lakebase(os.path.join(lb, "v1_8_001_lifecycle_outbox.sql"),
                             [("v1_7_011_migration_ledger.sql", "up")])
@@ -241,8 +264,14 @@ def test_runner_applies_the_v18_file_refuses_a_rerun_and_rolls_back_in_order(env
         r = run("--file", f)
         assert r.returncode == 0, (f, r.stdout, r.stderr)
     assert _val(env) == ""
-    r = run("--file", MIG)
+    r = run("--file", MIG2)
     assert r.returncode == 3 and "already applied" in r.stderr
+    r = run("--file", MIG)
+    assert r.returncode == 3
+    r = run("--file", DOWN)
+    assert r.returncode == 3 and "not the newest applied" in r.stderr                 # v1_8_002 first
+    r = run("--file", DOWN2)
+    assert r.returncode == 0 and _val(env) == "", r.stderr
     r = run("--file", lb("v1_7_011_migration_ledger_down.sql"))
     assert r.returncode == 3 and "not the newest applied" in r.stderr
     r = run("--file", lb("v1_7_005_cdse_reversion_tables.sql"), "--rerun", "operator insists on it")
@@ -252,6 +281,8 @@ def test_runner_applies_the_v18_file_refuses_a_rerun_and_rolls_back_in_order(env
     r = run("--file", MIG)
     assert r.returncode == 0, r.stderr
     assert _val(env) == ""
+    r = run("--file", MIG2)
+    assert r.returncode == 0 and _val(env) == "", r.stderr
     led = _psql(env["su"], "-c", "SELECT migration || ':' || direction FROM dam_app.schema_migration_ledger "
                                  "WHERE migration LIKE 'v1_8_001%' ORDER BY ledger_id").stdout.split()
     assert led == ["v1_8_001_lifecycle_outbox.sql:up", "v1_8_001_lifecycle_outbox_down.sql:down",

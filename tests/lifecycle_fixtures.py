@@ -7,7 +7,7 @@ import os
 import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MIG = os.path.join(ROOT, "sql", "migrations", "v1_8_001_dam_lifecycle.sql")
+MIG = os.path.join(ROOT, "sql", "migrations", "v1_8_003_lifecycle_safety_flag.sql")   # the latest enum seed (16 rows)
 
 
 def _arr(x):
@@ -24,11 +24,13 @@ def seed_citations():
     rows = []
     for m in re.finditer(r"\('(\w+)', (split\('[^']*', ','\)|CAST\(NULL AS ARRAY<STRING>\)), '(\w+)', "
                          r"(split\('[^']*', ','\)|CAST\(NULL AS ARRAY<STRING>\)), '([^']*)', '([\w-]+)', (true|false), "
-                         r"(true|false)\)", blk):
+                         r"(true|false)(?:, (CAST\(NULL AS STRING\)|'[^']*'))?\)", blk):
         rows.append({"citation_code": m.group(1), "from_states": _arr(m.group(2)), "to_state": m.group(3),
                      "suspension_reasons": _arr(m.group(4)), "citation": m.group(5),
                      "verification_status": m.group(6), "withdrawal_notice": m.group(7) == "true",
-                     "active": m.group(8) == "true"})
+                     "active": m.group(8) == "true",
+                     "safety_derived_citation": None if (m.group(9) or "").startswith("CAST") or m.group(9) is None
+                     else m.group(9).strip("'")})
     return rows
 
 

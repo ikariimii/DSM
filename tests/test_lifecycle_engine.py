@@ -30,7 +30,7 @@ def test_states_edges_and_enums_are_the_agreed_contract():
         "suspend_ops_drawdown_internal", "resume_dssmp_internal", "transfer_filed_fpa8_9_1",
         "transfer_withdrawn_385_216", "transfer_denied_order", "transfer_final_9_3_12_12c", "surrender_filed_6_1",
         "surrender_withdrawn_385_216", "surrender_denied_order", "surrender_effective_6_2_6_5",
-        "void_from_draft_internal", "void_from_live_internal"])
+        "void_from_draft_internal", "void_from_live_internal", "suspend_other_internal"])
     for banned in ("dssmp_revision_ch14", "re_directed_12_4", "part12d_corrective_plan",
                    "corporate_name_change_internal", "dssmp_version_superseded", "reinstate_from_void_internal"):
         assert banned not in codes
@@ -46,6 +46,17 @@ def test_states_edges_and_enums_are_the_agreed_contract():
                                                                          "emergency_modification"]
     assert codes["suspend_re_directed_12_4"]["suspension_reasons"] == ["re_directed"]
     assert codes["suspend_ops_drawdown_internal"]["suspension_reasons"] == ["drawdown", "monitoring_change"]
+    # FERC Specialist 2026-11-09 15:27: the label, and no unconditional 12.12(a)(1)(iii)(A) cite on either internal code
+    o = codes["suspend_other_internal"]
+    assert (o["from_states"], o["to_state"], o["suspension_reasons"], o["verification_status"]) == (
+        ["live"], SUSP, ["other"], "UNVERIFIED-pending")
+    assert o["citation"] == "Internal: no specific Part 12 basis; CDSE rationale required"
+    d = codes["suspend_ops_drawdown_internal"]["citation"]
+    assert "record under 12.12(a)(1)(iii)(A)" not in d and "only when the CDSE sets safety_related_ops_event" in d
+    assert {c: r["safety_derived_citation"] for c, r in codes.items() if r["safety_derived_citation"]} == {
+        "suspend_other_internal": "12.12(a)(1)(iii)(A)", "suspend_ops_drawdown_internal": "12.12(a)(1)(iii)(A)"}
+    assert "lifecycle_safety_flag_required" not in L.CODES                     # Genie 15:35: the flag defaults false
+    assert "lifecycle_12_10_review" in L.WARNINGS
     assert codes["surrender_filed_6_1"]["from_states"] == ["live", "suspended_monitoring_modified"]
     assert set(L.CODES) >= {"lifecycle_transition_invalid", "lifecycle_stale", "lifecycle_citation_invalid",
                             "lifecycle_incident_report_required", "lifecycle_sworn_verification_required",
@@ -74,9 +85,21 @@ def test_every_other_pair_is_refused(frm, to):
     assert res["codes"][:1] == [expected], res
 
 
-def test_voided_in_error_is_terminal():
+def test_voided_in_error_is_terminal_and_read_only():
+    """Genie 2026-11-09 15:27: voided_in_error is read-only like transferred / decommissioned_archived."""
+    assert L.READ_ONLY == {L.TRANSFERRED, L.DECOM, L.VOID} and L.VOID in L.ALARMS_OFF
     for to in L.STATES:
-        assert run(req(L.VOID, to))["codes"][0] == "lifecycle_transition_invalid"
+        assert run(req(L.VOID, to))["codes"] == ["dam_archived"]
+
+
+def test_dam_archived_refusal_shape():
+    for st in sorted(L.READ_ONLY):
+        cur = ctx({"D1": PATH_TO[st]})[0]["current"]
+        body = L.archived_refusal("D1", st)
+        assert body == {"code": "dam_archived", "dam_id": "D1", "lifecycle_state": st,
+                        "message": f"dam_archived: dam D1 lifecycle_state={st} (read-only)"}
+        assert L.write_refusal("D1", cur) == body["message"]
+        assert run(req(st, L.LIVE))["messages"] == [body["message"]]
 
 
 @pytest.mark.parametrize("state", sorted(L.READ_ONLY))
@@ -167,20 +190,98 @@ def test_each_suspension_reason_and_its_required_evidence(reason, needs):
     assert "lifecycle_citation_invalid" in res["codes"]
 
 
-def test_other_needs_a_rationale_and_currently_has_no_citation_code():
-    """'other': rationale required (409 lifecycle_rationale_required). GAP (reported): no seeded citation_code covers
-    'other', so every 'other' suspension is refused lifecycle_citation_invalid until one is added as data."""
-    for code in [r["citation_code"] for r in seed_citations() if r["to_state"] == SUSP]:
-        res = run(req(L.LIVE, SUSP, suspension_reason="other", citation_code=code, rationale="why"))
-        assert res["codes"] == ["lifecycle_citation_invalid"]
-        res = run(req(L.LIVE, SUSP, suspension_reason="other", citation_code=code, rationale=" "))
-        assert "lifecycle_rationale_required" in res["codes"]
-    rows = seed_citations() + [{"citation_code": "suspend_other_test", "from_states": [L.LIVE], "to_state": SUSP,
-                                "suspension_reasons": ["other"], "citation": "test", "verification_status":
-                                "UNVERIFIED-pending", "withdrawal_notice": False, "active": True}]
-    res = run(req(L.LIVE, SUSP, suspension_reason="other", citation_code="suspend_other_test", rationale="why"),
-              citations=L.load_citations(rows))
-    assert res["codes"] == []
+BASIS = "Spillway gate inspection found corrosion; monitoring moved to weekly"      # >= 20 characters
+
+
+def _other(**kw):
+    r = req(L.LIVE, SUSP, suspension_reason="other", citation_code="suspend_other_internal", cdse_basis=BASIS,
+            cdse_basis_by=CDSE, evidence_uri=[], rationale=None)
+    r.update(kw)
+    return r
+
+
+def test_other_with_the_cdse_rationale_is_accepted_evidence_optional():
+    """Genie 2026-11-09 15:27: suspend_other_internal, live -> suspended with reason 'other' only; the CDSE's
+    rationale (cdse_basis >= 20 characters after trimming, cdse_basis_by a CDSE of the dam) is required; evidence is
+    optional."""
+    assert run(_other())["codes"] == []
+    assert run(_other(evidence_uri=["uri:photo/1"]))["codes"] == []
+    assert run(_other(cdse_basis="  " + "x" * 20 + "  "))["codes"] == []
+    for code in [r["citation_code"] for r in seed_citations() if r["to_state"] == SUSP
+                 and r["citation_code"] != "suspend_other_internal"]:
+        assert run(_other(citation_code=code))["codes"] == ["lifecycle_citation_invalid"], code
+    for reason in ("drawdown", "construction_modification", "re_directed"):           # only for 'other'
+        res = run(_other(suspension_reason=reason))
+        assert "lifecycle_citation_invalid" in res["codes"] and "lifecycle_evidence_required" in res["codes"]
+    assert "lifecycle_citation_invalid" in run(dict(_other(), from_state=L.SUSP, to_state=L.LIVE, suspension_reason=None),
+                                              {"D1": PATH_TO[SUSP]})["codes"]
+
+
+@pytest.mark.parametrize("over", [
+    {"cdse_basis": None}, {"cdse_basis": ""}, {"cdse_basis": "   "}, {"cdse_basis": "x" * 19},
+    {"cdse_basis": "  " + "x" * 19 + "    "},                       # 19 after trimming
+    {"cdse_basis_by": None}, {"cdse_basis_by": NOBODY}, {"cdse_basis_by": ADMIN},  # not a CDSE of D1
+    {"rationale": "a free-text rationale is not the CDSE's recorded basis", "cdse_basis": None},
+])
+def test_other_without_the_cdse_rationale_is_refused(over):
+    assert run(_other(**over))["codes"] == ["lifecycle_rationale_required"], over
+
+
+def test_other_rationale_by_a_cdse_whose_authority_ended_before_the_approval_is_refused():
+    auth = [{"dam_id": "D1", "principal": CDSE, "granted_ts": "2026-01-01T00:00:00Z",
+             "revoked_ts": "2026-11-01T00:00:00Z"}, {"dam_id": "D1", "principal": CDSE2,
+                                                       "granted_ts": "2026-01-01T00:00:00Z", "revoked_ts": None}]
+    res = run(_other(approved_by=CDSE2, proposed_by=CDSE2), authority=auth)
+    assert res["codes"] == ["lifecycle_rationale_required"]
+    assert run(_other(approved_by=CDSE2, cdse_basis_by=CDSE2), authority=auth)["codes"] == []
+
+
+# ---------------------------------------------------------------- safety_related_ops_event (FERC 15:27, Genie 15:35)
+CITE = "12.12(a)(1)(iii)(A)"
+
+
+def _flag_req(code, flag):
+    r = _other() if code == "suspend_other_internal" else req(L.LIVE, SUSP, suspension_reason="drawdown",
+                                                               citation_code=code)
+    if flag != "absent":
+        r["safety_related_ops_event"] = flag
+    return r
+
+
+@pytest.mark.parametrize("code", ["suspend_other_internal", "suspend_ops_drawdown_internal"])
+@pytest.mark.parametrize("flag", [True, False, None, "absent"])
+def test_safety_flag_defaults_false_and_only_true_cites_12_12_and_prompts_12_10(code, flag):
+    r = _flag_req(code, flag)
+    c, _ = ctx({"D1": PATH_TO[L.LIVE]})
+    res = L.check_transition(r, **c)
+    assert res["codes"] == [], res                                       # never refused: NULL / absent = false
+    review = [w for w in res["warnings"] if w.startswith("lifecycle_12_10_review")]
+    (ev,) = L.build_events(r, c["current"], "job", U("2026-11-09T20:00:00Z"), "lc:x", c["citations"])
+    if flag is True:
+        assert len(review) == 1 and CITE in review[0] and "12.10" in review[0]
+        assert ev["safety_related_ops_event"] is True and ev["derived_citation"] == CITE
+    else:
+        assert review == [] and not any(CITE in w for w in res["warnings"])
+        assert ev["safety_related_ops_event"] is False and ev["derived_citation"] is None   # NULL coerced to false
+    assert ev["event_hash"] == L.event_hash(ev) and ev["prev_event_hash"] == c["current"]["D1"]["event_hash"]
+
+
+def test_safety_flag_true_on_a_code_without_a_derived_cite_is_refused_and_non_booleans_too():
+    r = req(L.LIVE, SUSP, suspension_reason="re_directed", citation_code="suspend_re_directed_12_4",
+            re_directive_uri="uri:re/1")
+    assert run(r)["codes"] == []
+    assert run(dict(r, safety_related_ops_event=False))["codes"] == []
+    assert run(dict(r, safety_related_ops_event=True))["codes"] == ["lifecycle_citation_invalid"]
+    assert run(req(L.LIVE, L.P_TRANSFER, safety_related_ops_event=True))["codes"] == ["lifecycle_citation_invalid"]
+    for bad in ("true", 1, "yes"):
+        assert run(_flag_req("suspend_ops_drawdown_internal", bad))["codes"] == ["lifecycle_citation_invalid"]
+
+
+def test_safety_derived_citation_is_data():
+    rows = [dict(x, safety_derived_citation=None) if x["citation_code"] == "suspend_ops_drawdown_internal" else x
+            for x in seed_citations()]
+    r = _flag_req("suspend_ops_drawdown_internal", True)
+    assert run(r, citations=L.load_citations(rows))["codes"] == ["lifecycle_citation_invalid"]   # fail closed
 
 
 def test_suspension_reason_required_and_only_on_suspensions():
@@ -328,3 +429,18 @@ def test_hash_sql_lists_every_field_in_order():
     sql = L.hash_sql({f: f"x.{f}" for f in L.HASH_FIELDS})
     pos = [sql.index(f"length(x.{f})") for f in L.HASH_FIELDS]
     assert pos == sorted(pos) and sql.startswith("sha2(concat(") and sql.endswith(", 256)")
+    assert not any(f in sql for f in L.EXT_HASH_FIELDS)                    # v1_8_002's backfill SQL is unchanged
+    ext = L.hash_sql({**{f: f"x.{f}" for f in L.HASH_FIELDS}, **{f: f"x.{f}" for f in L.EXT_HASH_FIELDS}})
+    assert ext.index("'safety_related_ops_event='") > pos[-1] and ext.index("'derived_citation='") > pos[-1]
+
+
+def test_extension_fields_hash_only_when_set_so_older_events_keep_their_hash():
+    e = history("D1", [L.LIVE])[0]
+    assert L.event_hash(dict(e, safety_related_ops_event=None, derived_citation=None)) == e["event_hash"]
+    f = L.event_hash(dict(e, safety_related_ops_event=False))
+    t = L.event_hash(dict(e, safety_related_ops_event=True))
+    d = L.event_hash(dict(e, safety_related_ops_event=True, derived_citation=CITE))
+    assert len({e["event_hash"], f, t, d}) == 4
+    assert L.hash_input(dict(e, safety_related_ops_event=True, derived_citation=CITE)).endswith(
+        f"safety_related_ops_event=4:true|derived_citation={len(CITE)}:{CITE}|")
+    assert L.EVENT_COLS[-4:] == ("safety_related_ops_event", "derived_citation", "created_ts", "event_hash")
