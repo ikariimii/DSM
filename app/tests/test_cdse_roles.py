@@ -201,3 +201,64 @@ def test_pre_change_chain_still_verifies_and_only_new_records_change(crd, monkey
     v = crd.get("/api/dams/CRD/audit/signoffs/verify", user=ENG).json()
     assert v["ok"] and v["records"] == 5
     assert ac.verify_chain(rows, crd.tc.app.state.store.chain_head("CRD"))["ok"]
+
+
+# ------------------------------------------------------------------ live lookup: ref.v_dam_reviewer_authority only
+class _FakeSql:
+    def __init__(self, rows=None, error=None):
+        self.rows, self.error, self.sql = rows or [], error, []
+
+    def __call__(self, statement, params=None):
+        self.sql.append((statement, params))
+        if self.error:
+            raise self.error
+        return self.rows
+
+
+def _sql_analytics(fake, monkeypatch):
+    from backend.config import Settings
+    from backend.repos import analytics as an_mod
+    a = an_mod.SqlAnalytics(Settings(demo_mode=False, warehouse_id="w", catalog="dam_prod"), "tok")
+    monkeypatch.setattr(a, "q", fake)
+    monkeypatch.setattr(an_mod.SqlAnalytics, "_authority_missing_logged", False)
+    return a
+
+
+def test_live_cdse_lookup_reads_only_the_reviewer_authority_view(monkeypatch):
+    fake = _FakeSql(rows=[{"principal": CDSE}, {"principal": "dam-safety-engineers"}, {"principal": None}])
+    a = _sql_analytics(fake, monkeypatch)
+    assert a.cdse_principals("CRD") == [CDSE, "dam-safety-engineers"]
+    (stmt, params), = fake.sql
+    assert "v_dam_reviewer_authority" in stmt and params == {"dam_id": "CRD"}
+    low = stmt.lower()
+    assert "ref`.`dam`" not in low and ".dam " not in low and "project_membership" not in low and "ref.dam " not in low
+    assert "revoked_ts is null or revoked_ts > current_timestamp()" in low
+    assert "granted_ts is null or granted_ts <= current_timestamp()" in low
+    # a group principal never matches a person
+    class C:
+        user_id, email = f"uid-{ENG}", ENG
+    assert sg.is_cdse(C, "CRD", a) is False
+
+
+def test_live_cdse_lookup_fails_closed_and_logs_once_when_the_view_is_missing(monkeypatch, caplog):
+    import logging
+    err = RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] The table or view `dam_prod`.`ref`.`v_dam_reviewer_authority` "
+                       "cannot be found.")
+    a = _sql_analytics(_FakeSql(error=err), monkeypatch)
+    caplog.set_level(logging.WARNING)
+    assert [a.cdse_principals("CRD") for _ in range(3)] == [[], [], []]
+
+    class C:
+        user_id, email = f"uid-{CDSE}", CDSE
+    assert sg.is_cdse(C, "CRD", a) is False
+    assert len([r for r in caplog.records if "v_dam_reviewer_authority is missing" in r.getMessage()]) == 1
+
+
+def test_live_cdse_lookup_other_errors_fail_closed_in_signoffs(monkeypatch):
+    a = _sql_analytics(_FakeSql(error=RuntimeError("warehouse timeout")), monkeypatch)
+    with pytest.raises(RuntimeError):
+        a.cdse_principals("CRD")
+
+    class C:
+        user_id, email = f"uid-{CDSE}", CDSE
+    assert sg.is_cdse(C, "CRD", a) is False and sg.review_level.__name__ == "review_level"

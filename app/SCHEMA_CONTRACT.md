@@ -17,7 +17,7 @@ reads `DAM_CATALOG` (bundle: `${var.catalog}`); each schema can be overridden (`
 | Object | Use | Adapter |
 |---|---|---|
 | `ref.site`, `ref.structure` | portfolio, drill-down | as-is |
-| `ref.dam` (`dam_id`, `cdse_id` only), `ref.project_membership` (`principal`, `dam_id`, `role`, `revoked_ts`) | who is the dam's CDSE (v1.6 ROLE-LEVEL, §5a); `ref.site` does not expose `cdse_id`, so `ref.dam` is read directly | `cdse_id`, plus active `role = 'CDSE'` rows for exactly that `dam_id` |
+| `ref.v_dam_reviewer_authority` (DA least-privilege view, `sql/ddl/10b`; **UNVERIFIED until the DA commits it**) | who is the dam's CDSE (v1.6 ROLE-LEVEL, §5a). The app reads **only** this view, never `ref.dam` or `ref.project_membership` | `principal` where `dam_id = :dam_id` and the grant is active (`granted_ts` ≤ now < `revoked_ts`, NULL = open). View missing → no one is CDSE (fail closed), logged once |
 | `ref.instrument` ⨝ `ref.calibration` ⨝ `ref.formula` | registry, latest values | `contract.instrument` (`tip_el_m`/`top_el_m`) |
 | `ref.calibration` | versions | `contract.calibration`: `sign_mult`, `offset` are **columns** (§10 Q3); if found in `params` the calibration gets a `calibration_issues` entry and is not approved; `method` ∈ `linear|poly`; `certificate_uri`; `is_retired` never counts as approved |
 | `ref.formula` | verified flag per version | `contract.formula` |
@@ -143,7 +143,7 @@ the flagged rules. Demo: `CRD-IN-1-T1` (level 1) is flagged.
 **CDSE identity (v1.6 ROLE-LEVEL, FERC Ch.14 App K 14-K-4).** The CDSE is a named person, not an app role. A caller is
 the CDSE of dam D when their X-Forwarded-User id or X-Forwarded-Email equals (case-insensitive, trimmed)
 `ref.dam.cdse_id` for D, or the `principal` of an active (`revoked_ts IS NULL`) `ref.project_membership` row with
-`role = 'CDSE'` and `dam_id = D` exactly. `dam_id = '*'` grants and group principals are **not** resolved (the app cannot
+`role = 'CDSE'` and `dam_id = D` exactly, as published by `ref.v_dam_reviewer_authority` (the only object the live app reads for this; demo mode uses seeded data). `dam_id = '*'` grants and group principals are **not** resolved (the app cannot
 expand groups); the lookup fails closed (lookup error → not CDSE). The CDSE of one dam is not the CDSE of another.
 The dam ACL still applies (the CDSE needs viewer+ on the dam). For a level ≥ 2 alarm, everyone else, including dso,
 dam_admin and the platform admin, gets **403 before any write** (no chain record, no ack state, no audit entry), and

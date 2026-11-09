@@ -41,7 +41,8 @@ def reviewer_identity(c: Ctx, request: Request) -> dict:
 
 def cdse_principals(an, dam_id: str) -> frozenset[str]:
     """Principals that ARE the dam's CDSE: ref.dam.cdse_id plus direct ref.project_membership role CDSE grants for
-    exactly this dam (not '*', not group names - those cannot be resolved to a person here). Fails closed: an
+    exactly this dam, read in live mode only through ref.v_dam_reviewer_authority (not '*', not group names - those
+    cannot be resolved to a person here). Fails closed: an
     analytics source without the lookup, or a lookup error, yields no CDSE."""
     fn = getattr(an, "cdse_principals", None)
     if fn is None:

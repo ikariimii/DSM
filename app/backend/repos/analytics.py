@@ -226,13 +226,29 @@ class SqlAnalytics:
     def sites(self):
         return self.q(f"SELECT * FROM {self.t('ref', 'site')} ORDER BY dam_id")
 
+    REVIEWER_AUTHORITY_VIEW = ("ref", "v_dam_reviewer_authority")
+    _authority_missing_logged = False
+
     def cdse_principals(self, dam_id):
-        """ref.dam.cdse_id (the named Chief Dam Safety Engineer, FERC Ch.14 App K 14-K-4) plus active direct
-        ref.project_membership role 'CDSE' grants for exactly this dam. ref.site does not expose cdse_id, so ref.dam is
-        read directly (as the user, OBO, like every analytics read). '*' and group principals are not resolved."""
-        rows = self.q(f"SELECT cdse_id AS principal FROM {self.t('ref', 'dam')} WHERE dam_id = :dam_id "
-                      f"UNION SELECT principal FROM {self.t('ref', 'project_membership')} WHERE dam_id = :dam_id "
-                      "AND upper(role) = 'CDSE' AND revoked_ts IS NULL", {"dam_id": dam_id})
+        """Who is the dam's CDSE, read ONLY from the DA's least-privilege view ref.v_dam_reviewer_authority
+        (dam_id, cdse_id, principal, authority_source DAM_CDSE_ID | MEMBERSHIP_CDSE, granted_ts, revoked_ts; per-dam
+        row filter, SELECT granted to dam-<id>-members; sql/ddl/10b, UNVERIFIED until the DA commits it). The app
+        never reads ref.dam or ref.project_membership. Active grants only (granted_ts <= now < revoked_ts). The view
+        already excludes '*' and non-CDSE roles; group principals never match a person. If the view is missing,
+        nobody is CDSE (fail closed), logged once; any other error propagates (signoffs.cdse_principals fails closed)."""
+        layer, name = self.REVIEWER_AUTHORITY_VIEW
+        try:
+            rows = self.q(f"SELECT principal FROM {self.t(layer, name)} WHERE dam_id = :dam_id "
+                          "AND (granted_ts IS NULL OR granted_ts <= current_timestamp()) "
+                          "AND (revoked_ts IS NULL OR revoked_ts > current_timestamp())", {"dam_id": dam_id})
+        except Exception as e:  # noqa: BLE001
+            if not _is_missing_object(e):
+                raise
+            if not SqlAnalytics._authority_missing_logged:
+                SqlAnalytics._authority_missing_logged = True
+                log.warning("%s.%s is missing (%s): no one is CDSE until the DA deploys it (fail closed)",
+                            layer, name, type(e).__name__)
+            return []
         return [r["principal"] for r in rows if r.get("principal")]
 
     def structures(self, dam_id):
@@ -372,3 +388,9 @@ def _norm(row: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _is_missing_object(e: Exception) -> bool:
+    """A Databricks SQL 'table or view not found' error (older schema without the object)."""
+    m = str(e)
+    return "TABLE_OR_VIEW_NOT_FOUND" in m or "cannot be found" in m or "does not exist" in m
