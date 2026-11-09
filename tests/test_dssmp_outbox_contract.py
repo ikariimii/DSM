@@ -45,8 +45,9 @@ def test_columns_match_the_app_ddl_the_app_insert_and_001():
     assert "rejected_invalid" not in lb_ddl
     app_vals = set(re.findall(r"'(\w+)'", re.search(r"status TEXT NOT NULL CHECK \(status IN \(([^)]*)\)\)",
                                                      app_ddl).group(1)))
-    # the app drops 'rejected_invalid' in step (its CHECK may still list it until then; never anything else)
-    assert {"pending", "loaded", "rejected"} <= app_vals <= {"pending", "loaded", "rejected", "rejected_invalid"}
+    # App Dev 18aecfe dropped 'rejected_invalid' app-side: the app's CHECK is exactly the 3-value form
+    assert app_vals == {"pending", "loaded", "rejected"}
+    assert "CHECK (status IN ('pending', 'loaded', 'rejected'))" in app_ddl and "rejected_invalid" not in app_ddl
     assert "document_sha256 TEXT NOT NULL" in lb_ddl
 
 

@@ -115,3 +115,21 @@ def test_upgrade_from_6709371_maps_rejected_invalid_and_down_restores_without_da
     assert len(_psql(conn, "-c", "SELECT outbox_id FROM dam_app.dam_cdse_outbox").stdout.split()) == 4
     assert _psql(conn, "-f", MIG).returncode == 0 and len(_checks(conn)) == 1
     assert _psql(conn, "-f", DDL, env_extra=opts).returncode == 0 and len(_checks(conn)) == 1
+
+
+def test_the_app_ddl_and_its_legacy_warning_match_the_3_value_form_and_the_real_migration_names():
+    """App Dev 18aecfe: both outbox CHECKs in state.py are exactly pending|loaded|rejected, and the startup warning for
+    an old CHECK names the DA migrations that converge it; those files must exist under these exact names."""
+    st = open(os.path.join(ROOT, "app", "backend", "repos", "state.py")).read()
+    for t in ("dssmp_registration_outbox", "dam_cdse_outbox"):
+        ddl = re.search(r'"""(CREATE TABLE IF NOT EXISTS \{s\}' + t + r' \(.*?\))"""', st, re.S).group(1)
+        vals = re.findall(r"CHECK \(status IN \(([^)]*)\)\)", ddl)
+        assert [set(re.findall(r"'(\w+)'", v)) for v in vals] == [{"pending", "loaded", "rejected"}], (t, vals)
+    assert 'OUTBOX_STATUSES = ("pending", "loaded", "rejected")' in st
+    names = dict(re.findall(r'\("(\w+)", "(v1_7_\d{3}_\w+\.sql)"\)', st))
+    assert names == {"dssmp_registration_outbox": "v1_7_004_dssmp_outbox_contract.sql",
+                     "dam_cdse_outbox": "v1_7_008_cdse_outbox_status.sql"}, names
+    for f in names.values():
+        assert os.path.isfile(os.path.join(ROOT, "lakebase", "migrations", f)), f
+    assert re.search(r"ck_dam_cdse_outbox_status\s+CHECK \(status IN \('pending', 'loaded', 'rejected'\)\)", open(
+        os.path.join(ROOT, "lakebase", "migrations", "v1_7_008_cdse_outbox_status.sql")).read())
