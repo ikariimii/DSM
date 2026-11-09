@@ -34,7 +34,10 @@ ACTION_TYPES = ("bias_review", "data_correction_review", "alarm_ack", "alarm_clo
 # ck_review_record_subject_decision and the engine's ACTION_TYPES must add them before the extract carries these rows
 # (SCHEMA_CONTRACT §7 item 13).
 RULE_FLAG_ACTION_TYPES = ("alarm_rule_flag_propose", "alarm_rule_flag_apply", "alarm_rule_flag_reject")
-APP_ACTION_TYPES = ACTION_TYPES + RULE_FLAG_ACTION_TYPES
+# v1.7 DSSMP version registration (subject_type 'dssmp_version', decisions propose | approve | reject). The DA's UC
+# CHECKs and the engine's action types must add them before the extract carries these rows (SCHEMA_CONTRACT §7 19).
+DSSMP_ACTION_TYPES = ("dssmp_version_propose", "dssmp_version_approve", "dssmp_version_reject")
+APP_ACTION_TYPES = ACTION_TYPES + RULE_FLAG_ACTION_TYPES + DSSMP_ACTION_TYPES
 HASH_EXCLUDED = ("record_hash", "signature", "sig_alg", "key_id")
 CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
                 "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",

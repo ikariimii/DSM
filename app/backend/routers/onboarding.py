@@ -122,11 +122,20 @@ def check_formulas(draft_id: str, c: Ctx = Depends(ctx), st=Depends(store), an=D
     return {"checks": checks}
 
 
+def _dssmp_issues(st, an, data: dict) -> list[dict]:
+    """ref.dssmp_version check (fail closed): every threshold's version, and the dam itself, must have an approved,
+    loaded, non-superseded DSSMP version; not-found ids are explained from the app's registration / outbox rows."""
+    dam_id = (data.get("details") or {}).get("dam_id")
+    regs = st.dssmp_registrations(dam_id) if dam_id else []
+    return ob.dssmp_issues(data, an.dssmp_versions, an.dssmp_versions_for_dam, registrations=regs,
+                           outbox=st.dssmp_outbox(dam_id) if dam_id else [])
+
+
 @router.post("/drafts/{draft_id}/validate")
 def validate(draft_id: str, c: Ctx = Depends(ctx), st=Depends(store), an=Depends(analytics)):
     d = _draft(st, c, draft_id)
     issues = ob.validate(d["data"], {s["dam_id"] for s in an.sites()}, an.formulas())
-    issues += ob.dssmp_issues(d["data"], an.dssmp_versions)      # ref.dssmp_version, same dam (fail closed)
+    issues += _dssmp_issues(st, an, d["data"])
     errors = [i for i in issues if i["severity"] == "error"]
     return {"ok": not errors, "errors": len(errors), "warnings": len(issues) - len(errors), "issues": issues}
 
@@ -139,7 +148,7 @@ def golive(draft_id: str, request: Request, c: Ctx = Depends(ctx), st=Depends(st
     if d["status"] != "draft":
         raise HTTPException(409, f"Draft is {d['status']}")
     issues = ob.validate(d["data"], {s["dam_id"] for s in an.sites()}, an.formulas())
-    issues += ob.dssmp_issues(d["data"], an.dssmp_versions)      # ref.dssmp_version, same dam (fail closed)
+    issues += _dssmp_issues(st, an, d["data"])
     if any(i["severity"] == "error" for i in issues):
         raise HTTPException(422, {"message": "Validation errors", "issues": issues})
     payload = ob.golive_payload(d["data"])

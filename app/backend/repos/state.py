@@ -81,6 +81,31 @@ DDL = [
     """CREATE TABLE IF NOT EXISTS {s}ref_change_publication (
         pub_id TEXT PRIMARY KEY, kind TEXT NOT NULL, dam_id TEXT NOT NULL, proposal_id TEXT, payload TEXT NOT NULL,
         requested_by TEXT NOT NULL, requested_at TEXT NOT NULL, status TEXT NOT NULL, applied_at TEXT, message TEXT)""",
+    # v1.7 DSSMP version registration (SCHEMA_CONTRACT §7 item 19). Workflow state (the chained dssmp_version_* records
+    # are the evidence), uploaded documents (bytes as base64 text + server-computed sha256), and the outbox the DA's
+    # load job turns into a ref.dssmp_version row. The app NEVER writes ref.dssmp_version.
+    """CREATE TABLE IF NOT EXISTS {s}dssmp_registration (
+        registration_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, dssmp_version_id TEXT NOT NULL,
+        version_no INTEGER NOT NULL, effective_from TEXT NOT NULL, change_reason TEXT NOT NULL, source_ref TEXT NOT NULL,
+        document_uri TEXT NOT NULL, document_sha256 TEXT, document_id TEXT,
+        proposed_by TEXT NOT NULL, proposed_by_id TEXT, proposed_at TEXT NOT NULL,
+        rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+        decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, outbox_id TEXT,
+        approval_record_hash TEXT)""",
+    """CREATE TABLE IF NOT EXISTS {s}dssmp_document (
+        document_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, filename TEXT NOT NULL, content_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, content_b64 TEXT NOT NULL, uploaded_by TEXT NOT NULL,
+        uploaded_at TEXT NOT NULL)""",
+    # DA contract (fixed): the app INSERTs at 'pending' only after CDSE approval; only the DA publisher role sets
+    # status / reason_code / message / processed_at. 'rejected_invalid' is accepted as the DA's rejection spelling.
+    """CREATE TABLE IF NOT EXISTS {s}dssmp_registration_outbox (
+        outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, dssmp_version_id TEXT NOT NULL, version_no INTEGER NOT NULL,
+        effective_from TEXT NOT NULL, change_reason TEXT, source_ref TEXT, document_uri TEXT, document_sha256 TEXT,
+        proposed_by TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL,
+        approval_record_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        reason_code TEXT, message TEXT, processed_at TEXT)""",
     # chain head: the serialization point for appends (row lock / sqlite write lock) and the tail anchor that makes a
     # deleted LAST record detectable. Updated only inside the append transaction.
     """CREATE TABLE IF NOT EXISTS {s}review_chain_head (
@@ -88,6 +113,9 @@ DDL = [
 ]
 
 APPEND_ONLY = ("review_signoff",)
+# Outbox rows are immutable except the publisher's bookkeeping columns (DA contract); DELETE / TRUNCATE refused.
+OUTBOX_GUARDED = ("dssmp_registration_outbox",)
+OUTBOX_MUTABLE_COLS = ("status", "reason_code", "message", "processed_at")
 # QA-045c: transaction-scoped advisory lock key shared with ../lakebase/001_app_schema.sql, so app inits and the
 # data-layer script serialize against each other and no session ever sees an append-only table without its guard.
 INIT_LOCK_KEY = 4702045
@@ -246,6 +274,7 @@ class StateStore:
         else:
             self.execute("ALTER TABLE {s}app_user ADD COLUMN IF NOT EXISTS user_id TEXT")
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON {s}app_user (user_id)")
+        self._outbox_guards()
         if self.kind == "sqlite":
             have = {r["name"] for r in self.execute("PRAGMA table_info(review_signoff)")}
             for col in SIGNOFF_V2_COLS:
@@ -292,6 +321,98 @@ class StateStore:
                 # FOR EACH STATEMENT (PG 17 docs, CREATE TRIGGER). sqlite has no TRUNCATE.
                 self.execute(f"CREATE OR REPLACE TRIGGER t_app_notrunc_{t} BEFORE TRUNCATE ON {{s}}{t} "
                              "FOR EACH STATEMENT EXECUTE FUNCTION {s}app_forbid_mutation()")
+
+    def _outbox_guards(self) -> None:
+        """DSSMP outbox (DA contract): rows are immutable except the publisher's bookkeeping columns, and never deleted
+        or truncated. Enforced in the database for every role (the app included). If the DA takes ownership of the
+        table (owner model) its guards are the DA's to provision; the app then runs no DDL on it."""
+        keep = OUTBOX_MUTABLE_COLS
+        for t in OUTBOX_GUARDED:
+            if self.kind == "sqlite":
+                cols = [r["name"] for r in self.execute(f"PRAGMA table_info({t})") if r["name"] not in keep]
+                self.execute(f"CREATE TRIGGER IF NOT EXISTS t_noupd_{t} BEFORE UPDATE OF {', '.join(cols)} ON {t} "
+                             f"BEGIN SELECT RAISE(ABORT, '{t}: only status/reason_code/message/processed_at change'); END")
+                self.execute(f"CREATE TRIGGER IF NOT EXISTS t_nodelete_{t} BEFORE DELETE ON {t} "
+                             f"BEGIN SELECT RAISE(ABORT, '{t} rows are never deleted'); END")
+                continue
+            if self._pg_not_owned(t):
+                continue
+            arr = "ARRAY[" + ", ".join(f"'{c}'" for c in keep) + "]"
+            self.execute("CREATE OR REPLACE FUNCTION {s}app_outbox_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
+                         "IF TG_OP IN ('DELETE', 'TRUNCATE') THEN "
+                         "RAISE EXCEPTION USING MESSAGE = TG_TABLE_NAME || ' rows are never deleted'; END IF; "
+                         f"IF (to_jsonb(NEW) - {arr}) IS DISTINCT FROM (to_jsonb(OLD) - {arr}) THEN "
+                         "RAISE EXCEPTION USING MESSAGE = TG_TABLE_NAME || "
+                         "': only status/reason_code/message/processed_at change'; END IF; RETURN NEW; END $$")
+            self.execute(f"CREATE OR REPLACE TRIGGER t_app_outbox_row_{t} BEFORE UPDATE OR DELETE ON {{s}}{t} "
+                         "FOR EACH ROW EXECUTE FUNCTION {s}app_outbox_guard()")
+            self.execute(f"CREATE OR REPLACE TRIGGER t_app_outbox_trunc_{t} BEFORE TRUNCATE ON {{s}}{t} "
+                         "FOR EACH STATEMENT EXECUTE FUNCTION {s}app_outbox_guard()")
+
+    # ------------------------------------------------------------ DSSMP version registration (v1.7)
+    def insert_dssmp_document(self, row: dict) -> None:
+        cols = list(row)
+        self.execute(f"INSERT INTO {{s}}dssmp_document ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+                     tuple(row[c] for c in cols))
+
+    def dssmp_document(self, document_id: str, content: bool = False) -> dict | None:
+        sel = "*" if content else ("document_id, dam_id, filename, content_type, size_bytes, sha256, uploaded_by, "
+                                   "uploaded_at")
+        rows = self.execute(f"SELECT {sel} FROM {{s}}dssmp_document WHERE document_id = %s", (document_id,))
+        return dict(rows[0]) if rows else None
+
+    @staticmethod
+    def insert_row(q, table: str, row: dict) -> None:
+        cols = list(row)
+        q(f"INSERT INTO {{s}}{table} ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+          tuple(row[c] for c in cols))
+
+    def insert_dssmp_registration(self, q, row: dict) -> None:
+        self.insert_row(q, "dssmp_registration", row)
+
+    def dssmp_registration(self, registration_id: str) -> dict | None:
+        rows = self.execute("SELECT * FROM {s}dssmp_registration WHERE registration_id = %s", (registration_id,))
+        return dict(rows[0]) if rows else None
+
+    def dssmp_registrations(self, dam_id: str | None = None, status: str | None = None) -> list[dict]:
+        where, args = [], []
+        if dam_id is not None:
+            where.append("dam_id = %s"); args.append(dam_id)
+        if status is not None:
+            where.append("status = %s"); args.append(status)
+        sql = "SELECT * FROM {s}dssmp_registration" + (" WHERE " + " AND ".join(where) if where else "")
+        return [dict(r) for r in self.execute(sql + " ORDER BY proposed_at DESC, registration_id", tuple(args))]
+
+    @staticmethod
+    def decide_dssmp_registration(q, registration_id: str, status: str, by: str, by_id: str | None, at: str,
+                                  rationale: str, outbox_id: str | None = None,
+                                  approval_record_hash: str | None = None) -> None:
+        n = q("UPDATE {s}dssmp_registration SET status = %s, decided_by = %s, decided_by_id = %s, decided_at = %s, "
+              "decision_rationale = %s, outbox_id = %s, approval_record_hash = %s "
+              "WHERE registration_id = %s AND status = 'pending' RETURNING registration_id",
+              (status, by, by_id, at, rationale, outbox_id, approval_record_hash, registration_id))
+        if not n:  # decided concurrently: abort the whole transaction (chain record included)
+            raise RuntimeError("registration is no longer pending")
+
+    def insert_dssmp_outbox(self, q, row: dict) -> None:
+        assert row["status"] == "pending", "the app only ever inserts pending outbox rows"
+        self.insert_row(q, "dssmp_registration_outbox", row)
+
+    def dssmp_outbox(self, dam_id: str | None = None, outbox_id: str | None = None) -> list[dict]:
+        where, args = [], []
+        if dam_id is not None:
+            where.append("dam_id = %s"); args.append(dam_id)
+        if outbox_id is not None:
+            where.append("outbox_id = %s"); args.append(outbox_id)
+        sql = "SELECT * FROM {s}dssmp_registration_outbox" + (" WHERE " + " AND ".join(where) if where else "")
+        return [dict(r) for r in self.execute(sql + " ORDER BY approved_at, outbox_id", tuple(args))]
+
+    def demo_publish_outbox(self, outbox_id: str, status: str, reason_code: str | None, message: str | None) -> None:
+        """DEMO ONLY stand-in for the DA's publisher role: sets the bookkeeping columns, nothing else (the guard
+        triggers refuse any other column). Never called outside demo mode."""
+        self.execute("UPDATE {s}dssmp_registration_outbox SET status = %s, reason_code = %s, message = %s, "
+                     "processed_at = %s WHERE outbox_id = %s AND status = 'pending'",
+                     (status, reason_code, message, now_iso(), outbox_id))
 
     # ------------------------------------------------------------ users & roles
     def resolve_user(self, user_id: str, email: str) -> dict | None:
@@ -541,7 +662,7 @@ class StateStore:
                     "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
                     "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role", "canon_version")
 
-    def append_chained(self, chain_id: str, genesis: str, finalize, also=None) -> dict:
+    def append_chained(self, chain_id: str, genesis: str, finalize, also=None, also_row=None) -> dict:
         """Append one record to `chain_id` atomically. Under the chain-head lock (Postgres: SELECT ... FOR UPDATE on
         review_chain_head; sqlite: the BEGIN IMMEDIATE write lock) read (seq, head_hash), call
         finalize(seq + 1, head_hash) -> complete row, INSERT it, advance the head, then run also(q) (e.g. the alarm
@@ -561,6 +682,8 @@ class StateStore:
               (row["chain_seq"], row["record_hash"], now_iso(), chain_id))
             if also is not None:
                 also(q)
+            if also_row is not None:  # needs the finalized record (e.g. its record_hash) in the same transaction
+                also_row(q, row)
         return dict(row)
 
     def chain_rows(self, chain_id: str) -> list[dict]:

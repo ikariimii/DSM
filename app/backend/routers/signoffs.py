@@ -86,12 +86,12 @@ def actor_app_role(c: Ctx, dam_id: str, an) -> str:
     return ",".join(sorted(roles))
 
 
-def append(st, request: Request, base: dict, also=None, *, c: Ctx, an) -> dict:
+def append(st, request: Request, base: dict, also=None, *, c: Ctx, an, also_row=None) -> dict:
     """Append one canon-2 record: actor_app_role and canon_version are set HERE from the server-side identity,
     overriding anything in `base` (which is itself built server-side; request bodies never carry them)."""
     signer = getattr(request.app.state, "signer", None) or ac.NoopSigner()
     base = {**base, ac.ACTOR_ROLE_FIELD: actor_app_role(c, base["dam_id"], an), ac.CANON_FIELD: ac.CANON_VERSION}
-    return st.append_chained(base["dam_id"], ac.GENESIS, ac.finalizer(base, signer), also)
+    return st.append_chained(base["dam_id"], ac.GENESIS, ac.finalizer(base, signer), also, also_row=also_row)
 
 
 def _verify(st, request: Request, chain_id: str) -> dict:

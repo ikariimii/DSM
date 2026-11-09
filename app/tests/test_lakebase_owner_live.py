@@ -92,10 +92,12 @@ def test_owner_model_startup_runs_no_owner_ddl(lakebase, monkeypatch):
     pool.close()
     ddl = [q for q in seen if q.lstrip().upper().startswith(("ALTER", "CREATE", "DROP", "GRANT", "REVOKE", "COMMENT"))]
     owner_objects = ("review_signoff", "exceedance_status", "manual_reading", "extract_watermark", "forbid_mutation",
-                     "CREATE SCHEMA", "TRIGGER")
+                     "CREATE SCHEMA")
     assert not [q for q in ddl if any(o in q for o in owner_objects) and not q.lstrip().upper().startswith(
         "CREATE TABLE IF NOT EXISTS")], ddl
     assert not [q for q in ddl if "review_signoff" in q and not q.lstrip().upper().startswith("CREATE TABLE IF NOT EXISTS")]
+    # the only trigger DDL is the app's own guard on its app-owned DSSMP outbox (v1.7), never an owner table
+    assert {q.split(" ON ")[1].split()[0] for q in ddl if q.lstrip().upper().startswith(("CREATE TRIGGER", "CREATE OR REPLACE TRIGGER"))} <= {"{s}dssmp_registration_outbox"}
 
 
 def test_append_verify_and_guards_as_app_role(lakebase):

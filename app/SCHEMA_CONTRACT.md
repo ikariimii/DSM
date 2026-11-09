@@ -633,12 +633,77 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       error in validate and go-live returns 422.
     - **Flag-apply N+1:** the copied id is re-checked. Otherwise 409, nothing recorded.
     - An unreadable table fails closed: "cannot be verified".
-    - `status` (draft / approved / superseded) is NOT judged. Open question for Genie/DA: should a superseded or
-      draft DSSMP version be refused?
-    - **Workflow consequence:** a NEW dam's DSSMP version must exist in `ref.dssmp_version` before go-live. The
-      wizard does not create it. DA: who registers it? Options: the data layer before go-live, or the go-live
-      payload carrying a `dssmp_versions` row for the publisher.
+    - **v1.7: status IS judged (DA contract, reason codes).** `dssmp_not_found`, `dssmp_other_dam`, `dssmp_draft`
+      (status 'draft') and `dssmp_superseded` (status 'superseded' OR `effective_to <= now`, now = the go-live /
+      apply time), plus the DA publisher's `dssmp_not_yet_effective` (effective_from > now) and
+      `dssmp_status_unknown` (any other status). Same order as `src/dam_safety/dssmp_check.dssmp_problem` (e551a88).
+      App-only fail-closed code: `dssmp_unverifiable` (table unreadable). The DA's `dssmp_missing` is the app's
+      NOT NULL check (item 15). Issues carry a `code` field; messages
+      start with the code. The read now selects `dssmp_version_id, dam_id, version_no, effective_from, effective_to,
+      status`, plus `Analytics.dssmp_versions_for_dam(dam_id)`: go-live also needs the DAM to have at least one
+      approved, non-superseded version (step `dssmp`), even with no thresholds.
+    - **Flag-apply N+1 uses the same codes (409).** Consequence: once the DA load job supersedes a dam's DSSMP
+      version, flag edits on rules still set under the old version are refused (`dssmp_superseded`) until the DA
+      re-versions those rules under the new DSSMP. Open question for Genie/DA: intended?
+    - **Workflow:** answered by item 19 (wizard registration → CDSE approval → outbox → DA load job).
     - **Demo:** the seed has `DSSMP-<dam>-2026` (approved) for each dam. Tests register `DSSMP-NEW-2026` for the
       onboarded dam.
     - **Grant:** the app's users need SELECT on `ref.dssmp_version` (the reads are OBO). The DA's publisher checks
       it too.
+19. **DSSMP version registration (v1.7; wizard step 2 `dssmp`; DA contract fixed).** The app NEVER writes
+    `ref.dssmp_version`.
+    - **Flow:** a dam_admin of the dam or a platform admin proposes. The dam's CDSE (`ref.v_dam_reviewer_authority`,
+      fail closed) approves or rejects, with a rationale (422 without). Each step appends ONE canon-2 chain record
+      atomically with the workflow change: `action_type` `dssmp_version_propose` / `dssmp_version_approve` /
+      `dssmp_version_reject`, `decision` propose / approve / reject, `subject_type` `dssmp_version`, `subject_id` =
+      `dssmp_version_id`. `original_value` / `corrected_value` carry the registration snapshot. **DA:** add the 3
+      action types and the subject type to the UC CHECKs and the engine's action types.
+    - **On approve, in the same transaction:** ONE row is inserted into the outbox at `pending`, with
+      `approval_record_hash` = the approve record's `record_hash`.
+    - **Final table name: `dam_app.dssmp_registration_outbox`** (Lakebase schema `dam_app`; app tables are
+      unprefixed). Columns exactly as agreed: `outbox_id` (TEXT, `DSO-<uuid>`), `dam_id`, `dssmp_version_id`,
+      `version_no` INTEGER, `effective_from` (TEXT ISO UTC `YYYY-MM-DDTHH:MM:SSZ`), `change_reason`, `source_ref`,
+      `document_uri`, `document_sha256`, `proposed_by`, `approved_by` (emails), `approved_at` (ISO UTC),
+      `approval_record_hash`, `status`, `reason_code`, `message`, `processed_at`.
+    - **Status CHECK:** `status IN ('pending','loaded','rejected','rejected_invalid')`. The contract says both
+      `rejected` (outbox) and `rejected_invalid` (publisher rows). Both are accepted and shown as rejections; DA:
+      confirm one spelling.
+    - **Guards (app-side, while the app owns the table):** triggers refuse DELETE/TRUNCATE and any UPDATE that
+      changes a column other than `status, reason_code, message, processed_at`. The app inserts only and never
+      updates (demo mode excepted: a stand-in loader sets the bookkeeping columns).
+    - **DA decisions to provision:**
+      - a new NOLOGIN publisher role with SELECT and column-level `UPDATE (status, reason_code, message,
+        processed_at)` on the outbox;
+      - default SELECT for the extract;
+      - SELECT on `ref.dssmp_version` for app users (OBO reads).
+      If the DA moves the outbox to `dam_lakebase_owner`, the app needs INSERT+SELECT only. The app then skips its
+      guard DDL (`_pg_not_owned`) and the DA owns the guards.
+    - **Load job (DA):** inserts `ref.dssmp_version` (status approved, `loaded_from_outbox_id`, v1_7_003 columns),
+      closes the dam's previous approved version, and sets outbox `loaded` or `rejected_invalid` + `reason_code` +
+      `message`. The UI shows the rejection reason_code/message on the wizard step and the CDSE panel.
+    - **Go-live:** the version must be LOADED in `ref.dssmp_version` as approved and not superseded.
+      **Approved-but-not-loaded fails closed** (`dssmp_not_found`, with the message naming the pending/rejected
+      outbox row).
+    - **Workflow table** `dam_app.dssmp_registration` (app-owned, mutable: pending → approved | rejected; one open
+      registration per id). **Document table** `dam_app.dssmp_document`: bytes as base64 TEXT, at most 20 MB,
+      sha256 computed by the server. An uploaded document's `document_uri` is
+      `lakebase:dam_app.dssmp_document/<document_id>`. DA: does the load job copy it to a UC volume, or keep this
+      URI?
+    - **API:**
+      - `POST /api/dams/{dam}/dssmp-documents` `{filename, content_type, content_b64}` → `{document_id, sha256,
+        size_bytes, document_uri}` (proposers only; 413 above the limit);
+      - `GET .../dssmp-documents/{id}` (viewer / CDSE; header `X-Content-SHA256`);
+      - `GET /api/dams/{dam}/dssmp-registrations` → registrations + outbox + ref state, `can_propose`, `can_decide`,
+        `approval_policy`;
+      - `POST /api/dams/{dam}/dssmp-registrations` `{dssmp_version_id, version_no, effective_from, change_reason,
+        source_ref, document_uri [+document_sha256] | document_id, rationale}`: 409 `dssmp_exists` /
+        `dssmp_other_dam` if the id is already in ref, `dssmp_unverifiable` if ref is unreadable;
+      - `POST .../{registration_id}/approve` and `/reject` `{rationale}`;
+      - `GET /api/dssmp-registrations/pending` (the caller's CDSE queue).
+    - **Not collected:** a separate title or revision date (the DA contract has no columns for them; `version_no`
+      and `effective_from` cover them). The `rationale` is chain-only.
+    - **Self-approval (PROVISIONAL):** follows the same `CDSE_FLAG_REQUIRE_SECOND_APPROVER` switch. When on, the
+      proposer can never approve (403 `self_approval_forbidden`) and can only reject. The setting is NOT written to
+      the chain (DA request).
+    - **New dams:** before go-live the dam has no stored app roles, so a platform admin proposes. The DA must expose
+      the new dam's CDSE in `ref.v_dam_reviewer_authority` BEFORE go-live, or nobody can approve (fail closed).

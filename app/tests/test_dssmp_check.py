@@ -20,7 +20,8 @@ def _boom(ids):
 
 # ------------------------------------------------------------------ pure check
 def test_problems_unknown_other_dam_and_ok():
-    rows = [{"dssmp_version_id": "D-A", "dam_id": "A"}, {"dssmp_version_id": "D-B", "dam_id": "B"}]
+    rows = [{"dssmp_version_id": "D-A", "dam_id": "A", "status": "approved"},
+            {"dssmp_version_id": "D-B", "dam_id": "B", "status": "approved"}]
     look = lambda ids: [r for r in rows if r["dssmp_version_id"] in ids]  # noqa: E731
     assert ob.dssmp_problems(look, "A", ["D-A", " D-A "]) == {}
     p = ob.dssmp_problems(look, "A", ["D-A", "D-B", "D-X"])
@@ -47,7 +48,9 @@ def test_go_live_refused_when_dssmp_version_not_registered(c):
     assert not v["ok"] and any("DSSMP-NEW-2026 does not exist" in i["message"] for i in v["issues"])
     r = c.post(f"/api/onboarding/drafts/{did}/golive")
     assert r.status_code == 422
-    assert {i["step"] for i in r.json()["detail"]["issues"] if "dssmp" in i["message"]} == {"thresholds"}
+    bad = [i for i in r.json()["detail"]["issues"] if "dssmp" in i["message"]]
+    assert {i["step"] for i in bad} == {"thresholds", "dssmp"}       # each threshold + the dam has no approved version
+    assert {i["code"] for i in bad} == {"dssmp_not_found"} and any("register it" in i["message"] for i in bad)
     assert "NEW" not in [x["dam_id"] for x in c.get("/api/portfolio").json()["dams"]]
     register_dssmp(c)
     assert c.post(f"/api/onboarding/drafts/{did}/golive").status_code == 200

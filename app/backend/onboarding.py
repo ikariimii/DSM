@@ -13,9 +13,10 @@ from . import formulas as fx
 from .repos import contract as ct
 from .repos.state import ROLE_RANK
 
-STEPS = ("details", "structures", "instruments", "calibrations", "formulas", "thresholds",
+# 'dssmp' (v1.7) is an action step like 'formulas': its registrations live in dssmp_registration, not the draft data
+STEPS = ("details", "dssmp", "structures", "instruments", "calibrations", "formulas", "thresholds",
          "data_sources", "users", "validate", "golive")
-EDITABLE = STEPS[:8]
+EDITABLE = ("details", "structures", "instruments", "calibrations", "formulas", "thresholds", "data_sources", "users")
 HAZARD = ("High", "Significant", "Low")
 ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,31}$")
 DAM_RE = re.compile(r"^[A-Z0-9]{2,8}$")
@@ -45,8 +46,11 @@ METHOD_FORMULAS = ("VW_PIEZO",)  # linear (G) or polynomial (A, B) per calibrati
 SOURCE_TYPES = ("logger_file", "manual", "api", "survey_file")
 
 
-def issue(step: str, severity: str, msg: str, ref: str | None = None) -> dict:
-    return {"step": step, "severity": severity, "message": msg, "ref": ref}
+def issue(step: str, severity: str, msg: str, ref: str | None = None, code: str | None = None) -> dict:
+    out = {"step": step, "severity": severity, "message": msg, "ref": ref}
+    if code:
+        out["code"] = code
+    return out
 
 
 def _num(v):
@@ -387,38 +391,132 @@ def cdse_flag_changes(old_rules: list[dict] | None, new_rules: list[dict] | None
     return out
 
 
-def dssmp_problems(lookup, dam_id: str, ids) -> dict[str, str]:
-    """{dssmp_version_id: problem} for ids that are NOT a ref.dssmp_version row of `dam_id` (fail closed): unknown id,
-    an id belonging to another dam, or the lookup itself failing (every id is then unverifiable). `lookup(ids)` returns
-    ref.dssmp_version rows (analytics.dssmp_versions). Status (draft/approved/superseded) is not judged here."""
+# DSSMP version check (SCHEMA_CONTRACT §7 items 18/19). Reason codes are the DA publisher's (fixed contract):
+#   dssmp_not_found   no ref.dssmp_version row with that id (incl. approved in the app but not yet loaded by the DA)
+#   dssmp_other_dam   the row belongs to another dam
+#   dssmp_draft       status = 'draft'
+#   dssmp_superseded  status = 'superseded' OR effective_to <= now (the publish / go-live time)
+#   dssmp_not_yet_effective  effective_from after now       dssmp_status_unknown  any other status (DA e551a88)
+# App-only code (fail closed, no DA equivalent): dssmp_unverifiable (ref.dssmp_version unreadable / bad timestamp).
+DSSMP_OK_STATUS = "approved"
+
+
+def _ts(v):
+    if v in (None, ""):
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    t = datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def dssmp_row_problem(r: dict, dam_id: str, now: datetime) -> tuple[str, str] | None:
+    """(code, message) if this ref.dssmp_version row cannot govern `dam_id` at `now`; None if it can. Same codes and
+    order as the DA publisher (src/dam_safety/dssmp_check.dssmp_problem, e551a88; publisher semantics)."""
+    i = r.get("dssmp_version_id")
+    if r.get("dam_id") != dam_id:
+        return "dssmp_other_dam", f"dssmp_version_id {i} belongs to dam {r.get('dam_id')}, not {dam_id}"
+    status = str(r.get("status") or "").strip().lower()
+    if status == "draft":
+        return "dssmp_draft", f"dssmp_version_id {i} is still a draft in ref.dssmp_version (not approved)"
+    if status not in ("approved", "superseded"):
+        return "dssmp_status_unknown", f"dssmp_version_id {i} has status {r.get('status')!r}"
+    try:
+        frm, ends = _ts(r.get("effective_from")), _ts(r.get("effective_to"))
+    except (TypeError, ValueError):
+        return "dssmp_unverifiable", f"dssmp_version_id {i} has an unreadable effective_from / effective_to"
+    if status == "superseded" or (ends is not None and ends <= now):
+        why = "status superseded" if status == "superseded" else f"effective_to {r.get('effective_to')} has passed"
+        return "dssmp_superseded", f"dssmp_version_id {i} is superseded ({why})"
+    if frm is not None and frm > now:
+        return "dssmp_not_yet_effective", f"dssmp_version_id {i} takes effect {r.get('effective_from')}, after now"
+    return None
+
+
+def dssmp_findings(lookup, dam_id: str, ids, now: datetime | None = None) -> dict[str, dict]:
+    """{dssmp_version_id: {"code", "message"}} for ids that cannot govern `dam_id` now (fail closed). `lookup(ids)`
+    returns ref.dssmp_version rows (analytics.dssmp_versions); a failing lookup makes every id unverifiable."""
+    now = now or datetime.now(timezone.utc)
     ids = sorted({str(i).strip() for i in ids if i is not None and str(i).strip()})
     if not ids:
         return {}
     try:
         rows = lookup(ids)
     except Exception as e:  # noqa: BLE001 - unreadable ref.dssmp_version: refuse rather than publish unchecked
-        return {i: f"dssmp_version_id {i} cannot be verified: ref.dssmp_version unreadable ({type(e).__name__})"
-                for i in ids}
-    dams: dict[str, set] = {}
+        return {i: {"code": "dssmp_unverifiable", "message": f"dssmp_version_id {i} cannot be verified: "
+                    f"ref.dssmp_version unreadable ({type(e).__name__})"} for i in ids}
+    by: dict[str, list[dict]] = {}
     for r in rows or []:
-        dams.setdefault(str(r.get("dssmp_version_id")), set()).add(r.get("dam_id"))
+        by.setdefault(str(r.get("dssmp_version_id")), []).append(r)
     out = {}
     for i in ids:
-        if i not in dams:
-            out[i] = f"dssmp_version_id {i} does not exist in ref.dssmp_version"
-        elif dam_id not in dams[i]:
-            out[i] = (f"dssmp_version_id {i} belongs to dam {', '.join(sorted(map(str, dams[i])))}, "
-                      f"not {dam_id}")
+        if i not in by:
+            out[i] = {"code": "dssmp_not_found", "message": f"dssmp_version_id {i} does not exist in ref.dssmp_version"}
+            continue
+        mine = [r for r in by[i] if r.get("dam_id") == dam_id]
+        if not mine:
+            out[i] = {"code": "dssmp_other_dam", "message": f"dssmp_version_id {i} belongs to dam "
+                      f"{', '.join(sorted(str(r.get('dam_id')) for r in by[i]))}, not {dam_id}"}
+            continue
+        p = dssmp_row_problem(mine[0], dam_id, now)
+        if p:
+            out[i] = {"code": p[0], "message": p[1]}
     return out
 
 
-def dssmp_issues(draft: dict, lookup) -> list[dict]:
-    """Go-live check: every threshold's dssmp_version_id must be a ref.dssmp_version row of the draft's dam."""
+def dssmp_problems(lookup, dam_id: str, ids, now: datetime | None = None) -> dict[str, str]:
+    """{dssmp_version_id: "<code>: <message>"} - dssmp_findings flattened for messages."""
+    return {i: f"{f['code']}: {f['message']}" for i, f in dssmp_findings(lookup, dam_id, ids, now).items()}
+
+
+def _pending_note(dam_id: str, i: str | None, registrations, outbox) -> str:
+    """Why an id is not (yet) in ref.dssmp_version, from the app's own registration / outbox state."""
+    regs = [r for r in registrations or [] if r.get("dam_id") == dam_id and (i is None or r["dssmp_version_id"] == i)]
+    if not regs:
+        return " - register it in the DSSMP step"
+    r = regs[0]
+    if r["status"] == "pending":
+        return f" - registration {r['dssmp_version_id']} is pending CDSE approval"
+    if r["status"] == "rejected":
+        return f" - registration {r['dssmp_version_id']} was rejected by the CDSE"
+    ob = next((o for o in outbox or [] if o.get("outbox_id") == r.get("outbox_id")), None)
+    if ob is None or ob["status"] == "pending":
+        return (f" - registration {r['dssmp_version_id']} is approved and waiting for the DA load job "
+                "(approved-but-not-loaded fails closed)")
+    if ob["status"].startswith("rejected"):
+        return (f" - the DA load job rejected outbox {ob['outbox_id']}: {ob.get('reason_code') or 'no reason_code'}"
+                f" {ob.get('message') or ''}".rstrip())
+    return ""
+
+
+def dssmp_issues(draft: dict, lookup, dam_lookup=None, now: datetime | None = None, registrations=None,
+                 outbox=None) -> list[dict]:
+    """Go-live check (fail closed). Every threshold's dssmp_version_id must be a ref.dssmp_version row of the draft's
+    dam that is approved and not superseded at `now` - i.e. registered, CDSE-approved AND loaded by the DA. With
+    `dam_lookup(dam_id)` the dam must also have at least one such version even if no threshold references one."""
+    now = now or datetime.now(timezone.utc)
     dam_id = (draft.get("details") or {}).get("dam_id")
     ths = [_canonical_threshold(t) for t in draft.get("thresholds") or [] if isinstance(t, dict)]
-    probs = dssmp_problems(lookup, dam_id, [t.get("dssmp_version_id") for t in ths])
-    return [issue("thresholds", "error", probs[str(t.get("dssmp_version_id")).strip()], rule_key(t))
-            for t in ths if str(t.get("dssmp_version_id") or "").strip() in probs]
+    found = dssmp_findings(lookup, dam_id, [t.get("dssmp_version_id") for t in ths], now)
+    out = []
+    for t in ths:
+        f = found.get(str(t.get("dssmp_version_id") or "").strip())
+        if f:
+            note = _pending_note(dam_id, t["dssmp_version_id"], registrations, outbox) \
+                if f["code"] == "dssmp_not_found" else ""
+            out.append(issue("thresholds", "error", f"{f['code']}: {f['message']}{note}", rule_key(t), f["code"]))
+    if dam_lookup is not None and dam_id:
+        try:
+            rows = dam_lookup(dam_id)
+        except Exception as e:  # noqa: BLE001
+            out.append(issue("dssmp", "error", f"dssmp_unverifiable: ref.dssmp_version unreadable ({type(e).__name__})",
+                             dam_id, "dssmp_unverifiable"))
+        else:
+            if not any(dssmp_row_problem(r, dam_id, now) is None for r in rows or []):
+                out.append(issue("dssmp", "error", f"dssmp_not_found: dam {dam_id} has no approved, loaded, "
+                                 f"non-superseded DSSMP version in ref.dssmp_version"
+                                 f"{_pending_note(dam_id, None, registrations, outbox)}", dam_id, "dssmp_not_found"))
+    return out
 
 
 def _posint(x) -> bool:

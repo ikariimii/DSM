@@ -40,6 +40,7 @@ class Analytics(Protocol):
     def pfms(self, dam_id: str) -> list[dict]: ...
     def cdse_principals(self, dam_id: str) -> list[str]: ...
     def dssmp_versions(self, ids: list[str]) -> list[dict]: ...
+    def dssmp_versions_for_dam(self, dam_id: str) -> list[dict]: ...
 
 
 # ============================================================== demo
@@ -190,10 +191,31 @@ class MockAnalytics:
         return [ct.pfm(copy.deepcopy(p)) for p in self.d["pfms"] if p["dam_id"] == dam_id]
 
     def dssmp_versions(self, ids):
-        """ref.dssmp_version rows (dssmp_version_id, dam_id, status) for exactly these ids, any dam."""
+        """ref.dssmp_version rows for exactly these ids, any dam."""
         want = set(ids)
-        return [{k: v.get(k) for k in ("dssmp_version_id", "dam_id", "status")}
-                for v in self.d.get("dssmp_versions", []) if v["dssmp_version_id"] in want]
+        return [dict(v) for v in self.d.get("dssmp_versions", []) if v["dssmp_version_id"] in want]
+
+    def dssmp_versions_for_dam(self, dam_id):
+        return [dict(v) for v in self.d.get("dssmp_versions", []) if v["dam_id"] == dam_id]
+
+    # demo-only stand-in for the DA's DSSMP load job (SCHEMA_CONTRACT §7 item 19): validates like the publisher, then
+    # inserts the approved ref.dssmp_version row and closes the dam's previous approved version.
+    # Returns (status, reason_code, message) for the outbox bookkeeping columns.
+    def load_dssmp_outbox(self, row: dict) -> tuple[str, str | None, str | None]:
+        vs = self.d.setdefault("dssmp_versions", [])
+        clash = next((v for v in vs if v["dssmp_version_id"] == row["dssmp_version_id"]), None)
+        if clash is not None:
+            code = "dssmp_other_dam" if clash["dam_id"] != row["dam_id"] else "dssmp_duplicate"
+            return "rejected_invalid", code, f"dssmp_version_id {row['dssmp_version_id']} already exists " \
+                                             f"(dam {clash['dam_id']})"
+        for v in vs:
+            if v["dam_id"] == row["dam_id"] and v["status"] == "approved" and v.get("effective_to") is None:
+                v.update(status="superseded", effective_to=row["effective_from"])
+        vs.append({k: row.get(k) for k in ("dssmp_version_id", "dam_id", "version_no", "effective_from",
+                                           "change_reason", "source_ref", "document_uri", "document_sha256",
+                                           "approved_by", "approved_at", "approval_record_hash")}
+                  | {"effective_to": None, "status": "approved", "loaded_from_outbox_id": row["outbox_id"]})
+        return "loaded", None, None
 
     # demo-only: a live alarm-rule flag edit appends the new ref.threshold version immediately (the DA job in prod)
     def apply_threshold_version(self, payload: dict) -> None:
@@ -395,9 +417,16 @@ class SqlAnalytics:
         Errors propagate: callers fail closed when the table cannot be read."""
         if not ids:
             return []
-        return self.q(f"SELECT dssmp_version_id, dam_id, status FROM {self.t('ref', 'dssmp_version')} "
+        return self.q(f"SELECT {self.DSSMP_COLS} FROM {self.t('ref', 'dssmp_version')} "
                       "WHERE array_contains(from_json(:ids, 'ARRAY<STRING>'), dssmp_version_id)",
                       {"ids": json.dumps(sorted(set(ids)))})
+
+    # base ref.dssmp_version columns (DA contract); the v1_7_003 additions are not needed for the go-live check
+    DSSMP_COLS = "dssmp_version_id, dam_id, version_no, effective_from, effective_to, status"
+
+    def dssmp_versions_for_dam(self, dam_id):
+        return self.q(f"SELECT {self.DSSMP_COLS} FROM {self.t('ref', 'dssmp_version')} WHERE dam_id = :dam_id "
+                      "ORDER BY version_no DESC", {"dam_id": dam_id})
 
     def pfms(self, dam_id):
         return [ct.pfm(r) for r in self.q(

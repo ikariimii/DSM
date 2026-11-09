@@ -66,6 +66,11 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
     a dam_admin/admin to propose it for the CDSE to approve.
 
   The Alarm rules page and the onboarding wizard show the current rule with a "provisional" note.
+  The same provisional rule applies to DSSMP version registrations (wizard step 2, "DSSMP approvals" page).
+- **DSSMP version registration (v1.7):** a dam_admin or admin registers the version in the wizard. The dam's CDSE
+  approves it (rationale required, chained), and the app queues it in `dam_app.dssmp_registration_outbox` for the
+  DA load job. Go-live is refused until the version is loaded in `ref.dssmp_version` as approved and not superseded
+  (SCHEMA_CONTRACT §7 item 19).
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
   `config.env` **for the first prod deploy only, then remove it from prod config** and redeploy once the first
   admin has signed in and granted roles in the Admin UI. Rules (`backend/bootstrap.py`):

@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { api, type Me } from "../api";
 import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
+import { DssmpRegistrationStep } from "./DssmpRegistrations";
 
 type Col = { key: string; label?: string; type?: "text" | "number" | "select" | "json" | "date" | "checkbox"; options?: string[] };
 
 const TITLES: Record<string, string> = {
-  details: "1. Dam details", structures: "2. Structures", instruments: "3. Instruments", calibrations: "4. Calibrations",
-  formulas: "5. Formula check", thresholds: "6. Thresholds", data_sources: "7. Data sources", users: "8. Users & roles",
-  validate: "9. Validate", golive: "10. Go live",
+  details: "1. Dam details", dssmp: "2. DSSMP version", structures: "3. Structures", instruments: "4. Instruments",
+  calibrations: "5. Calibrations", formulas: "6. Formula check", thresholds: "7. Thresholds", data_sources: "8. Data sources",
+  users: "9. Users & roles", validate: "10. Validate", golive: "11. Go live",
 };
 
 export default function Onboarding() {
@@ -94,6 +95,7 @@ function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit:
               { key: "params", type: "json" }, { key: "certificate_uri" }, { key: "approved_by" }, { key: "approved_at" }]} />
           </>
         )}
+        {name === "dssmp" && <DssmpRegistrationStep damId={data.details?.dam_id} disabled={readOnly} />}
         {name === "formulas" && <FormulaCheck draftId={draftId} checks={data.formulas?.checks} onDone={reload} disabled={readOnly} />}
         {name === "thresholds" && <Rows value={data.thresholds || []} onSave={save} disabled={readOnly} cols={[
           { key: "instrument_id", type: "select", options: instIds }, { key: "level", type: "select", options: ["1", "2", "3"] },

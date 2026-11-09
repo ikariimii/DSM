@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import DssmpApprovals from "./pages/DssmpRegistrations";
 import { demoUser, setDemoUser, type Me } from "./api";
 import { useApi } from "./hooks";
 import { Loading } from "./components/ui";
@@ -24,6 +25,7 @@ export default function App() {
           <NavLink to="/alarms">Alarms</NavLink>
           <NavLink to="/formulas">Formulas</NavLink>
           {me?.can_onboard && <NavLink to="/onboarding">Onboard a dam</NavLink>}
+          <NavLink to="/dssmp-approvals">DSSMP approvals</NavLink>
           {(me?.is_admin || Object.values(me?.roles || {}).includes("dam_admin")) && <NavLink to="/admin">Users &amp; roles</NavLink>}
         </nav>
         <div className="who">
@@ -64,6 +66,7 @@ export default function App() {
             <Route path="/alarms" element={<Alarms />} />
             <Route path="/formulas" element={<Formulas />} />
             <Route path="/onboarding" element={<Onboarding />} />
+            <Route path="/dssmp-approvals" element={<DssmpApprovals me={me} />} />
             <Route path="/admin" element={<Admin me={me} />} />
             <Route path="*" element={<div>Not found</div>} />
           </Routes>
