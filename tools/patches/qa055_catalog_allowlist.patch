@@ -1,0 +1,204 @@
+diff --git a/src/dam_safety/audit_chain.py b/src/dam_safety/audit_chain.py
+index 5dd5adc..bc30140 100644
+--- a/src/dam_safety/audit_chain.py
++++ b/src/dam_safety/audit_chain.py
+@@ -166,7 +166,10 @@ def signer_probe_problem(signer) -> str | None:
+ def require_signer_for_catalog(catalog: str, signer) -> None:
+     """Fail closed: a job that verifies chains must not run against a production catalog without a real signer,
+     because a fully stripped chain verifies under the no-op signer (QA-045c). Call at job start, before any read.
+-    QA-052: a real-looking signer must also pass the load-time round trip (signer_probe_problem)."""
++    QA-052: a real-looking signer must also pass the load-time round trip (signer_probe_problem).
++    QA-055: the name is canonicalized first; an unknown or garbled name raises ValueError (fail closed)."""
++    from .catalog import normalize_catalog
++    catalog = normalize_catalog(catalog)
+     if catalog in PROD_CATALOGS and not is_real_signer(signer):
+         raise SignerConfigError(
+             f"refusing to verify reviewer chains in {catalog}: no real (non-no-op) signer is configured "
+diff --git a/src/dam_safety/catalog.py b/src/dam_safety/catalog.py
+new file mode 100644
+index 0000000..152c32e
+--- /dev/null
++++ b/src/dam_safety/catalog.py
+@@ -0,0 +1,40 @@
++"""QA-055: ONE canonical catalog name check, shared by the app (app/backend/config.Settings.check), the job entry
++points (src/jobs/_common.args) and the engine (audit_chain.require_signer_for_catalog). The app is deployed from app/
++alone (resources/app.yml source_code_path ../app) and cannot import src/, so it carries a BYTE-IDENTICAL copy at
++app/backend/catalog.py; app/tests/test_settings_prod_guard.py fails if the two differ. Change both together.
++
++normalize_catalog(name) -> the canonical allowlisted name, or ValueError. Never returns None.
++  1. NFKC normalization (fullwidth 'ｄａｍ＿ｐｒｏｄ' -> 'dam_prod', compatibility forms folded);
++  2. remove EVERY Unicode format character (category Cf: zero-width space/joiners, word joiner, BOM U+FEFF, bidi
++     marks/embeddings ...), wherever it appears;
++  3. strip surrounding whitespace and compare case-insensitively;
++  4. anything that is not then EXACTLY one of ALLOWED_CATALOGS is refused. No quote stripping: '`dam_prod`',
++     '"dam_prod"' and "'dam_prod'" are refused as unknown (fail closed), as are None, '', non-strings, interior
++     spaces and look-alike letters that NFKC does not fold (e.g. Cyrillic 'а').
++
++ALLOWED_CATALOGS mirrors databricks.yml: targets dev / test / prod set variables.catalog to dam_dev / dam_test /
++dam_prod and the catalog variable has no default (tests/test_catalog_allowlist.py fails if they drift).
++"""
++from __future__ import annotations
++
++import unicodedata
++
++ALLOWED_CATALOGS = ("dam_dev", "dam_test", "dam_prod")
++PROD_CATALOG = "dam_prod"
++
++
++def normalize_catalog(name) -> str:
++    """The canonical allowlisted catalog name for `name`; ValueError for None, empty, garbled or unknown names."""
++    if not isinstance(name, str):
++        raise ValueError(f"refusing catalog {name!r}: a catalog name (str) is required (QA-055)")
++    s = unicodedata.normalize("NFKC", name)
++    s = "".join(ch for ch in s if unicodedata.category(ch) != "Cf").strip().lower()
++    if s in ALLOWED_CATALOGS:
++        return s
++    raise ValueError(f"refusing catalog {ascii(name)}: not one of {', '.join(ALLOWED_CATALOGS)} after NFKC, "
++                     "format-character and whitespace normalization (QA-055)")
++
++
++def is_prod_catalog(name) -> bool:
++    """True when `name` normalizes to the production catalog; ValueError (fail closed) when it is not allowlisted."""
++    return normalize_catalog(name) == PROD_CATALOG
+diff --git a/src/jobs/_common.py b/src/jobs/_common.py
+index 2025a86..db4a9f5 100644
+--- a/src/jobs/_common.py
++++ b/src/jobs/_common.py
+@@ -16,8 +16,11 @@ def args(*extra):
+     for name, default in extra:
+         p.add_argument(f"--{name}", default=default)
+     a, _ = p.parse_known_args()
+-    if a.catalog not in ("dam_dev", "dam_test", "dam_prod"):
+-        raise SystemExit(f"refusing unknown catalog {a.catalog!r}")
++    from dam_safety.catalog import normalize_catalog  # QA-055: one shared check (src/ is on sys.path above)
++    try:
++        a.catalog = normalize_catalog(a.catalog)     # canonical name from here on (== "dam_prod" checks downstream)
++    except ValueError as e:
++        raise SystemExit(str(e)) from None
+     return a
+ 
+ 
+diff --git a/tests/test_catalog_allowlist.py b/tests/test_catalog_allowlist.py
+new file mode 100644
+index 0000000..ddeb06f
+--- /dev/null
++++ b/tests/test_catalog_allowlist.py
+@@ -0,0 +1,118 @@
++"""QA-055: catalog names with zero-width / BOM characters, quotes or fullwidth letters must not escape the prod checks.
++One shared helper, dam_safety.catalog.normalize_catalog, used by the app (Settings.check), the job entry points
++(_common.args) and the engine (audit_chain.require_signer_for_catalog)."""
++import os
++import sys
++
++import pytest
++import yaml
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++sys.path.insert(0, os.path.join(ROOT, "src"))
++sys.path.insert(0, os.path.join(ROOT, "src", "jobs"))
++from dam_safety import audit_chain as ac  # noqa: E402
++from dam_safety.catalog import ALLOWED_CATALOGS, PROD_CATALOG, is_prod_catalog, normalize_catalog  # noqa: E402
++import _common  # noqa: E402
++import verify_review_chain as vj  # noqa: E402
++
++PROD_SPELLINGS = [
++    "dam_prod",
++    "DAM_PROD", "Dam_Prod",                                  # mixed case
++    " dam_prod ", "\tdam_prod\n", "\u00a0dam_prod\u3000",   # whitespace incl. NBSP / ideographic space
++    "\u200bdam_prod", "dam_prod\u200b", "dam\u200b_prod",     # zero-width space, anywhere
++    "dam_\u200c\u200dprod", "\u2060dam_prod",                # ZWNJ / ZWJ / word joiner
++    "\ufeffdam_prod", "dam_prod\ufeff",                      # BOM
++    "\u202edam_prod\u202c", "\u200edam_prod",                # bidi override / LRM (also Cf)
++    "\uff44\uff41\uff4d\uff3f\uff50\uff52\uff4f\uff44",      # fullwidth 'ｄａｍ＿ｐｒｏｄ'
++    "\uff24\uff21\uff2d\uff3f\uff30\uff32\uff2f\uff24",      # fullwidth upper
++    " \ufeff\uff44am_PROD\u200b ",                           # all of the above at once
++]
++REFUSED = [
++    None, "", "   ", "\u200b", "\ufeff",                     # missing / nothing left after normalization
++    "`dam_prod`", '"dam_prod"', "'dam_prod'", "[dam_prod]",  # quoted: NOT tolerated (unknown -> refused)
++    "dam prod", "dam-prod", "damprod", "dam_prod2", "dam_production", "prod",
++    "d\u0430m_prod",                                         # Cyrillic 'а' look-alike (NFKC does not fold it)
++    "dam_prod.ref", "main", "hive_metastore", "dam_staging",
++    b"dam_prod", 1, ["dam_prod"],                            # not a string
++]
++
++
++@pytest.mark.parametrize("name", PROD_SPELLINGS)
++def test_prod_spellings_normalize_to_exactly_dam_prod(name):
++    assert normalize_catalog(name) == "dam_prod" and is_prod_catalog(name)
++
++
++@pytest.mark.parametrize("name,canon", [("dam_dev", "dam_dev"), (" DAM_TEST ", "dam_test"),
++                                        ("\ufeffdam_dev\u200b", "dam_dev"), ("\uff44am_test", "dam_test")])
++def test_non_prod_names(name, canon):
++    assert normalize_catalog(name) == canon and not is_prod_catalog(name)
++
++
++@pytest.mark.parametrize("name", REFUSED)
++def test_refused_never_none(name):
++    with pytest.raises(ValueError):
++        normalize_catalog(name)
++    with pytest.raises(ValueError):
++        is_prod_catalog(name)
++
++
++def test_error_message_is_ascii_safe():
++    with pytest.raises(ValueError) as e:
++        normalize_catalog("dam\u202eprod_x")
++    assert str(e.value).isascii() and "\\u202e" in str(e.value)
++
++
++def test_allowlist_matches_databricks_yml():
++    """ALLOWED_CATALOGS == every catalog databricks.yml sets (targets.*.variables.catalog, plus any default)."""
++    with open(os.path.join(ROOT, "databricks.yml"), encoding="utf-8") as f:
++        b = yaml.safe_load(f)
++    found = {t["variables"]["catalog"] for t in b["targets"].values() if "catalog" in (t.get("variables") or {})}
++    default = (b["variables"]["catalog"] or {}).get("default")
++    if default:
++        found.add(default)
++    assert found == set(ALLOWED_CATALOGS) and PROD_CATALOG in found
++    assert all(normalize_catalog(c) == c for c in found)
++
++
++# ------------------------------------------------------------------ engine: require_signer_for_catalog / verify_all
++@pytest.mark.parametrize("name", PROD_SPELLINGS)
++def test_engine_garbled_prod_still_requires_a_real_signer(name):
++    with pytest.raises(ac.SignerConfigError):
++        ac.require_signer_for_catalog(name, ac.NoopSigner())
++
++
++@pytest.mark.parametrize("name", [n for n in REFUSED if n is not None])
++def test_engine_unknown_catalog_fails_closed(name):
++    with pytest.raises(ValueError):
++        ac.require_signer_for_catalog(name, None)
++
++
++def test_engine_non_prod_unchanged():
++    ac.require_signer_for_catalog("dam_dev", None)
++    ac.require_signer_for_catalog(" DAM_TEST\u200b", None)
++
++
++@pytest.mark.parametrize("name", ["dam_prod\u200b", "\ufeffDAM_PROD", "\uff44\uff41\uff4d\uff3f\uff50\uff52\uff4f\uff44"])
++def test_verify_all_garbled_prod_is_refused(name):
++    heads = [{"dam_id": "CRD", "chain_id": "CRD", "chain_seq": 1, "head_hash": "c" * 64}]
++    out = vj.verify_all([], heads, None, catalog=name)
++    assert out and all(not v["ok"] and v["reason"] == "signer_refused" for v in out)
++
++
++def test_verify_all_unknown_catalog_raises():
++    with pytest.raises(ValueError):
++        vj.verify_all([], [], None, catalog="`dam_prod`")
++
++
++# ------------------------------------------------------------------ job entry points (_common.args)
++@pytest.mark.parametrize("name", PROD_SPELLINGS[:6] + ["\ufeffdam_prod", "dam\u200b_prod"])
++def test_jobs_get_the_canonical_name(monkeypatch, name):
++    monkeypatch.setattr(sys, "argv", ["job", "--catalog", name])
++    assert _common.args().catalog == "dam_prod"
++
++
++@pytest.mark.parametrize("name", ["`dam_prod`", '"dam_prod"', "dam_staging", "", "d\u0430m_prod"])
++def test_jobs_refuse_unknown(monkeypatch, name):
++    monkeypatch.setattr(sys, "argv", ["job", "--catalog", name])
++    with pytest.raises(SystemExit):
++        _common.args()
