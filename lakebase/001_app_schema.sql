@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS dam_cdse_outbox (
         outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL, previous_cdse_id TEXT,
         new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL, proposed_by TEXT NOT NULL,
         approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected')),
         reason_code TEXT, message TEXT, processed_at TEXT);
 CREATE TABLE IF NOT EXISTS rule_reversion_proposal (
         proposal_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, to_dssmp_version_id TEXT NOT NULL,
@@ -77,6 +77,23 @@ CREATE TABLE IF NOT EXISTS rule_reversion_proposal (
         status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'rejected')),
         decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, pub_ids TEXT);
 -- END v1_7_005 block
+-- BEGIN v1_7_008 block (app SCHEMA_CONTRACT §7 item 20: dam_cdse_outbox status pending | loaded | rejected; the same
+-- 3 values as dssmp_registration_outbox. Replaces every earlier status CHECK on the table (the inline
+-- dam_cdse_outbox_status_check of the v1_7_005 CREATE allowed 'rejected_invalid'), maps a legacy 'rejected_invalid' row
+-- to 'rejected' (reason_code / message kept), then one named CHECK. Re-run safe.)
+DO $$
+DECLARE c RECORD;
+BEGIN
+  IF to_regclass('dam_app.dam_cdse_outbox') IS NULL THEN RETURN; END IF;
+  FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'dam_app.dam_cdse_outbox'::regclass AND contype = 'c'
+             AND pg_get_constraintdef(oid) ~ '\mstatus\M' LOOP
+    EXECUTE format('ALTER TABLE dam_app.dam_cdse_outbox DROP CONSTRAINT %I', c.conname);
+  END LOOP;
+  UPDATE dam_app.dam_cdse_outbox SET status = 'rejected' WHERE status = 'rejected_invalid';
+  ALTER TABLE dam_app.dam_cdse_outbox ADD CONSTRAINT ck_dam_cdse_outbox_status
+    CHECK (status IN ('pending', 'loaded', 'rejected'));
+END $$;
+-- END v1_7_008 block
 
 -- ---- v1.7 DSSMP registration outbox: the agreed app contract (app SCHEMA_CONTRACT §7 item 19; same columns as
 -- app/backend/repos/state.py). One row per CDSE-approved DSSMP version, inserted by the app at 'pending' in the

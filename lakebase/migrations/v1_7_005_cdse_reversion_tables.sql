@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS dam_cdse_outbox (
         outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL, previous_cdse_id TEXT,
         new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL, proposed_by TEXT NOT NULL,
         approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected')),
         reason_code TEXT, message TEXT, processed_at TEXT);
 CREATE TABLE IF NOT EXISTS rule_reversion_proposal (
         proposal_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, to_dssmp_version_id TEXT NOT NULL,

@@ -424,3 +424,21 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - Evidence (PG 17.11): fresh 001 refuses 'rejected_invalid' and accepts the three values; a 4-value CHECK with a
   'rejected_invalid' row is converged by the migration (twice): row -> rejected, constraint without rejected_invalid.
 - UNVERIFIED: on Lakebase.
+
+## CDSE-OUTBOX-STATUS (residual 2, 2026-11-09: dam_cdse_outbox status pending | loaded | rejected)
+
+- Source: app SCHEMA_CONTRACT §7 item 20 lists `status (pending|loaded|rejected)` for `dam_app.dam_cdse_outbox`; the
+  v1_7_005 CREATE (copied from state.py) allowed `rejected_invalid` too. lakebase/001 + v1_7_005 CREATE now use the 3
+  values; block v1_7_008 (001 and lakebase/migrations/v1_7_008_cdse_outbox_status.sql) drops every earlier status
+  CHECK, maps legacy `rejected_invalid` -> `rejected` (reason_code / message kept) and adds `ck_dam_cdse_outbox_status`.
+  Down restores the 4-value CHECK only. App side: state.py still lists `rejected_invalid` for this outbox (App Dev to
+  drop it in step; tests/test_lakebase_cdse_tables.py tolerates that single difference).
+- Other status lists vs CHECKs in 001 (all now consistent, asserted by tests/test_lakebase_cdse_outbox_status.py):
+  dam_cdse_change pending|approved|rejected, rule_reversion_proposal pending|applied|rejected,
+  dssmp_registration_outbox pending|loaded|rejected (= app contract). Tables with a status column but no CHECK in
+  either 001 or state.py (not a mismatch, left as is): onboarding_draft, onboarding_publication, report_draft,
+  pfm_review, ref_change_publication (writers: app pending; dam_ref_publish applied | rejected_stale |
+  rejected_invalid).
+- Evidence (PG 17.11): fresh 001 -> one 3-value CHECK, rejected_invalid refused; 001@6709371 + a rejected_invalid row
+  -> migration twice -> row rejected with its reason, one CHECK; down twice -> 4-value CHECK, 4 rows kept; up and
+  001 re-run converge. UNVERIFIED: on Lakebase.
