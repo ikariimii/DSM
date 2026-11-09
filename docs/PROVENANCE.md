@@ -42,3 +42,39 @@ The inclinometer module follows the **layout** of the user's workbook only: the 
 - **Guards:**
   - `tests/test_license_leak.py` checks file names, sha256 hashes, data lines, and that the sync excludes match the `.gitignore` entries.
   - `.gitignore` and the `databricks.yml` `sync.exclude` list contain `**/user_tool/`, `*user_tool_surveys*`, `*libreoffice_recalc_compare*`, `**/vendor_manual_samples/`, and `testonly_restricted/`.
+
+## 4. Commit authorship (QA-054, 2026-11-09)
+
+**Cause.** Until about 11:46 AM (America/New_York) on 2026-11-09, the shared `/workspace/dam-safety-app/.git/config`
+set `user.name` to `QA-engineer-agent` (`qa-engineer@dam-safety.local`). Every commit made without an explicit
+identity in any worktree of that repo was recorded under QA's name. **History is not rewritten:** other agents have
+built on these commits and some are on `origin`, so the recorded author stays and this table is the correction.
+Since then Genie removed the repo-level identity and enabled `extensions.worktreeConfig`; each worktree carries its
+own identity (the Data Architect worktrees: `Databricks-Data-Architect <data-architect@dam-safety.local>`). No
+repo-level identity is to be set.
+
+**Method.** For every commit on `app/v1.6-integration` whose recorded author is `QA-engineer-agent`: the paths it
+changes (for a merge, the diff against its first parent), its message against each team's work, and the Data
+Architect's own session record of the commits it made. "Pushed" = `git branch -r --contains <hash>` on the local
+remote-tracking refs (no fetch; as of 2026-11-09 11:46 AM America/New_York).
+
+| Hash | Subject | Recorded author | True author | Evidence | Pushed to origin |
+|---|---|---|---|---|---|
+| 0ff6d53 | v1.7: cdse_ack_required on ref.threshold + cdse_ack_required_at_open snapshot | QA-engineer-agent | Data Architect | sql/, src/, tests/, docs/, SCHEMA_CONTRACT.md only; DA work item cdse_ack_required (migration v1_7_001); DA session record | yes (origin/app/v1.6-integration) |
+| 743b8c6 | v1.7: cdse_ack_required versioning rule ... VERIFICATION: app init lock applied in 974e786 | QA-engineer-agent | Data Architect | sql/, src/, tests/, docs/, SCHEMA_CONTRACT.md only; DA threshold_publish / versioning decision; DA session record | yes (origin/app/v1.6-integration) |
+| 9875813 | QA-045d: verify_records head_missing like the app; append-only audit.chain_head | QA-engineer-agent | Data Architect | sql/, src/, tests/, tools/, resources/, docs/ only (no qa/); the "QA-045d" prefix names the QA finding it fixes, the fix is DA engine/DDL work; DA session record | yes (origin/app/v1.6-integration) |
+| 826f7ba | Merge branch 'fix/qa-045d-chain-head' into feat/7.13-alarm-rule-authority | QA-engineer-agent | Data Architect | merge of the DA branch fix/qa-045d-chain-head (9875813) onto 6f7a1d5 to start the DA §7.13 branch; diff vs first parent is DA paths only; DA session record | yes (origin/app/v1.6-integration) |
+| 7993e53 | Merge commit 'b914222' into feat/7.13-alarm-rule-authority | QA-engineer-agent | Data Architect | merge of the DA commit b914222 (ROLE-LEVEL) into the DA §7.13 branch; diff vs first parent is DA paths only; DA session record | yes (origin/app/v1.6-integration) |
+| e78c62b | §7.13: audit.review_record accepts alarm_rule propose/apply/reject ... authority verifier | QA-engineer-agent | Data Architect | sql/, src/, tests/, docs/, SCHEMA_CONTRACT.md only; DA §7.13 work (migration v1_6_003, rule_flag_authority); DA session record | yes (origin/app/v1.6-integration) |
+| b3aeecd | Merge feat/v1.7-cdse-ack-hardening (0ff6d53, 743b8c6) into app/v1.6-integration | QA-engineer-agent | Data Architect | integration merge requested by Genie and performed in the DA worktree wt-integ; conflict resolution in DA docs / migration order; DA session record | yes (origin/app/v1.6-integration) |
+| 487d5b4 | Prod fail-closed: verify_review_chain refuses to start on dam_prod without a real signer | QA-engineer-agent | Data Architect | src/, tests/, docs/ only; DA work item "prod fail-closed"; DA session record | no |
+| 0274aeb | Lakebase ownership hardening: NOLOGIN dam_lakebase_owner ... | QA-engineer-agent | Data Architect | lakebase/, tools/, tests/, .github/, README.md, docs/, SCHEMA_CONTRACT.md; DA work item "Lakebase ownership hardening"; DA session record | no |
+| 3d398dd | Merge c797151 (App Dev canon v2 ...) into app/v1.6-integration | QA-engineer-agent | Data Architect (merge only; the merged content c797151 is App Dev's, recorded as App-Developer-agent) | merge performed in the DA worktree wt-integ on Genie's instruction; diff vs first parent is App Dev's app/ changes; DA session record | no |
+| e8cc437 | QA-050/051/052/053: engine canon v2 ...; prod signer key probe; verify_all re-applies the prod guard | QA-engineer-agent | Data Architect | sql/, src/, tests/, lakebase/, tools/, docs/, SCHEMA_CONTRACT.md only (no qa/); the QA-05x prefixes name the QA findings it fixes; DA session record | no |
+| 99d2db6 | actor_app_role is evidence only (contract); PROVISIONAL engine second-approver check | QA-engineer-agent | Data Architect | src/, tests/, resources/, databricks.yml, docs/, SCHEMA_CONTRACT.md only; Genie item for the DA; DA session record | no |
+
+Commits recorded as `QA-engineer-agent` that ARE QA's (checked, listed for completeness): **bb5347f** (QA.md + qa/
+only: close QA-045b), **af253a8** (QA.md + qa/ only: close QA-045a), **0681292** (QA.md, qa/, plus a `.gitignore`
+entry tracking qa/test_*.py and a `databricks.yml` sync.exclude of QA.md, both QA-ledger housekeeping). All three are
+on origin. None of App Dev's commits is mis-attributed (they always set App-Developer-agent explicitly; consistent
+with what was checked here). UNCONFIRMED: none.
