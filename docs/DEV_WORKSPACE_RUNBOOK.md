@@ -200,7 +200,12 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
 
 * UC, newest first, each once: `v1_7_003_dssmp_registration_down.sql`, `v1_7_002_canon_v2_down.sql`,
   `v1_7_001_cdse_ack_down.sql`, `v1_6_003_alarm_rule_flag_down.sql`, `v1_6_002_chain_head_down.sql`,
-  `v1_6_001_audit_chain_down.sql`, `v1_5_001_contract_down.sql` (same `jobs submit` loop as step 3). Each header has
+  `v1_6_001_audit_chain_down.sql`, `v1_5_001_contract_down.sql`, ONLY through `tools/run_migration.py` (QA-057; it
+  binds the `catalog` and `break_glass` parameters the downs' first statement needs, so the plain step-3 `jobs submit`
+  loop fails on a down by design):
+  `python tools/run_migration.py --catalog $CATALOG --warehouse-id $WH --workspace-files $FILES --file sql/migrations/<down>.sql`.
+  On dam_prod the tool refuses (exit 3) unless `--break-glass-prod "<ticket + approver>"` is given; the reason is
+  logged to stderr and `~/.dam_safety/break_glass.log` before submission. Each header has
   a PRE-CHECK; if it returns rows (newer audit records exist), STOP: those records are never deleted and that
   migration stays. Data-level fallback: `DESCRIBE HISTORY <table>` then `RESTORE TABLE <table> TO VERSION AS OF <n>`.
   Views / functions in 10b: re-run the previous `sql/ddl/10b_reviewer_authority.sql` from git.

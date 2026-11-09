@@ -363,3 +363,25 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   (4702046 is the DA chain-lock class). The code is right; the message is not.
 - UNVERIFIED: not run on Lakebase; PRE-CHECK duplicates must be resolved before the migration on a live database.
 
+## QA-057 (down scripts refuse dam_prod; two layers)
+
+- Layer 1: `tools/run_migration.py` (new; there was no runner). Normalizes `--catalog` with
+  `dam_safety.catalog.normalize_catalog` (unknown names, e.g. Cyrillic look-alikes, fail closed, exit 2); refuses any
+  `sql/migrations/*_down.sql` on dam_prod, including NFKC / zero-width / soft-hyphen look-alikes that normalize to
+  dam_prod (exit 3), unless `--break-glass-prod "<reason>"` (>= 10 characters) is given; the break-glass run is logged
+  (JSON: utc, user, catalog, file, sha256, reason) to stderr and `--log-file` before submission. Always binds the named
+  parameters `catalog` (canonical) and `break_glass` ('' or `BREAK_GLASS_PROD`). Only sql/migrations files accepted.
+- Layer 2: the first statement of all 7 UC downs is an identical `SELECT CASE WHEN ... THEN raise_error(...)` guard
+  on `:catalog` (format characters / whitespace removed, lower-cased) OR `current_catalog()` = 'dam_prod' without
+  `:break_glass = 'BREAK_GLASS_PROD'`; it is repeated on `current_catalog()` right after `USE CATALOG`. A missing
+  parameter makes the statement fail (unbound marker), i.e. refused; a session whose default catalog is dam_prod is
+  refused too (fail closed). Ups are unchanged.
+- Evidence: tests/test_qa057_prod_guard.py (runner: prod + 7 look-alikes, every down, empty / short reason, unknown
+  catalogs, dev / test allowed, ups allowed, prod + flag allowed and logged, CLI subprocess; SQL: every down starts
+  with the guard, guard executed on PostgreSQL 17 with raise_error emulated and current_catalog() bound per case
+  (13 cases), the whole v1_7_003 down refused for dam_prod); tests/test_migration_downs.py full chain still passes with
+  the guard bound to dam_dev.
+- UNVERIFIED on Databricks: named parameter markers inside a sql_task file and their behaviour when unbound,
+  `raise_error` inside `SELECT CASE`, the `\p{Cf}` regex class in `regexp_replace`, `current_catalog()` before /
+  after `USE CATALOG`, the databricks-sdk `jobs.submit` call shape in the tool. Lakebase downs
+  (lakebase/migrations/*_down.sql) are not catalog-scoped and are not guarded by this tool (run by hand per runbook 8).

@@ -12,7 +12,19 @@
 -- Code rollback caveat: pause dam_ref_publish first (a pre-v1.7.003 job does not know the new columns).
 -- IDEMPOTENT, safe to re-run. Re-applying v1_7_003 afterwards restores everything.
 -- UNVERIFIED: not run on a workspace.
+-- QA-057 prod guard, layer 2 (layer 1: tools/run_migration.py, which always binds :catalog and :break_glass).
+-- The FIRST statement refuses on dam_prod unless the named parameter break_glass = 'BREAK_GLASS_PROD' (bound only by
+-- tools/run_migration.py --break-glass-prod "<reason>", which logs the reason). A missing parameter fails the
+-- statement (unbound parameter marker) = refused. It is checked on the :catalog parameter (format characters and
+-- whitespace removed, lower-cased) and again on current_catalog() right after USE CATALOG (the resolved catalog; a
+-- look-alike name that does not resolve fails USE CATALOG). UNVERIFIED on Databricks: named parameter markers in a
+-- sql_task file, raise_error inside SELECT CASE, the \p{Cf} regex class, current_catalog().
+SELECT CASE WHEN (lower(regexp_replace(:catalog, '[\\p{Cf}\\s]', '')) = 'dam_prod' OR current_catalog() = 'dam_prod')
+                 AND coalesce(:break_glass, '') <> 'BREAK_GLASS_PROD'
+            THEN raise_error('QA-057: down script refused on dam_prod without the break_glass parameter') END AS qa057_guard;
 USE CATALOG IDENTIFIER(:catalog);
+SELECT CASE WHEN current_catalog() = 'dam_prod' AND coalesce(:break_glass, '') <> 'BREAK_GLASS_PROD'
+            THEN raise_error('QA-057: down script refused on dam_prod without the break_glass parameter') END AS qa057_guard_resolved;
 
 ALTER TABLE ref.dssmp_version DROP CONSTRAINT IF EXISTS ck_dssmp_version_status;
 ALTER TABLE ref.dssmp_version DROP CONSTRAINT IF EXISTS ck_dssmp_version_approval;

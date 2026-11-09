@@ -2,7 +2,7 @@
 RESTORE as the data fallback, is idempotent, drops / deletes / updates no data and no column, and takes the CHECK
 state of the migration back to exactly the state before it (simulated over the whole up/down sequence). Live
 (DAM_TEST_PG): the Delta SQL is translated mechanically to PostgreSQL (guarded ADD COLUMNS -> ADD COLUMN IF NOT EXISTS,
-TBLPROPERTIES / VOLUME / USE CATALOG dropped, RLIKE -> ~) and the full chain is run: every up twice, every down twice
+TBLPROPERTIES / VOLUME / USE CATALOG dropped, RLIKE -> ~, the QA-057 guard bound to dam_dev) and the full chain is run: every up twice, every down twice
 in reverse order (constraint set checked after each step, rows and columns kept), then every up again.
 Delta itself stays UNVERIFIED (docs/VERIFICATION.md MIGRATION-DOWN)."""
 import os
@@ -117,9 +117,34 @@ def _strip_comments(sql):
     return "".join(out)
 
 
-def _pg(sql):
+PG_RAISE_ERROR = """CREATE OR REPLACE FUNCTION pg_temp.raise_error(msg text) RETURNS text LANGUAGE plpgsql AS
+$$ BEGIN RAISE EXCEPTION '%', msg; END $$;
+"""
+# Databricks regex [\p{Cf}\s] emulated in PostgreSQL ARE: whitespace + the common format (Cf) code points.
+PG_CF_CLASS = r"'[[:space:]\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]'"
+USE = "USE CATALOG IDENTIFIER(:catalog);"
+
+
+def _lit(v):
+    return "NULL" if v is None else "'" + v.replace("'", "''") + "'"
+
+
+def _bind_guard(code, catalog, session, resolved, break_glass):
+    """Bind the QA-057 parameters. current_catalog() is `session` before USE CATALOG and `resolved` after it;
+    resolved=None simulates a catalog name that does not exist (USE CATALOG fails)."""
+    code = code.replace("'[\\\\p{Cf}\\\\s]', ''", PG_CF_CLASS + ", '', 'g'")
+    code = code.replace("(:catalog,", f"({_lit(catalog)}::text,").replace(":break_glass", f"{_lit(break_glass)}::text")
+    if USE in code:
+        before, after = code.split(USE, 1)
+        use = "" if resolved is not None else "SELECT pg_temp.raise_error('CATALOG_NOT_FOUND');"
+        code = before.replace("current_catalog()", _lit(session)) + use + after.replace("current_catalog()",
+                                                                                       _lit(resolved))
+    return code.replace("raise_error(", "pg_temp.raise_error(").replace("pg_temp.pg_temp.", "pg_temp.")
+
+
+def _pg(sql, catalog="dam_dev", session="dam_dev", resolved="dam_dev", break_glass=""):
     code = _strip_comments(sql)
-    code = re.sub(r"USE CATALOG IDENTIFIER\(:catalog\);", "", code)
+    code = PG_RAISE_ERROR + _bind_guard(code, catalog, session, resolved, break_glass)
     code = re.sub(r"(?s)\nBEGIN\n(.*?)\nEND;", lambda m: "\n" + "\n".join(
         f"ALTER TABLE {s}.{t} ADD COLUMN IF NOT EXISTS {c} {_pgtype(ty)};" for s, t, c, ty in re.findall(
             r"EXECUTE IMMEDIATE 'ALTER TABLE (\w+)\.(\w+) ADD COLUMNS \((\w+) (\w+)\)'", m.group(1))), code)
