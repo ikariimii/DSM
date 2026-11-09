@@ -4,6 +4,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from .catalog import PROD_CATALOG, normalize_catalog
+from .catalog import is_prod_catalog as _is_prod
+
 
 def _bool(name: str, default: bool) -> bool:
     v = os.getenv(name)
@@ -64,10 +67,17 @@ class Settings:
 
     def check(self) -> None:
         """Refuse to start in an unsafe configuration (QA-001). Called by create_app before anything is built."""
-        # QA-041: seed data must never be served against the production catalog. Compared after trimming whitespace
-        # and identifier quotes, case-insensitively (' DAM_PROD ', '`dam_prod`'). Deliberately NO override or escape
-        # hatch (no env var, no flag): to demo, point DAM_CATALOG at a non-prod catalog.
-        if self.demo_mode and is_prod_catalog(self.catalog):
+        # QA-055: the catalog must normalize (NFKC, Unicode format characters such as zero-width / BOM removed,
+        # surrounding whitespace, case) to EXACTLY an allowlisted name (backend/catalog.py = src/dam_safety/catalog.py);
+        # anything else - quoted, garbled, unknown, empty - refuses to start. The canonical name is used from here on.
+        try:
+            canon = normalize_catalog(self.catalog)
+        except ValueError as e:
+            raise RuntimeError(f"DAM_CATALOG {ascii(self.catalog)} is refused (QA-055): {e}; refusing to start") from e
+        object.__setattr__(self, "catalog", canon)
+        # QA-041: seed data must never be served against the production catalog, however it is spelled. Deliberately
+        # NO override or escape hatch (no env var, no flag): to demo, point DAM_CATALOG at a non-prod catalog.
+        if self.demo_mode and canon == PROD_CATALOG:
             raise RuntimeError(f"DEMO_MODE=true with the production catalog ({self.catalog!r}) is refused (QA-041): "
                                "demo seed data must never be served against dam_prod; refusing to start")
         if not self.demo_mode and not self.warehouse_id:
@@ -76,13 +86,9 @@ class Settings:
             raise RuntimeError("SQL_OBO=false is not supported: gold is read only as the signed-in user")
 
 
-PROD_CATALOG = "dam_prod"
-
-
 def is_prod_catalog(catalog) -> bool:
-    """True for the production catalog however it is spelled in config: surrounding whitespace, identifier quotes
-    (backticks / double quotes) and letter case are ignored."""
-    return str(catalog or "").strip().strip("`\"").strip().lower() == PROD_CATALOG
+    """True when the catalog normalizes to dam_prod (QA-055 helper); ValueError for an unknown or garbled name."""
+    return _is_prod(catalog)
 
 
 def approval_policy(s: "Settings") -> dict:
