@@ -478,3 +478,19 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   catalog and even with break_glass; same text in all 7 downs and tools/verify/qa057_guard_probe.sql. Layer 1
   (tools/run_migration.py) already refuses a missing / blank catalog (exit 2) and always binds both parameters
   (tested). UNVERIFIED on Databricks: unbound-marker failure, CASE branch order with raise_error, the \p{Cf} class.
+
+## JOB-SQL-QUALIFIED (residual 4, 2026-11-09: no current-catalog dependence in job SQL)
+
+- Audit of every spark.sql / spark.table / spark.read.table / saveAsTable / insertInto / toTable / DeltaTable.forName
+  call and the SQL builders (merge_sql, dam_sync_sql, audit_insert_sql) in src/jobs and src/dam_safety (plus
+  src/pipelines): 91 calls, every table reference resolves to `<catalog>.<schema>.<table>` built from the job's
+  normalized --catalog (`_common.args()` -> normalize_catalog; `C = a.catalog`, `fq(...)`, `engine.fq(...)`,
+  f"{a.catalog}.x.y"), or to a temp view created in the same file. Finding: no unqualified or schema-only reference;
+  no USE CATALOG / USE SCHEMA / setCurrentCatalog in the code, so no code change was needed. Schema-only names occur
+  only in docstrings.
+- Guard: tests/test_job_sql_qualified.py parses the code with ast (f-strings, fq / lambda fq, local names
+  resolved), checks every reference after FROM / JOIN / INTO / USING / UPDATE / TABLE / DESCRIBE / MERGE INTO, and
+  scans every non-docstring string literal for `FROM ref.x`-style schema-only names; self-tests prove it flags
+  `ref.dam`, bare `dam`, a schema-only JOIN / MERGE / saveAsTable.
+- Note (not changed, outside the residual's scope): src/pipelines qualify with `CATALOG = spark.conf.get("dam.catalog")`,
+  which is not passed through normalize_catalog (the bundle sets it from the catalog variable).
