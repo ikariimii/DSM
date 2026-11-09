@@ -519,14 +519,22 @@ name and fail loudly if it does not resolve.
   their own proposal. Codes: apply_not_cdse, apply_by_admin, apply_cdse_of_other_dam, reject_not_cdse,
   reject_by_admin, reject_cdse_of_other_dam, propose_no_authority, propose_role_unverified (warn),
   apply_proposal_missing, reject_proposal_missing, cdse_level_without_authority, rationale_missing,
-  decision_action_mismatch. App roles: canon-2 records (v1.7, below) carry the hashed `actor_app_role`, so an admin
+  decision_action_mismatch, apply_by_proposer (second approver, below). App roles: canon-2 records (v1.7, below) carry the hashed `actor_app_role`, so an admin
   apply is `apply_by_admin` and a non-CDSE proposer without dam_admin/admin is `propose_no_authority` (error) from the
-  record alone; a `cdse` token grants nothing (CDSE authority comes from `ref.v_dam_reviewer_authority` only). Canon-1
-  records have no role and stay `propose_role_unverified` (warn). The role is app-recorded (not an independent source).
-  - **TODO (not implemented, Genie 2026-11-09):** App Dev's 23c4a42 / f0dd9c8 adds a PROVISIONAL app setting
-    `CDSE_FLAG_REQUIRE_SECOND_APPROVER` (default false). Four-eyes is NOT required by Genie's rule and the setting is not
-    recorded in the chain, so the engine has no proposer != applier check. If Genie adopts it, the setting (or its
-    effect) must first be recorded in the chained record; only then add an engine code for it.
+  record alone; a `cdse` token grants nothing. Canon-1 records have no role and stay `propose_role_unverified` (warn).
+  **`actor_app_role` is evidence only (Genie 2026-11-09):** it is used only to raise failure codes (`apply_by_admin`,
+  `reject_by_admin`, `propose_no_authority`) and never grants authority; authority always comes from
+  `ref.v_dam_reviewer_authority` at decision time (`signed_ts`). The role is app-recorded (hashed, but app-derived).
+  - **Second approver (PROVISIONAL, same setting as the app, App Dev f0dd9c8):** `CDSE_FLAG_REQUIRE_SECOND_APPROVER`,
+    default **false**, read exactly as the app's `config._bool` (unset = false; `1|true|yes|on` = true). One bundle
+    variable `cdse_flag_require_second_approver` (default `"false"`) feeds both the app env (`resources/app.yml`) and
+    the `verify_review_chain` task parameter `--cdse_flag_require_second_approver` (env fallback). When true, an
+    `alarm_rule_flag_apply` whose `corrected_value.proposal_id` names a proposal recorded earlier in the dam chain
+    fails with **`apply_by_proposer`** (error) if the applier is that proposal's proposer (same `reviewer_id`, or same
+    email case-insensitively; proposer from the propose record and `corrected_value.proposed_by`). When false nothing
+    changes. Canon and chain fields are unchanged; the setting is not in the chain, so the verifier applies the
+    current value to every record (a later switch-on would flag earlier self-approvals). Not checked: a direct apply
+    (no recorded proposal) while the setting is on (the app refuses it with `second_approver_required`).
 - **Upgrade (v1.7 canon v2, QA-050 / QA-051; App Dev c797151, app §7 item 14):** after v1_7_001 run
   `sql/migrations/v1_7_002_canon_v2.sql` (idempotent): `audit.review_record` gains `actor_app_role STRING` and
   `canon_version INT` after `key_id` (app's names) and `ck_review_record_canon` (`canon_version IS NULL OR

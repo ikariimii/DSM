@@ -45,6 +45,10 @@ variables:
   alert_paused:
     description: PAUSED in dev so alerts do not page anyone
     default: UNPAUSED
+  cdse_flag_require_second_approver:
+    description: PROVISIONAL (Genie/App Dev, v1.6) second approver for live cdse_ack_required edits. One value for the
+      app (env CDSE_FLAG_REQUIRE_SECOND_APPROVER) and the verify_review_chain task (apply_by_proposer). Default off.
+    default: "false"
 
 # Files synced to the workspace. The licensing excludes mirror .gitignore (tests/test_license_leak.py
 # fails if they drift). Restricted data is never in the repo; these are defence in depth.

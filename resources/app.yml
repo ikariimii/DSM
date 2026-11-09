@@ -31,6 +31,9 @@ resources:
             value: ${var.catalog}
           - name: DEMO_MODE
             value: "false"
+          # PROVISIONAL second-approver rule; same bundle variable as the verify_review_chain task parameter
+          - name: CDSE_FLAG_REQUIRE_SECOND_APPROVER
+            value: ${var.cdse_flag_require_second_approver}
           # Lakebase endpoint for w.postgres.generate_database_credential(endpoint=...): projects/<p>/branches/<b>/
           # endpoints/<e>. Uses `.id`: docs.databricks.com/aws/en/oltp/projects/manage-with-bundles ("Resource
           # substitutions": `${resources.postgres_branches.<k>.id}` "references the branch resource name") and every

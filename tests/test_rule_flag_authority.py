@@ -164,3 +164,61 @@ def test_engine_action_types_match_the_app():
     assert set(ac.RULE_FLAG_ACTION_TYPES) <= set(ac.ACTION_TYPES)
     app = open(os.path.join(ROOT, "app", "backend", "audit_chain.py")).read()
     assert 'RULE_FLAG_ACTION_TYPES = ("alarm_rule_flag_propose", "alarm_rule_flag_apply", "alarm_rule_flag_reject")' in app
+
+
+# ------------------------------------------------------------------ PROVISIONAL second approver (same setting as the app)
+def _self_approved(proposer=CDSE, applier=CDSE, pid="RFP-SA"):
+    return [rec("propose", proposer, {"proposal_id": pid}),
+            rec("apply", applier, {"proposal_id": pid, "proposed_by": proposer})]
+
+
+def test_second_approver_default_is_off_and_parsed_like_the_app(monkeypatch):
+    monkeypatch.delenv(rfa.SECOND_APPROVER_SETTING, raising=False)
+    assert rfa.second_approver_required() is False                      # unset -> default false
+    assert codes(_self_approved()) == []                               # default: CDSE may apply own proposal
+    for v, want in [("true", True), (" TRUE ", True), ("1", True), ("yes", True), ("on", True), ("false", False),
+                    ("0", False), ("", False), ("no", False), ("off", False), ("enabled", False)]:
+        assert rfa.second_approver_required({rfa.SECOND_APPROVER_SETTING: v}) is want, v
+    app_cfg = open(os.path.join(ROOT, "app", "backend", "config.py")).read()      # same name, default and parsing
+    assert '_bool("CDSE_FLAG_REQUIRE_SECOND_APPROVER", False)' in app_cfg
+    assert 'in {"1", "true", "yes", "on"}' in app_cfg
+
+
+def test_second_approver_on_refuses_apply_by_the_proposer(monkeypatch):
+    probs = rfa.rule_flag_authority_problems(_self_approved(), AUTH, roles, require_second_approver=True)
+    assert [(p["code"], p["severity"]) for p in probs] == [("apply_by_proposer", "error")]
+    # same person by case-insensitive email only (different reviewer_id)
+    recs = _self_approved(pid="RFP-EM")
+    recs[1]["reviewer_id"], recs[1]["reviewer_email"] = "cdse-sub-123", CDSE.upper()
+    recs[0]["reviewer_id"] = "other-id"
+    assert [p["code"] for p in rfa.rule_flag_authority_problems(recs, AUTH, roles, require_second_approver=True)] \
+        == ["apply_by_proposer"]
+    # env switch, as the app reads it
+    monkeypatch.setenv(rfa.SECOND_APPROVER_SETTING, "true")
+    assert codes(_self_approved(pid="RFP-ENV")) == ["apply_by_proposer"]
+
+
+def test_second_approver_on_allows_a_different_cdse_applier_and_direct_apply_unchanged(monkeypatch):
+    monkeypatch.delenv(rfa.SECOND_APPROVER_SETTING, raising=False)
+    on = lambda recs: [p["code"] for p in rfa.rule_flag_authority_problems(recs, AUTH, roles, True)]
+    # admin proposes, CDSE applies: a second approver -> fine
+    assert on(_self_approved(proposer=ADMIN, applier=CDSE, pid="RFP-2A")) == []
+    # direct apply (no recorded proposal): not in scope of this rule
+    assert on([rec("apply", CDSE, {"proposal_id": "RFP-D", "proposed_by": CDSE})]) == []
+    # off: identical results to the default
+    off = lambda recs: [p["code"] for p in rfa.rule_flag_authority_problems(recs, AUTH, roles, False)]
+    assert off(_self_approved(pid="RFP-OFF")) == codes(_self_approved(pid="RFP-OFF2")) == []
+
+
+def test_verify_job_passes_the_setting_from_the_bundle_variable(monkeypatch):
+    errs, _ = vj.authority_failures(_self_approved(pid="RFP-J"), AUTH, require_second_approver=True)
+    assert [e["code"] for e in errs] == ["apply_by_proposer"]
+    errs, _ = vj.authority_failures(_self_approved(pid="RFP-J2"), AUTH, require_second_approver=False)
+    assert errs == []
+    jobs = open(os.path.join(ROOT, "resources", "jobs.yml")).read()
+    assert '"--cdse_flag_require_second_approver", "${var.cdse_flag_require_second_approver}"' in jobs
+    app_res = open(os.path.join(ROOT, "resources", "app.yml")).read()
+    assert re.search(r"- name: CDSE_FLAG_REQUIRE_SECOND_APPROVER\s+value: \$\{var\.cdse_flag_require_second_approver\}",
+                     app_res)
+    bundle = open(os.path.join(ROOT, "databricks.yml")).read()
+    assert re.search(r"cdse_flag_require_second_approver:\n(?:\s+.*\n)*?\s+default: \"false\"", bundle)

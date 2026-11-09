@@ -22,7 +22,11 @@ except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
 from dam_safety.audit_chain import (CHAIN_FIELDS_V2, PROD_CATALOGS, SignerConfigError, load_signer,
                                     require_signer_for_catalog, verify_with_chain_heads)
-from dam_safety.rule_flag_authority import rule_flag_authority_problems
+from dam_safety.rule_flag_authority import (SECOND_APPROVER_SETTING, rule_flag_authority_problems,
+                                            second_approver_required)
+
+# job parameter carrying the bundle variable cdse_flag_require_second_approver (same value as the app's env)
+SECOND_APPROVER_ARG = "cdse_flag_require_second_approver"
 
 
 def review_record_select_cols() -> str:
@@ -56,15 +60,17 @@ def verify_all(records, heads, signer=None, catalog=None):
     return out
 
 
-def authority_failures(records, authority, app_roles=None):
-    """§7.13: alarm_rule records re-checked against ref.v_dam_reviewer_authority at signed_ts. Returns (errors, warns)."""
-    probs = rule_flag_authority_problems(records, authority, app_roles)
+def authority_failures(records, authority, app_roles=None, require_second_approver=None):
+    """§7.13: alarm_rule records re-checked against ref.v_dam_reviewer_authority at signed_ts. Returns (errors, warns).
+    require_second_approver None = read CDSE_FLAG_REQUIRE_SECOND_APPROVER from the environment (app parsing)."""
+    probs = rule_flag_authority_problems(records, authority, app_roles, require_second_approver)
     return [p for p in probs if p["severity"] == "error"], [p for p in probs if p["severity"] != "error"]
 
 
 def start():
     """Job start: parse args, build the signer, fail closed for prod. Returns (args, signer). No data is read."""
-    a = _common.args(("chain_signer", os.environ.get("DAM_CHAIN_SIGNER", "none")))
+    a = _common.args(("chain_signer", os.environ.get("DAM_CHAIN_SIGNER", "none")),
+                     (SECOND_APPROVER_ARG, os.environ.get(SECOND_APPROVER_SETTING)))
     signer = load_signer(a.chain_signer)
     require_signer_for_catalog(a.catalog, signer)
     return a, signer
@@ -86,7 +92,10 @@ def main():
     authority = [r.asDict() for r in spark.sql(
         f"SELECT dam_id, principal, CAST(granted_ts AS STRING) AS granted_ts, CAST(revoked_ts AS STRING) AS revoked_ts "
         f"FROM {a.catalog}.ref.v_dam_reviewer_authority").collect()]
-    errors, warns = authority_failures(records, authority)     # canon 2: role from actor_app_role; canon 1: unverified
+    second = second_approver_required({SECOND_APPROVER_SETTING: getattr(a, SECOND_APPROVER_ARG)}
+                                      if getattr(a, SECOND_APPROVER_ARG) is not None else {})
+    print(json.dumps({SECOND_APPROVER_SETTING: second}))
+    errors, warns = authority_failures(records, authority, require_second_approver=second)
     for p in errors + warns:
         print(json.dumps(p, default=str))
     bad = [v for v in res if not v["ok"]]

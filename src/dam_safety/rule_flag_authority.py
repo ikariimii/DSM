@@ -24,11 +24,22 @@ Canon-1 records (canon_version NULL, before c797151) have no role: the optional 
 callable is used, and without it a non-CDSE proposal stays `propose_role_unverified` (warn) and a non-CDSE
 apply/reject is `apply_not_cdse` / `reject_not_cdse` (still an error: CDSE authority alone decides).
 Independence caveat: actor_app_role is recorded by the app (DA decision recorded in docs/VERIFICATION.md).
+actor_app_role is EVIDENCE ONLY (Genie 2026-11-09): it only adds failure codes (apply_by_admin / reject_by_admin,
+propose_no_authority); it never grants authority. Authority always comes from ref.v_dam_reviewer_authority at signed_ts.
+
+Second approver (PROVISIONAL, same setting and parsing as the app, App Dev f0dd9c8 backend/config.py):
+CDSE_FLAG_REQUIRE_SECOND_APPROVER, default false. When true, an alarm_rule_flag_apply whose corrected_value.proposal_id
+references a proposal recorded earlier in the chain fails with `apply_by_proposer` if the applier is that proposal's
+proposer (same reviewer_id, or same email case-insensitively; proposer taken from the propose record and from
+corrected_value.proposed_by). When false nothing changes. The setting is not in the chain, so the verifier applies the
+CURRENT setting to every record; canon and chain fields are unchanged. Not covered (not asked): a direct apply (no
+recorded proposal) while the setting is on, which the app refuses (second_approver_required).
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from typing import Callable, Iterable, List, Mapping, Optional
 
 from dam_safety.audit_chain import ACTOR_ROLE_FIELD, actor_role_problem, actor_roles, canon_of
@@ -50,7 +61,18 @@ CODES = {
     "cdse_level_without_authority": "error",
     "rationale_missing": "error",           # defence in depth (the UC CHECK also refuses it)
     "decision_action_mismatch": "error",
+    "apply_by_proposer": "error",           # CDSE_FLAG_REQUIRE_SECOND_APPROVER on: applier == proposer of the proposal
 }
+SECOND_APPROVER_SETTING = "CDSE_FLAG_REQUIRE_SECOND_APPROVER"
+
+
+def second_approver_required(environ=None) -> bool:
+    """Read CDSE_FLAG_REQUIRE_SECOND_APPROVER exactly as the app's config._bool does: unset -> False (default);
+    otherwise true only for 1 / true / yes / on (case-insensitive, surrounding whitespace ignored)."""
+    v = (os.environ if environ is None else environ).get(SECOND_APPROVER_SETTING)
+    if v is None:
+        return False
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
 _DECISION = {"alarm_rule_flag_propose": "propose", "alarm_rule_flag_apply": "apply", "alarm_rule_flag_reject": "reject"}
 
 
@@ -85,12 +107,13 @@ def _cv(rec) -> dict:
 
 
 def rule_flag_authority_problems(records: Iterable[Mapping], authority: Iterable[Mapping],
-                                 app_roles: Optional[Callable[[str, str, dt.datetime], Optional[str]]] = None
-                                 ) -> List[dict]:
+                                 app_roles: Optional[Callable[[str, str, dt.datetime], Optional[str]]] = None,
+                                 require_second_approver: Optional[bool] = None) -> List[dict]:
     """Check every alarm_rule record. Returns [{review_id, dam_id, chain_seq, action_type, code, severity, detail}]
     (empty = all authorised). `authority`: ref.v_dam_reviewer_authority rows (dam_id, principal, granted_ts,
     revoked_ts). `app_roles(dam_id, principal_lower, signed_ts)` -> 'dam_admin' | 'admin' | other role | None."""
     authority = list(authority)
+    second = second_approver_required() if require_second_approver is None else bool(require_second_approver)
     recs = sorted((r for r in records if r.get("subject_type") == "alarm_rule"),
                   key=lambda r: (str(r.get("chain_id")), int(r.get("chain_seq") or 0)))
     proposals = {}
@@ -152,4 +175,10 @@ def rule_flag_authority_problems(records: Iterable[Mapping], authority: Iterable
         direct_or_own = verb == "apply" and (not proposer or proposer in _who(r))
         if not direct_or_own and (dam, pid) not in proposals:
             bad(r, f"{verb}_proposal_missing", f"proposal {pid!r} is not recorded earlier in the chain")
+        if second and verb == "apply" and (dam, pid) in proposals:
+            prop = proposals[(dam, pid)]
+            proposer_ids = _who(prop) | ({proposer} if proposer else set())
+            if proposer_ids & _who(r):
+                bad(r, "apply_by_proposer", f"{SECOND_APPROVER_SETTING} is on: proposal {pid!r} was applied by its "
+                    f"own proposer (seq {prop.get('chain_seq')})")
     return out

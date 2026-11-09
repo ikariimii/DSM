@@ -106,7 +106,9 @@ resources:
           environment_key: pg
           spark_python_task:
             python_file: ../src/jobs/verify_review_chain.py
-            parameters: [ "--catalog", "${var.catalog}" ]
+            # PROVISIONAL second-approver rule: same bundle variable as the app's CDSE_FLAG_REQUIRE_SECOND_APPROVER
+            parameters: [ "--catalog", "${var.catalog}",
+                          "--cdse_flag_require_second_approver", "${var.cdse_flag_require_second_approver}" ]
       environments:
         - environment_key: pg
           spec:
