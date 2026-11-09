@@ -1,6 +1,6 @@
 diff -ru a/app/backend/repos/state.py b/app/backend/repos/state.py
---- a/app/backend/repos/state.py	2026-11-09 12:51:16.807964441 -0500
-+++ b/app/backend/repos/state.py	2026-11-09 12:51:38.799550695 -0500
+--- a/app/backend/repos/state.py	2026-11-09 13:13:09.531267093 -0500
++++ b/app/backend/repos/state.py	2026-11-09 13:13:22.191028914 -0500
 @@ -132,9 +132,18 @@
      # deleted LAST record detectable. Updated only inside the append transaction.
      """CREATE TABLE IF NOT EXISTS {s}review_chain_head (
@@ -21,29 +21,35 @@ diff -ru a/app/backend/repos/state.py b/app/backend/repos/state.py
  # Outbox rows are immutable except the publisher's bookkeeping columns (DA contract); DELETE / TRUNCATE refused.
  OUTBOX_GUARDED = ("dssmp_registration_outbox", "dam_cdse_outbox")
  OUTBOX_MUTABLE_COLS = ("status", "reason_code", "message", "processed_at")
-@@ -705,23 +714,35 @@
-                     "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role", "canon_version")
+@@ -781,11 +790,13 @@
  
-     def append_chained(self, chain_id: str, genesis: str, finalize, also=None, also_row=None) -> dict:
+     def append_chained(self, chain_id: str, genesis: str, finalize, also=None, also_row=None, *,
+                        lock_key: str | None = None, check=None) -> dict:
 -        """Append one record to `chain_id` atomically. Under the chain-head lock (Postgres: SELECT ... FOR UPDATE on
 -        review_chain_head; sqlite: the BEGIN IMMEDIATE write lock) read (seq, head_hash), call
 -        finalize(seq + 1, head_hash) -> complete row, INSERT it, advance the head, then run also(q) (e.g. the alarm
 -        state change) in the SAME transaction. Two app instances therefore cannot fork the chain; the UNIQUE
--        (chain_id, chain_seq) index is the backstop. Nothing is ever updated in review_signoff."""
+-        (chain_id, chain_seq) index is the backstop. Nothing is ever updated in review_signoff.
 +        """Append one record to `chain_id` atomically. Under the per-chain lock (Postgres: transaction-scoped
 +        advisory lock CHAIN_LOCK_CLASS / hashtext(chain_id); sqlite: the BEGIN IMMEDIATE write lock) read the current
 +        head = the highest chain_seq in review_chain_head_log (seeded once from the legacy review_chain_head, else
 +        genesis at seq 0), call finalize(seq + 1, head_hash) -> complete row, INSERT it, APPEND the new head to the
 +        log (and keep the legacy head row in step for older readers), then run also(q) / also_row(q, row) in the SAME
 +        transaction. The PRIMARY KEY (chain_id, chain_seq) of the log and the UNIQUE (chain_id, chain_seq) index of
-+        review_signoff are the backstops. Nothing is ever updated in review_signoff or review_chain_head_log."""
-         with self.transaction() as q:
++        review_signoff are the backstops. Nothing is ever updated in review_signoff or review_chain_head_log.
+         QA-056: with `lock_key` the per-dam lock is taken FIRST, then check(q) re-runs the caller's state checks on
+         this transaction's connection (raise to abort: nothing is written), and only then the chain head is locked.
+         Lock order is therefore always dam -> chain head (no deadlock with appends that take no dam lock)."""
+@@ -794,17 +805,27 @@
+                 self.lock_dam(q, lock_key)
+             if check is not None:
+                 check(q)
 -            ins = ("INSERT INTO {s}review_chain_head (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s, 0, %s, %s) "
 -                   "ON CONFLICT (chain_id) DO NOTHING")
 -            q(ins, (chain_id, genesis, now_iso()))
 -            lock = " FOR UPDATE" if self.kind != "sqlite" else ""
 -            head = q("SELECT chain_seq, head_hash FROM {s}review_chain_head WHERE chain_id = %s" + lock, (chain_id,))[0]
-+            if self.kind != "sqlite":
++            if self.kind != "sqlite":   # chain lock AFTER lock_dam + check(q): order dam -> chain (QA-056)
 +                q("SELECT pg_advisory_xact_lock(%s, hashtext(%s)) AS locked", (CHAIN_LOCK_CLASS, chain_id))
 +            top = "SELECT chain_seq, head_hash FROM {s}review_chain_head_log WHERE chain_id = %s ORDER BY chain_seq DESC LIMIT 1"
 +            head = q(top, (chain_id,))
@@ -69,7 +75,7 @@ diff -ru a/app/backend/repos/state.py b/app/backend/repos/state.py
              if also is not None:
                  also(q)
              if also_row is not None:  # needs the finalized record (e.g. its record_hash) in the same transaction
-@@ -733,12 +754,17 @@
+@@ -816,12 +837,17 @@
                              (chain_id,))
  
      def chain_head(self, chain_id: str) -> dict | None:
@@ -88,10 +94,9 @@ diff -ru a/app/backend/repos/state.py b/app/backend/repos/state.py
          return sorted(i for i in ids if i)
  
      def review_signoffs(self, subject_type: str, subject_ids: list[str]) -> list[dict]:
-Only in b/app/backend/repos: state.py.rej
 diff -ru a/app/tests/test_audit_chain.py b/app/tests/test_audit_chain.py
---- a/app/tests/test_audit_chain.py	2026-11-09 12:51:16.811964366 -0500
-+++ b/app/tests/test_audit_chain.py	2026-11-09 12:51:16.815964291 -0500
+--- a/app/tests/test_audit_chain.py	2026-11-09 13:13:09.535267017 -0500
++++ b/app/tests/test_audit_chain.py	2026-11-09 13:13:09.539266942 -0500
 @@ -51,7 +51,8 @@
  
  def _unguard(st):
