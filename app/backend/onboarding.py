@@ -532,12 +532,15 @@ def _pending_note(dam_id: str, i: str | None, registrations, outbox) -> str:
     if ob is None or ob["status"] == "pending":
         return (f" - registration {r['dssmp_version_id']} is approved and waiting for the DA load job "
                 "(approved-but-not-loaded fails closed)")
-    if ob["status"].startswith("rejected") and ob.get("reason_code") == "dssmp_document_hash_mismatch":
+    if ob["status"] == "rejected" and ob.get("reason_code") == "dssmp_document_hash_mismatch":
         return (f" - the DA load job rejected outbox {ob['outbox_id']}: dssmp_document_hash_mismatch (the document "
                 "does not match its document_sha256); register the version again with the correct document")
-    if ob["status"].startswith("rejected"):
+    if ob["status"] == "rejected":
         return (f" - the DA load job rejected outbox {ob['outbox_id']}: {ob.get('reason_code') or 'no reason_code'}"
                 f" {ob.get('message') or ''}".rstrip())
+    if ob["status"] != "loaded":   # not a contract status (pending|loaded|rejected, §7 item 19): fail closed, say so
+        return (f" - outbox {ob['outbox_id']} has status {ob['status']!r}, not a contract status (pending|loaded|"
+                "rejected); the data layer must converge it (lakebase migration v1_7_004)")
     return ""
 
 

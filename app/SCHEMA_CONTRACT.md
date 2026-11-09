@@ -666,12 +666,29 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       `version_no` INTEGER, `effective_from` (TEXT ISO UTC `YYYY-MM-DDTHH:MM:SSZ`), `change_reason`, `source_ref`,
       `document_uri`, `document_sha256` **NOT NULL**, `proposed_by`, `approved_by` (emails), `approved_at` (ISO UTC),
       `approval_record_hash`, `status`, `reason_code`, `message`, `processed_at`.
-    - **Status (aligned, v1.7 steering): `pending | loaded | rejected`.** There is no `rejected_invalid` in this
-      outbox (that spelling belongs to `ref_change_publication`: `pending|applied|rejected_stale|rejected_invalid`).
-      The DA load job writes `rejected` + `reason_code` (the first code) + `message` (`<code>: <detail>`), and the app's
-      demo stand-in does the same. The app's own CHECK still lists `rejected_invalid` as a tolerated legacy value ONLY
-      because the DA's `tests/test_dssmp_outbox_contract.py` pins that CHECK text. **DA: drop it from the CHECK
-      together with that assertion; the app will follow in the same change.** The UI still shows it as a rejection.
+    - **Status: `pending | loaded | rejected` only** (`CHECK (status IN ('pending', 'loaded', 'rejected'))` in the
+      app DDL, in `lakebase/001` and in the `v1_7_004` block since DA 6709371; `state.OUTBOX_STATUSES`). There is no
+      `rejected_invalid` in this outbox; that spelling belongs to `ref_change_publication`
+      (`pending|applied|rejected_stale|rejected_invalid`). The DA load job writes `loaded`, or `rejected` +
+      `reason_code` (the first code) + `message` (`<code>: <detail>`); the app's demo stand-in does the same.
+      - **App reads contract values only.** `rejected` is a rejection; any other value (e.g. a legacy
+        `rejected_invalid` row on a database not yet migrated) is NOT treated as loaded or as a rejection: go-live
+        stays blocked (the version is not in `ref.dssmp_version`) and the wizard note names the value as "not a
+        contract status ... v1_7_004". The UI badge shows it as `bad` with "(not a contract status)".
+      - **Existing table with the old 4-value CHECK** (same for `dam_cdse_outbox`, item 20, migration
+        `v1_7_008`). The app never ALTERs it. `CREATE TABLE IF NOT EXISTS` is a
+        no-op on an existing table, and on Lakebase the table is owned by `dam_lakebase_owner` (the app runs no DDL
+        on it, item 22 / owner model). At startup `StateStore._legacy_outbox_check()` reads the CHECK
+        (`pg_get_constraintdef`; sqlite: `sqlite_master`) and logs ONE WARNING naming the extra values, the owner
+        ("owned by the data-layer owner role" | "app-owned"; `StateStore.legacy_outbox_checks` lists
+        `<table>:<value>`) and the fix: run the DA's
+        `lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql` (or re-run `lakebase/001`), which maps existing
+        `rejected_invalid` / `rejected_stale` rows to `rejected` (reason kept) and installs the 3-value CHECK. Startup
+        does not fail: the app only ever inserts `pending` (allowed by both CHECKs). Live test:
+        `app/tests/test_lakebase_owner_live.py::test_old_outbox_status_check_is_reported_never_altered_and_v1_7_004_converges_it`
+        (and `..._cdse_outbox_..._v1_7_008_...`).
+        A local demo/dev sqlite file created before this change keeps its old CHECK (sqlite cannot alter a CHECK);
+        delete the file to recreate it.
     - **Guards (app-side, while the app owns the table):** triggers refuse DELETE/TRUNCATE and any UPDATE that
       changes a column other than `status, reason_code, message, processed_at`. The app inserts only and never
       updates (demo mode excepted: a stand-in loader sets the bookkeeping columns).
@@ -729,7 +746,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       (the approve transaction rolls back, chain record included, so nothing is half-written). Decision needed from
       Genie/DA: either the DA renames to the contract, or the app inserts `requested_by`/`requested_at`/
       `supersedes_dssmp_version_id` (from `ref.dssmp_version`, fail closed) and reads `applied_at`/`message`. The
-      UI already shows both status spellings.
+      UI shows the contract statuses only (above).
     - **Already aligned with 86993d0 (compatible with both):**
       - `approved_at` / `approved_by` = the approve record's `signed_ts` / reviewer (load-job
         `approval_record_mismatch`);
@@ -805,7 +822,12 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       `dam_id`, `kind` (`assign`|`change`), `previous_cdse_id` (NULL for assign), `new_cdse_id`,
       `change_reason_code`, `proposed_by`, `approved_by`, `approved_at` (= the deciding record's `signed_ts`),
       `approval_record_hash`, `status` (`pending`|`loaded`|`rejected`), `reason_code`, `message`,
-      `processed_at`. The app inserts only. The guard triggers allow UPDATE of `status, reason_code, message,
+      `processed_at`. The app reads contract statuses only: only `rejected` closes a first-CDSE assignment, any
+      other value keeps it open (409 `cdse_assign_pending`, fail closed). CHECK `status IN ('pending', 'loaded',
+      'rejected')` in the app DDL and in `lakebase/001` (v1_7_005 CREATE + `ck_dam_cdse_outbox_status` from block
+      v1_7_008, DA d6d3c9c); no `rejected_invalid`. An existing table with the old CHECK is reported at startup and
+      never altered by the app, exactly as in item 19; the DA's `v1_7_008_cdse_outbox_status.sql` converges it
+      (rows -> `rejected`, reason kept). The app inserts only. The guard triggers allow UPDATE of `status, reason_code, message,
       processed_at` only, and refuse DELETE/TRUNCATE.
     - **DA to provision:**
       - the 4 action types and subject `dam` in the UC CHECKs and the engine;

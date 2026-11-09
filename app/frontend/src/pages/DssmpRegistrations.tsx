@@ -9,8 +9,8 @@ import { CdseChangeQueue } from "./CdsePanel";
 import { codeOf, explain } from "../codes";
 
 const REG_BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad" };
-// contract statuses pending | loaded | rejected (§7 19); applied / rejected_stale / rejected_invalid tolerated as legacy
-const OUTBOX_BADGE: Record<string, string> = { pending: "warn", loaded: "ok", applied: "ok", rejected: "bad", rejected_invalid: "bad", rejected_stale: "bad" };
+// outbox statuses: exactly the contract's pending | loaded | rejected (§7 19); anything else is flagged, never "ok"
+const OUTBOX_BADGE: Record<string, string> = { pending: "warn", loaded: "ok", rejected: "bad" };
 
 function ProvisionalNote({ policy }: { policy: any }) {
   return <div className="muted"><span className="badge warn">provisional</span> {policy?.note ?? "Approval rule provisional: currently the dam CDSE may self-approve"} (DSSMP registrations follow the same rule).</div>;
@@ -21,7 +21,7 @@ function Status({ r }: { r: any }) {
   return (
     <span>
       <span className={`badge ${REG_BADGE[r.status] || "muted"}`}>registration {r.status}</span>
-      {o && <span className={`badge ${OUTBOX_BADGE[o.status] || "muted"}`}>DA load {o.status}{o.processed_at ? ` ${utc(o.processed_at)}` : ""}</span>}
+      {o && <span className={`badge ${OUTBOX_BADGE[o.status] || "bad"}`}>DA load {o.status}{OUTBOX_BADGE[o.status] ? "" : " (not a contract status)"}{o.processed_at ? ` ${utc(o.processed_at)}` : ""}</span>}
       {r.status === "approved" && !r.ref && <span className="badge bad">not in ref.dssmp_version yet — go-live blocked</span>}
       {r.ref && <span className={`badge ${r.ref.status === "approved" && !r.ref.effective_to ? "ok" : "bad"}`}>ref {r.ref.status}{r.ref.effective_to ? ` until ${utc(r.ref.effective_to)}` : ""}</span>}
       {(o?.volume_uri || r.ref?.volume_uri) && <div className="muted">volume: {o?.volume_uri || r.ref?.volume_uri}</div>}

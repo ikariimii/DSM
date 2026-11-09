@@ -406,7 +406,8 @@ def test_document_hash_mismatch_rejection_is_explained(k, monkeypatch):
     did = _new_draft(k)
     _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE
     monkeypatch.setattr(_an(k), "load_dssmp_outbox",
-                        lambda row: ("rejected_invalid", "dssmp_document_hash_mismatch", "sha256 differs"))
+                        lambda row: ("rejected", "dssmp_document_hash_mismatch",
+                                             "dssmp_document_hash_mismatch: sha256 differs"))
     r = k.post(REGS.format(d="NEW") + "/direct", user=NEW_CDSE,
                json=body(vid="DSSMP-NEW-2026", version_no=1))
     assert r.json()["outbox"]["reason_code"] == "dssmp_document_hash_mismatch"

@@ -195,3 +195,76 @@ def test_app_role_inserts_a_contract_outbox_row_with_the_approve_record(lakebase
         assert o["approval_record_hash"] == rec["record_hash"] and o["status"] == "pending"
     finally:
         pool.close()
+
+
+MIG_004 = LB001.parent / "migrations" / "v1_7_004_dssmp_outbox_contract.sql"
+_OB_INS = ("INSERT INTO dam_app.dssmp_registration_outbox (outbox_id, dam_id, dssmp_version_id, version_no, "
+           "effective_from, document_sha256, proposed_by, approved_by, approved_at, approval_record_hash, status, "
+           "reason_code) VALUES ('{}', 'D1', 'DS-{}', 1, 't', 'h', 'p', 'c', 't', 'h', '{}', 'x_code')")
+_OB_DEF = ("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_dssmp_outbox_status' "
+           "AND conrelid = 'dam_app.dssmp_registration_outbox'::regclass")
+
+
+def test_old_outbox_status_check_is_reported_never_altered_and_v1_7_004_converges_it(lakebase, caplog):
+    """§7 item 19 (DA 6709371): a database still carrying the pre-6709371 CHECK (with 'rejected_invalid') and such a
+    row. The app (restricted role) starts normally, reports the old CHECK, runs NO DDL on the owner table and keeps
+    inserting; the DA's v1_7_004 converges it (row -> 'rejected', reason kept) and the report goes away."""
+    import logging
+    su, app = lakebase
+    _psql(su, "-c", "ALTER TABLE dam_app.dssmp_registration_outbox DROP CONSTRAINT ck_dssmp_outbox_status",
+          "-c", "ALTER TABLE dam_app.dssmp_registration_outbox ADD CONSTRAINT ck_dssmp_outbox_status CHECK "
+                "(status IN ('pending', 'loaded', 'rejected', 'rejected_invalid'))",
+          "-c", _OB_INS.format("OB-RI", "RI", "rejected_invalid"))
+    before = _psql(su, "-At", "-c", _OB_DEF).strip()
+    assert "rejected_invalid" in before
+    caplog.set_level(logging.WARNING)
+    st, pool = _store(app)
+    try:
+        assert st.legacy_outbox_checks == ["dssmp_registration_outbox:rejected_invalid"]
+        msg = [r.getMessage() for r in caplog.records if "dssmp_registration_outbox" in r.getMessage()]
+        assert msg and "owned by the data-layer owner role" in msg[0] and "v1_7_004" in msg[0]
+        st.execute(_OB_INS.format("OB-APP", "APP", "pending").replace("dam_app.", "{s}"))   # the app keeps inserting
+    finally:
+        pool.close()
+    assert _psql(su, "-At", "-c", _OB_DEF).strip() == before                 # never altered by the app
+    _psql(su, "-1", "-f", str(MIG_004))                                       # the DA's migration (deployer)
+    after = _psql(su, "-At", "-c", _OB_DEF).strip()
+    assert "rejected_invalid" not in after and "'rejected'" in after
+    rows = _psql(su, "-At", "-c", "SELECT outbox_id || ':' || status || ':' || reason_code FROM "
+                                  "dam_app.dssmp_registration_outbox ORDER BY 1").split()
+    assert rows == ["OB-APP:pending:x_code", "OB-RI:rejected:x_code"]
+    caplog.clear()
+    st, pool = _store(app)
+    try:
+        assert st.legacy_outbox_checks == []
+        assert not [r for r in caplog.records if "dssmp_registration_outbox" in r.getMessage()]
+    finally:
+        pool.close()
+
+
+def test_old_cdse_outbox_status_check_is_reported_never_altered_and_v1_7_008_converges_it(lakebase, caplog):
+    """Same for dam_cdse_outbox (DA d6d3c9c): the app reports the old CHECK, never alters it; v1_7_008 converges."""
+    import logging
+    su, app = lakebase
+    mig = LB001.parent / "migrations" / "v1_7_008_cdse_outbox_status.sql"
+    q_def = ("SELECT string_agg(pg_get_constraintdef(oid), ' ') FROM pg_constraint WHERE contype = 'c' "
+             "AND conrelid = 'dam_app.dam_cdse_outbox'::regclass AND pg_get_constraintdef(oid) LIKE '%status%'")
+    _psql(su, "-c", "ALTER TABLE dam_app.dam_cdse_outbox DROP CONSTRAINT ck_dam_cdse_outbox_status",
+          "-c", "ALTER TABLE dam_app.dam_cdse_outbox ADD CONSTRAINT ck_dam_cdse_outbox_status CHECK "
+                "(status IN ('pending', 'loaded', 'rejected', 'rejected_invalid'))")
+    before = _psql(su, "-At", "-c", q_def).strip()
+    caplog.set_level(logging.WARNING)
+    st, pool = _store(app)
+    try:
+        assert st.legacy_outbox_checks == ["dam_cdse_outbox:rejected_invalid"]
+        assert any("v1_7_008_cdse_outbox_status.sql" in r.getMessage() for r in caplog.records)
+    finally:
+        pool.close()
+    assert _psql(su, "-At", "-c", q_def).strip() == before                  # never altered by the app
+    _psql(su, "-1", "-f", str(mig))
+    assert "rejected_invalid" not in _psql(su, "-At", "-c", q_def)
+    st, pool = _store(app)
+    try:
+        assert st.legacy_outbox_checks == []
+    finally:
+        pool.close()

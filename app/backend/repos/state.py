@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -98,15 +99,16 @@ DDL = [
         size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, content_b64 TEXT NOT NULL, uploaded_by TEXT NOT NULL,
         uploaded_at TEXT NOT NULL)""",
     # DA contract (fixed): the app INSERTs at 'pending' only after CDSE approval; only the DA publisher role sets
-    # status / reason_code / message / processed_at. Contract (§7 item 19): status pending|loaded|rejected and
-    # document_sha256 NOT NULL. 'rejected_invalid' stays in this CHECK only because the DA's
-    # tests/test_dssmp_outbox_contract.py pins it; the DA job never writes it - drop it together with that test.
+    # status / reason_code / message / processed_at. Contract (§7 item 19): status pending|loaded|rejected
+    # (OUTBOX_STATUSES; DA 6709371 dropped 'rejected_invalid' in lakebase/001 + v1_7_004) and document_sha256 NOT NULL.
+    # An EXISTING table keeps whatever CHECK it was created with (CREATE TABLE IF NOT EXISTS); the app never ALTERs it
+    # (owner tables: the DA's v1_7_004 / v1_7_008 converge them) - _legacy_outbox_check() only reports an old CHECK.
     """CREATE TABLE IF NOT EXISTS {s}dssmp_registration_outbox (
         outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, dssmp_version_id TEXT NOT NULL, version_no INTEGER NOT NULL,
         effective_from TEXT NOT NULL, change_reason TEXT, source_ref TEXT, document_uri TEXT, document_sha256 TEXT NOT NULL,
         proposed_by TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL,
         approval_record_hash TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected')),
         reason_code TEXT, message TEXT, processed_at TEXT)""",
     # v1.7 dam CDSE bootstrap / change (SCHEMA_CONTRACT §7 item 20). Workflow state (chained dam_cdse_* records are the
     # evidence) and the outbox the DA's load job turns into ref.dam.cdse_id. The app NEVER writes ref.dam.
@@ -121,7 +123,7 @@ DDL = [
         outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL, previous_cdse_id TEXT,
         new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL, proposed_by TEXT NOT NULL,
         approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected')),
         reason_code TEXT, message TEXT, processed_at TEXT)""",
     # v1.7 bulk re-version of the rules set under a superseded DSSMP version (SCHEMA_CONTRACT §7 item 21).
     """CREATE TABLE IF NOT EXISTS {s}rule_reversion_proposal (
@@ -158,6 +160,12 @@ INIT_LOCK_KEY = 4702045
 # single-bigint INIT_LOCK_KEY, so it can never collide with the init lock. Lock order everywhere: dam -> chain head.
 DAM_LOCK_NS = 4702047  # != INIT_LOCK_KEY 4702045 and != the DA chain-lock class 4702046 (v17_chain_head_log_state.patch)
 DAM_LOCK_PREFIX = "dam_app.dam:"
+# §7 items 19/20: the only outbox statuses the app treats as meaningful. Anything else is shown as not a contract
+# status and handled fail closed: never as loaded, never as a refused (closed) row.
+OUTBOX_STATUSES = ("pending", "loaded", "rejected")
+# (table, the DA migration that converges an older status CHECK on it) - reported by _legacy_outbox_check, never altered
+LEGACY_OUTBOX_MIGRATIONS = (("dssmp_registration_outbox", "v1_7_004_dssmp_outbox_contract.sql"),
+                            ("dam_cdse_outbox", "v1_7_008_cdse_outbox_status.sql"))
 PUB_KIND_THRESHOLD = "ref.threshold.new_version"
 ACTIVE_PUB_STATUSES = ("pending", "applied")
 # QA-056 belt and braces: at most one open row per key, enforced by the database. Created by the app only on tables
@@ -207,6 +215,7 @@ class StateStore:
         self._conn = None
         self._tx_conn = None    # QA-045c: pinned connection while init_schema runs in one transaction
         self._tx_owner = None
+        self.legacy_outbox_checks: list[str] = []   # set by init_schema (_legacy_outbox_check)
         self.retries = int(os.getenv("PG_QUERY_RETRIES", "4")) if retries is None else retries
         if kind == "sqlite":
             self.prefix = ""
@@ -379,6 +388,7 @@ class StateStore:
             self.execute("ALTER TABLE {s}app_user ADD COLUMN IF NOT EXISTS user_id TEXT")
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON {s}app_user (user_id)")
         self._outbox_guards()
+        self._legacy_outbox_check()
         self._unique_guards()
         if self.kind == "sqlite":
             have = {r["name"] for r in self.execute("PRAGMA table_info(review_signoff)")}
@@ -426,6 +436,37 @@ class StateStore:
                 # FOR EACH STATEMENT (PG 17 docs, CREATE TRIGGER). sqlite has no TRUNCATE.
                 self.execute(f"CREATE OR REPLACE TRIGGER t_app_notrunc_{t} BEFORE TRUNCATE ON {{s}}{t} "
                              "FOR EACH STATEMENT EXECUTE FUNCTION {s}app_forbid_mutation()")
+
+    def _legacy_outbox_check(self) -> list[str]:
+        """Read-only: report (WARNING + self.legacy_outbox_checks) an outbox whose status CHECK still allows values
+        outside OUTBOX_STATUSES (the pre-6709371 / pre-d6d3c9c 4-value CHECK with 'rejected_invalid'). The app never
+        ALTERs it. On Lakebase the tables are dam_lakebase_owner's and the DA's migration converges them (old rows ->
+        'rejected', reason kept): v1_7_004 for dssmp_registration_outbox, v1_7_008 for dam_cdse_outbox. On an
+        app-owned dev/demo table the old CHECK is a superset of what the app inserts ('pending' only). Either way the
+        app keeps working. Returns ["<table>:<value>", ...] for the extra values found."""
+        found = []
+        for t, mig in LEGACY_OUTBOX_MIGRATIONS:
+            if self.kind == "sqlite":
+                rows = self.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = %s", (t,))
+                m = re.search(r"status\s+TEXT[^,]*?CHECK\s*\(\s*status\s+IN\s*\(([^()]*)\)",
+                              (rows[0]["sql"] or "") if rows else "")
+                text = m.group(1) if m else ""
+            else:
+                rows = self.execute(
+                    "SELECT pg_get_constraintdef(co.oid) AS def FROM pg_constraint co JOIN pg_class c "
+                    "ON c.oid = co.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s "
+                    "AND c.relname = %s AND co.contype = 'c'", (self.schema or "public", t))
+                defs = [str((r or {}).get("def") or "") for r in rows or []]
+                text = " ".join(d for d in defs if "status" in d)
+            extra = sorted(set(re.findall(r"'(\w+)'", text)) - set(OUTBOX_STATUSES))
+            if extra:
+                owner = "owned by the data-layer owner role" if self._pg_not_owned(t) else "app-owned"
+                log.warning("%s (%s): status CHECK still allows %s. The app inserts only 'pending', reads only %s and "
+                            "does NOT alter the table: run the DA's lakebase/migrations/%s (or re-run lakebase/001) "
+                            "to converge it.", t, owner, extra, "|".join(OUTBOX_STATUSES), mig)
+                found += [f"{t}:{v}" for v in extra]
+        self.legacy_outbox_checks = found
+        return found
 
     def _outbox_guards(self) -> None:
         """DSSMP outbox (DA contract): rows are immutable except the publisher's bookkeeping columns, and never deleted
