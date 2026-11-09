@@ -144,8 +144,15 @@ def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationa
         st.insert_ref_publication(q, pub_id, PUB_KIND, dam_id, pid, payload, c.email,
                                   "applied" if demo else "pending")
 
+    def check(q):  # QA-056: no other N+1 of this rule queued or published since the read (dam lock held)
+        newer = st.newer_publications(q, dam_id, tid, _version(rule))
+        if newer:
+            raise HTTPException(409, {"code": "flag_stale", "message": f"{tid}: version {newer[-1]} was queued "
+                                      f"concurrently (this change was based on v{_version(rule)}); reload and retry - "
+                                      "nothing was written"})
+
     try:
-        rec = sg.append(st, request, base, also, c=c, an=an)
+        rec = sg.append(st, request, base, also, c=c, an=an, check=check)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     if demo:

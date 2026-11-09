@@ -824,6 +824,40 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       Add the 3 action types and the subject type to the CHECKs.
     - Alarms and open episodes are not touched (the flag is carried unchanged; the ack rule ORs the episode
       snapshot). `GET /api/rule-reversions/pending` is the caller's CDSE queue.
+22. **QA-056: concurrent state-checked writes serialize per dam (v1.7).** Two concurrent `dam_cdse_assign` POSTs
+    both returned 200, each writing a chain record and an outbox row. Now exactly one wins, and the loser gets 409
+    and writes nothing.
+    - **Lock:** every chained write (`routers/signoffs.append`) runs
+      `pg_advisory_xact_lock(DAM_LOCK_NS = 4702047, hashtext('dam_app.dam:' || dam_id))` FIRST in its transaction.
+      This two-key form is a separate advisory keyspace from the single-bigint init lock `INIT_LOCK_KEY 4702045`, and class 4702047 is distinct from the DA chain-lock class 4702046 (`tools/patches/v17_chain_head_log_state.patch`). **DA: when you re-base that patch onto `append_chained`, take the chain lock AFTER `lock_dam` + `check(q)`** (order dam → chain).
+      The route's state checks then re-run on the transaction's own connection (`check(q)`), and only after that is
+      the chain head locked (`FOR UPDATE`). Lock order is always dam → chain head, so there is no deadlock. sqlite
+      (demo) is serialized by `BEGIN IMMEDIATE`; the checks run inside it too.
+    - **Re-checked inside the transaction:**
+      - first-CDSE assign: open assignment, or a pending CDSE outbox row (409 `cdse_assign_pending`);
+      - CDSE change propose: one pending change per dam (`cdse_change_pending`);
+      - CDSE change approve: no pending CDSE outbox row (`cdse_load_pending`; the double approve was already refused
+        by the conditional UPDATE);
+      - DSSMP propose / direct: one pending-or-approved registration per version id (`dssmp_registration_open`);
+      - DSSMP approve / direct: one pending outbox row per version (`dssmp_load_pending`);
+      - re-version propose: one pending per dam (`reversion_pending`);
+      - re-version approve: no N+1 queued concurrently for any of its rules (`reversion_stale`);
+      - cdse_ack flag apply: no other N+1 of the rule queued since the read (`flag_stale`);
+      - flag proposal decide: the UPDATE is now conditional (`RETURNING`), so a concurrent decision gives 409.
+    - **Unique partial indexes (belt and braces).** A violation is a 409 `concurrent_write` with nothing written.
+      - Created by the app on the tables it owns: `dam_cdse_change_one_pending (dam_id) WHERE status='pending'`,
+        `dssmp_registration_one_open (dssmp_version_id) WHERE status IN ('pending','approved')` and
+        `rule_reversion_one_pending (dam_id) WHERE status='pending'`.
+      - On tables owned by `dam_lakebase_owner`, the app skips them. **DA: apply
+        `tools/patches/qa056_unique_guards.patch`.** It adds lakebase/001 block `v1_7_007` and migration `v1_7_007`
+        (+ down) with three indexes:
+        - `dam_cdse_outbox_one_pending (dam_id) WHERE status='pending'`;
+        - `dssmp_outbox_one_pending (dssmp_version_id) WHERE status='pending'`;
+        - `ref_change_publication_one_version (dam_id, payload->>threshold_id, payload->insert->>threshold_version)
+          WHERE kind='ref.threshold.new_version' AND status IN ('pending','applied')`.
+      - Run the migration's duplicate pre-check first.
+    - **Not serialized by the app:** `ref.dam` / `ref.v_dam_reviewer_authority` (live, cdse_exists) and
+      `ref.dssmp_version`. Only the DA load jobs change them, and those are fed by the guarded outboxes.
 
 ## 8. Contract items for v1.8 (logged, not implemented)
 

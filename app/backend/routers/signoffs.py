@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import audit_chain as ac
 from ..deps import Ctx, ctx, require, require_admin, store
+from ..repos.state import is_unique_violation
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -86,12 +87,23 @@ def actor_app_role(c: Ctx, dam_id: str, an) -> str:
     return ",".join(sorted(roles))
 
 
-def append(st, request: Request, base: dict, also=None, *, c: Ctx, an, also_row=None) -> dict:
+def append(st, request: Request, base: dict, also=None, *, c: Ctx, an, also_row=None, check=None) -> dict:
     """Append one canon-2 record: actor_app_role and canon_version are set HERE from the server-side identity,
-    overriding anything in `base` (which is itself built server-side; request bodies never carry them)."""
+    overriding anything in `base` (which is itself built server-side; request bodies never carry them).
+    QA-056: every chained write takes the per-dam lock first (lock order dam -> chain head), then `check(q)` re-runs
+    the route's state checks inside the same transaction (an HTTPException there aborts it: nothing is written).
+    A unique violation (the DB belt-and-braces indexes) is a 409 concurrent_write, with nothing written either."""
     signer = getattr(request.app.state, "signer", None) or ac.NoopSigner()
     base = {**base, ac.ACTOR_ROLE_FIELD: actor_app_role(c, base["dam_id"], an), ac.CANON_FIELD: ac.CANON_VERSION}
-    return st.append_chained(base["dam_id"], ac.GENESIS, ac.finalizer(base, signer), also, also_row=also_row)
+    try:
+        return st.append_chained(base["dam_id"], ac.GENESIS, ac.finalizer(base, signer), also, also_row=also_row,
+                                 lock_key=base["dam_id"], check=check)
+    except Exception as e:
+        if is_unique_violation(e):
+            raise HTTPException(409, {"code": "concurrent_write",
+                                      "message": "a concurrent request already recorded this; nothing was written "
+                                                 "(reload and retry)"}) from e
+        raise
 
 
 def _verify(st, request: Request, chain_id: str) -> dict:

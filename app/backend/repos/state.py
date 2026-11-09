@@ -141,6 +141,38 @@ OUTBOX_MUTABLE_COLS = ("status", "reason_code", "message", "processed_at")
 # QA-045c: transaction-scoped advisory lock key shared with ../lakebase/001_app_schema.sql, so app inits and the
 # data-layer script serialize against each other and no session ever sees an append-only table without its guard.
 INIT_LOCK_KEY = 4702045
+# QA-056: per-dam transaction-scoped advisory lock taken FIRST in every chained write (sg.append ->
+# append_chained(lock_key=dam_id)), before the state re-checks and before the chain head row lock. Two-key form
+# pg_advisory_xact_lock(DAM_LOCK_NS, hashtext('dam_app.dam:' || dam_id)): a separate advisory keyspace from the
+# single-bigint INIT_LOCK_KEY, so it can never collide with the init lock. Lock order everywhere: dam -> chain head.
+DAM_LOCK_NS = 4702047  # != INIT_LOCK_KEY 4702045 and != the DA chain-lock class 4702046 (v17_chain_head_log_state.patch)
+DAM_LOCK_PREFIX = "dam_app.dam:"
+PUB_KIND_THRESHOLD = "ref.threshold.new_version"
+ACTIVE_PUB_STATUSES = ("pending", "applied")
+# QA-056 belt and braces: at most one open row per key, enforced by the database. Created by the app only on tables
+# it owns (sqlite / app-provisioned Lakebase); on tables owned by dam_lakebase_owner (the outboxes and
+# ref_change_publication in lakebase/001) the DA adds the same indexes (tools/patches/qa056_unique_guards.patch).
+# A unique violation inside a chained write maps to 409 concurrent_write (routers/signoffs.append).
+UNIQUE_GUARDS = (
+    ("dam_cdse_change_one_pending", "dam_cdse_change", "(dam_id) WHERE status = 'pending'"),
+    ("dam_cdse_outbox_one_pending", "dam_cdse_outbox", "(dam_id) WHERE status = 'pending'"),
+    ("dssmp_registration_one_open", "dssmp_registration",
+     "(dssmp_version_id) WHERE status IN ('pending', 'approved')"),
+    ("dssmp_outbox_one_pending", "dssmp_registration_outbox", "(dssmp_version_id) WHERE status = 'pending'"),
+    ("rule_reversion_one_pending", "rule_reversion_proposal", "(dam_id) WHERE status = 'pending'"),
+)
+# one active (pending or applied) N+1 publication per rule version; dialect-specific JSON expressions
+PUB_GUARD = ("ref_change_publication_one_version", "ref_change_publication", {
+    "sqlite": "(dam_id, json_extract(payload, '$.threshold_id'), json_extract(payload, '$.insert.threshold_version'))",
+    "pg": "(dam_id, (payload::jsonb ->> 'threshold_id'), (payload::jsonb -> 'insert' ->> 'threshold_version'))"},
+    f"kind = '{PUB_KIND_THRESHOLD}' AND status IN ('pending', 'applied')")
+
+
+def is_unique_violation(e: BaseException) -> bool:
+    """sqlite3 UNIQUE IntegrityError or Postgres SQLSTATE 23505 (psycopg UniqueViolation)."""
+    if isinstance(e, sqlite3.IntegrityError):
+        return "UNIQUE" in str(e).upper()
+    return getattr(e, "sqlstate", None) == "23505" or getattr(getattr(e, "diag", None), "sqlstate", None) == "23505"
 # columns the v2 chain adds to a review_signoff table created earlier by lakebase/001 (v1 columns)
 SIGNOFF_V2_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id",
                    "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role",
@@ -282,6 +314,45 @@ class StateStore:
                                f"disabled triggers {disabled}, chain index {idx}, canon CHECK "
                                f"ck_review_signoff_canon {canon}); re-run lakebase/001_app_schema.sql")
 
+    def _unique_guards(self) -> None:
+        """QA-056: the unique partial indexes on app-owned tables (skipped, with a log line, where the table is owned
+        by dam_lakebase_owner: the DA creates them there). Existing duplicates (pre-fix races) are logged and left to
+        an operator; the in-transaction checks under the dam lock still refuse new ones."""
+        dialect = "sqlite" if self.kind == "sqlite" else "pg"
+        guards = [(n, t, c) for n, t, c in UNIQUE_GUARDS]
+        name, table, exprs, where = PUB_GUARD
+        guards.append((name, table, f"{exprs[dialect]} WHERE {where}"))
+        for name, table, cols in guards:
+            if self._pg_not_owned(table):
+                log.info("unique guard %s skipped: %s is owned by the data-layer owner role (DA creates it)", name, table)
+                continue
+            try:
+                self.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {{s}}{table} {cols}")
+            except Exception as e:  # noqa: BLE001 - duplicates from before the fix: log, keep serving
+                if not is_unique_violation(e):
+                    raise
+                log.error("unique guard %s NOT created on %s: existing duplicate rows (%s)", name, table, e)
+
+    def lock_dam(self, q, dam_id: str) -> None:
+        """QA-056: the per-dam transaction lock (Postgres advisory, released at commit/rollback). sqlite: BEGIN
+        IMMEDIATE (plus the store's RLock) already serializes every write transaction, so nothing to take."""
+        if self.kind != "sqlite":
+            q("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (DAM_LOCK_NS, DAM_LOCK_PREFIX + str(dam_id)))
+
+    @staticmethod
+    def newer_publications(q, dam_id: str, threshold_id: str, base_version: int) -> list[int]:
+        """Versions above `base_version` already queued or published (pending / applied) for this rule, read on the
+        write transaction's connection (QA-056: re-checked under the dam lock)."""
+        rows = q("SELECT payload FROM {s}ref_change_publication WHERE dam_id = %s AND kind = %s AND status IN "
+                 "('pending', 'applied')", (dam_id, PUB_KIND_THRESHOLD))
+        out = []
+        for r in rows:
+            p = json.loads(r["payload"])
+            v = (p.get("insert") or {}).get("threshold_version")
+            if p.get("threshold_id") == threshold_id and v is not None and int(v) > int(base_version):
+                out.append(int(v))
+        return sorted(out)
+
     def _init_schema(self) -> None:
         serial = "INTEGER PRIMARY KEY AUTOINCREMENT" if self.kind == "sqlite" else "BIGSERIAL PRIMARY KEY"
         if self.kind != "sqlite" and self.schema and not self._pg_not_owned():
@@ -297,6 +368,7 @@ class StateStore:
             self.execute("ALTER TABLE {s}app_user ADD COLUMN IF NOT EXISTS user_id TEXT")
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON {s}app_user (user_id)")
         self._outbox_guards()
+        self._unique_guards()
         if self.kind == "sqlite":
             have = {r["name"] for r in self.execute("PRAGMA table_info(review_signoff)")}
             for col in SIGNOFF_V2_COLS:
@@ -630,9 +702,12 @@ class StateStore:
         cur = q("SELECT status FROM {s}alarm_rule_flag_proposal WHERE proposal_id = %s", (proposal_id,))
         if not cur or cur[0]["status"] != "pending":
             raise ValueError(f"proposal {proposal_id} is no longer pending")
-        q("UPDATE {s}alarm_rule_flag_proposal SET status = %s, decided_by = %s, decided_by_id = %s, decided_at = %s, "
-          "decision_rationale = %s, pub_id = %s, new_threshold_version = %s WHERE proposal_id = %s AND status = 'pending'",
-          (status, by, by_id, at, rationale, pub_id, new_version, proposal_id))
+        n = q("UPDATE {s}alarm_rule_flag_proposal SET status = %s, decided_by = %s, decided_by_id = %s, "
+              "decided_at = %s, decision_rationale = %s, pub_id = %s, new_threshold_version = %s "
+              "WHERE proposal_id = %s AND status = 'pending' RETURNING proposal_id",
+              (status, by, by_id, at, rationale, pub_id, new_version, proposal_id))
+        if not n:  # QA-056: decided concurrently between the read and the update (Postgres READ COMMITTED)
+            raise ValueError(f"proposal {proposal_id} is no longer pending")
 
     @staticmethod
     def insert_ref_publication(q, pub_id: str, kind: str, dam_id: str, proposal_id: str | None, payload: dict,
@@ -704,13 +779,21 @@ class StateStore:
                     "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
                     "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role", "canon_version")
 
-    def append_chained(self, chain_id: str, genesis: str, finalize, also=None, also_row=None) -> dict:
+    def append_chained(self, chain_id: str, genesis: str, finalize, also=None, also_row=None, *,
+                       lock_key: str | None = None, check=None) -> dict:
         """Append one record to `chain_id` atomically. Under the chain-head lock (Postgres: SELECT ... FOR UPDATE on
         review_chain_head; sqlite: the BEGIN IMMEDIATE write lock) read (seq, head_hash), call
         finalize(seq + 1, head_hash) -> complete row, INSERT it, advance the head, then run also(q) (e.g. the alarm
         state change) in the SAME transaction. Two app instances therefore cannot fork the chain; the UNIQUE
-        (chain_id, chain_seq) index is the backstop. Nothing is ever updated in review_signoff."""
+        (chain_id, chain_seq) index is the backstop. Nothing is ever updated in review_signoff.
+        QA-056: with `lock_key` the per-dam lock is taken FIRST, then check(q) re-runs the caller's state checks on
+        this transaction's connection (raise to abort: nothing is written), and only then the chain head is locked.
+        Lock order is therefore always dam -> chain head (no deadlock with appends that take no dam lock)."""
         with self.transaction() as q:
+            if lock_key is not None:
+                self.lock_dam(q, lock_key)
+            if check is not None:
+                check(q)
             ins = ("INSERT INTO {s}review_chain_head (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s, 0, %s, %s) "
                    "ON CONFLICT (chain_id) DO NOTHING")
             q(ins, (chain_id, genesis, now_iso()))

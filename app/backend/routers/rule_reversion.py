@@ -122,7 +122,13 @@ def create(c: Ctx, request: Request, an, st, dam_id: str, to: str, rationale: st
     base = _record(c, request, an, dam_id, pid, "rule_reversion_propose", "propose", rationale,
                    {"rules": rules}, {"proposal_id": pid, "to_dssmp_version_id": to, "rule_count": len(rules),
                                       "proposed_by": c.email, "state": "pending"})
-    rec = sg.append(st, request, base, lambda q: st.insert_row(q, "rule_reversion_proposal", row), c=c, an=an)
+    def check(q):  # QA-056: one pending proposal per dam, re-checked under the dam lock
+        if q("SELECT proposal_id FROM {s}rule_reversion_proposal WHERE dam_id = %s AND status = 'pending'", (dam_id,)):
+            raise HTTPException(409, {"code": "reversion_pending", "message": f"{dam_id} already has a pending "
+                                                                              "re-version proposal"})
+
+    rec = sg.append(st, request, base, lambda q: st.insert_row(q, "rule_reversion_proposal", row), c=c, an=an,
+                    check=check)
     st.audit(c.email, "rule_reversion_propose", dam_id, to, {"proposal_id": pid, "rules": len(rules)})
     return {**_out(row), "chain_seq": rec["chain_seq"]}
 
@@ -212,8 +218,17 @@ def approve(dam_id: str, proposal_id: str, body: DecisionBody, request: Request,
             st.insert_ref_publication(q, pub, ar.PUB_KIND, dam_id, proposal_id, pl | {
                 "approval_record_hash": rec["record_hash"]}, c.email, "applied" if demo else "pending")
 
+    def check(q):  # QA-056: no N+1 queued or published for any of the rules since the read (dam lock held)
+        raced = [f"{r['threshold_id']}: v{st.newer_publications(q, dam_id, r['threshold_id'], int(r['threshold_version']))[-1]} "
+                 "already queued" for r in rules
+                 if st.newer_publications(q, dam_id, r["threshold_id"], int(r["threshold_version"]))]
+        if raced:
+            raise HTTPException(409, {"code": "reversion_stale", "stale": raced, "not_covered": [],
+                                      "message": "another change to these rules was queued concurrently; reject the "
+                                                 "proposal and propose again (nothing was queued)"})
+
     try:
-        rec = sg.append(st, request, base, c=c, an=an, also_row=also_row)
+        rec = sg.append(st, request, base, c=c, an=an, also_row=also_row, check=check)
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     if demo:

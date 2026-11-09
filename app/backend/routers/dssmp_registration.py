@@ -300,6 +300,28 @@ def _validated(dam_id: str, body: ProposeBody, st, an) -> dict:
     return reg
 
 
+def _open_check(vid: str):
+    """QA-056: the one-open-registration-per-version rule re-checked inside the write transaction (dam lock held;
+    the version id is global, so the unique index dssmp_registration_one_open also covers two dams racing)."""
+    def check(q):
+        live = q("SELECT registration_id, status FROM {s}dssmp_registration WHERE dssmp_version_id = %s AND status IN "
+                 "('pending', 'approved')", (vid,))
+        if live:
+            raise HTTPException(409, {"code": "dssmp_registration_open",
+                                      "message": f"{vid} already has a {live[0]['status']} registration "
+                                                 f"({live[0]['registration_id']}); nothing was written"})
+    return check
+
+
+def _no_pending_outbox_check(vid: str):
+    def check(q):
+        if q("SELECT outbox_id FROM {s}dssmp_registration_outbox WHERE dssmp_version_id = %s AND status = 'pending'",
+             (vid,)):
+            raise HTTPException(409, {"code": "dssmp_load_pending",
+                                      "message": f"{vid} already has a pending outbox row; nothing was written"})
+    return check
+
+
 def _new_row(c: Ctx, request: Request, dam_id: str, reg: dict, rationale: str) -> dict:
     who = sg.reviewer_identity(c, request)
     return {"registration_id": f"DSR-{uuid.uuid4().hex}", "dam_id": dam_id, **reg, "proposed_by": c.email,
@@ -337,7 +359,8 @@ def propose(dam_id: str, body: ProposeBody, request: Request, c: Ctx = Depends(c
     row = _new_row(c, request, dam_id, reg, rationale)
     base = _record(c, request, an, dam_id, reg["dssmp_version_id"], "dssmp_version_propose", "propose", rationale,
                    {"state": "none"}, _snapshot(row) | {"state": "pending"})
-    rec = sg.append(st, request, base, lambda q: st.insert_dssmp_registration(q, row), c=c, an=an)
+    rec = sg.append(st, request, base, lambda q: st.insert_dssmp_registration(q, row), c=c, an=an,
+                    check=_open_check(reg["dssmp_version_id"]))
     st.audit(c.email, "dssmp_version_propose", dam_id, reg["dssmp_version_id"],
              {"registration_id": row["registration_id"]})
     return {**_view(st, an, [st.dssmp_registration(row["registration_id"])])[0], "chain_seq": rec["chain_seq"]}
@@ -371,7 +394,11 @@ def register_direct(dam_id: str, body: ProposeBody, request: Request, c: Ctx = D
             "approval_record_hash": rec["record_hash"]})
         _outbox_insert(st, q, row, outbox_id, c.email, rec)
 
-    rec = sg.append(st, request, base, c=c, an=an, also_row=also_row)
+    def check(q):
+        _open_check(reg["dssmp_version_id"])(q)
+        _no_pending_outbox_check(reg["dssmp_version_id"])(q)
+
+    rec = sg.append(st, request, base, c=c, an=an, also_row=also_row, check=check)
     st.audit(c.email, "dssmp_version_register_direct", dam_id, reg["dssmp_version_id"], {"outbox_id": outbox_id})
     _demo_load(request, an, st, outbox_id)
     return {**_view(st, an, [st.dssmp_registration(row["registration_id"])])[0], "chain_seq": rec["chain_seq"],
@@ -406,7 +433,8 @@ def approve(dam_id: str, registration_id: str, body: DecisionBody, request: Requ
         _outbox_insert(st, q, r, outbox_id, c.email, rec)
 
     try:
-        rec = sg.append(st, request, base, c=c, an=an, also_row=also_row)
+        rec = sg.append(st, request, base, c=c, an=an, also_row=also_row,
+                        check=_no_pending_outbox_check(r["dssmp_version_id"]))
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     st.audit(c.email, "dssmp_version_approve", dam_id, r["dssmp_version_id"], {"outbox_id": outbox_id})

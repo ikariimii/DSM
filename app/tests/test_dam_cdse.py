@@ -159,3 +159,37 @@ def test_cdse_outbox_rows_are_immutable(k, monkeypatch):
     for sql in ("UPDATE {s}dam_cdse_outbox SET new_cdse_id = 'x@y.z'", "DELETE FROM {s}dam_cdse_outbox"):
         with pytest.raises(sqlite3.IntegrityError):
             st.execute(sql)
+
+
+# ------------------------------------------------------------------ QA-056 (demo / sqlite; live PG: test_qa056_*)
+def test_qa056_concurrent_assign_demo_exactly_one_wins(demo_settings):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    for trial in range(15):
+        c = _client(demo_settings)
+        barrier = threading.Barrier(2)
+
+        def go(n, c=c, barrier=barrier):
+            barrier.wait()
+            return assign(c, cdse_id=f"cdse.race{n}@demo.local").status_code
+        with ThreadPoolExecutor(2) as ex:
+            codes = sorted(ex.map(go, (1, 2)))
+        assert codes == [200, 409], (trial, codes)
+        assert len(_st(c).chain_rows("NEW")) == 1
+        assert len(_st(c).rows("dam_cdse_outbox", "outbox_id", dam_id="NEW")) == 1
+
+
+def test_qa056_sqlite_has_every_unique_guard_and_a_violation_is_a_409(k, monkeypatch):
+    from backend.repos import state as sm
+    st = _st(k)
+    names = {r["name"] for r in st.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {n for n, _, _ in sm.UNIQUE_GUARDS} | {sm.PUB_GUARD[0]} <= names
+    # layer 1 off: the in-transaction check passes, the unique index alone refuses the second pending change
+    assert change(k).status_code == 200
+    from backend.routers import dam_cdse
+    monkeypatch.setattr(dam_cdse, "_propose_check", lambda dam_id: None)
+    monkeypatch.setattr(st, "rows", lambda table, order, **w: [] if w.get("status") == "pending" else
+                        sm.StateStore.rows(st, table, order, **w))
+    r = change(k, cdse_id="other@demo.local")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "concurrent_write"
+    assert [x["action_type"] for x in sm.StateStore.chain_rows(st, "CRD")] == ["dam_cdse_change_propose"]

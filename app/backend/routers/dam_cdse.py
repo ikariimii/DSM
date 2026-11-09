@@ -151,6 +151,39 @@ def _open_assignment(st, dam_id: str) -> dict | None:
     return None
 
 
+# ------------------------------------------------------------------ QA-056: re-checked under the dam lock
+def _open_assignment_q(q, dam_id: str) -> dict | None:
+    """_open_assignment on the write transaction's connection (after the per-dam lock)."""
+    rows = q("SELECT c.change_id, o.status AS outbox_status FROM {s}dam_cdse_change c LEFT JOIN {s}dam_cdse_outbox o "
+             "ON o.outbox_id = c.outbox_id WHERE c.dam_id = %s AND c.kind = 'assign' AND c.status = 'approved'",
+             (dam_id,))
+    return next((r for r in rows if not (r["outbox_status"] or "").startswith("rejected")), None)
+
+
+def _no_pending_load_q(q, dam_id: str) -> None:
+    if q("SELECT outbox_id FROM {s}dam_cdse_outbox WHERE dam_id = %s AND status = 'pending'", (dam_id,)):
+        raise HTTPException(409, {"code": "cdse_load_pending",
+                                  "message": f"a CDSE event of {dam_id} is still waiting for the DA load job"})
+
+
+def _assign_check(dam_id: str):
+    def check(q):
+        if _open_assignment_q(q, dam_id):
+            raise HTTPException(409, {"code": "cdse_assign_pending",
+                                      "message": f"{dam_id} already has a first-CDSE assignment (concurrent or waiting "
+                                                 "for the DA load); nothing was written"})
+        _no_pending_load_q(q, dam_id)
+    return check
+
+
+def _propose_check(dam_id: str):
+    def check(q):
+        if q("SELECT change_id FROM {s}dam_cdse_change WHERE dam_id = %s AND status = 'pending'", (dam_id,)):
+            raise HTTPException(409, {"code": "cdse_change_pending",
+                                      "message": f"{dam_id} already has a pending change"})
+    return check
+
+
 # ------------------------------------------------------------------ read
 @router.get(BASE)
 def state(dam_id: str, request: Request, c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
@@ -212,7 +245,7 @@ def assign(dam_id: str, body: AssignBody, request: Request, c: Ctx = Depends(ctx
             "approval_record_hash": rec["record_hash"]})
         _outbox_insert(st, q, row, outbox_id, c.email, rec)
 
-    rec = sg.append(st, request, base, c=c, an=an, also_row=also_row)
+    rec = sg.append(st, request, base, c=c, an=an, also_row=also_row, check=_assign_check(dam_id))
     st.audit(c.email, "dam_cdse_assign", dam_id, new, {"outbox_id": outbox_id, "reason_code": code})
     _demo_load(request, an, st, outbox_id)
     return {**_view(st, st.rows("dam_cdse_change", "proposed_at", change_id=row["change_id"]))[0],
@@ -239,7 +272,8 @@ def propose_change(dam_id: str, body: AssignBody, request: Request, c: Ctx = Dep
     row = _new(c, request, dam_id, "change", ",".join(cur), new, code, rationale)
     base = _record(c, request, an, dam_id, "dam_cdse_change_propose", "propose", rationale,
                    {"cdse_id": ",".join(cur)}, _snap(row) | {"state": "pending"})
-    rec = sg.append(st, request, base, lambda q: st.insert_row(q, "dam_cdse_change", row), c=c, an=an)
+    rec = sg.append(st, request, base, lambda q: st.insert_row(q, "dam_cdse_change", row), c=c, an=an,
+                    check=_propose_check(dam_id))
     st.audit(c.email, "dam_cdse_change_propose", dam_id, new, {"change_id": row["change_id"], "reason_code": code})
     return {**_view(st, [row])[0], "chain_seq": rec["chain_seq"]}
 
@@ -283,7 +317,8 @@ def _decide(dam_id: str, change_id: str, body: DecisionBody, request: Request, c
             _outbox_insert(st, q, r, outbox_id, c.email, rec)
 
     try:
-        rec = sg.append(st, request, base, c=c, an=an, also_row=also_row)
+        rec = sg.append(st, request, base, c=c, an=an, also_row=also_row,
+                        check=(lambda q: _no_pending_load_q(q, dam_id)) if outbox_id else None)
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     st.audit(c.email, f"dam_cdse_change_{verb}", dam_id, r["new_cdse_id"], {"change_id": change_id})
