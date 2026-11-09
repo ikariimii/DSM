@@ -18,6 +18,8 @@ REQUIRED = {
     "reversion_not_authorized", "reversion_fields_changed", "payload_invalid",
     # go-live readiness (ref.v_dam_go_live_readiness + the app's fail-closed codes)
     "no_cdse_in_reviewer_authority", "go_live_readiness_missing", "go_live_readiness_unverifiable", "go_live_not_ready",
+    # app startup refusals (QA-058, fail closed)
+    "rule_reversion_not_owner_owned", "rule_reversion_transition_guard_disabled",
 }
 
 
@@ -28,6 +30,11 @@ def test_every_required_code_has_a_ui_message():
 def test_the_backend_readiness_codes_are_the_ones_the_ui_explains():
     from backend import onboarding as ob
     assert {ob.READINESS_MISSING, ob.READINESS_UNVERIFIABLE} <= KEYS
+
+
+def test_the_startup_refusal_codes_are_the_ones_the_ui_explains():
+    from backend.repos import state as st
+    assert {st.CODE_REVERSION_NOT_OWNER_OWNED, st.CODE_REVERSION_GUARD_DISABLED} <= KEYS
 
 
 def _da_tuple(module: str, name: str) -> set[str]:

@@ -227,6 +227,10 @@ class _Cur:
         head = "SELECT chain_seq, head_hash FROM" in sql
         self.description = [("x",)] if sql.lstrip().startswith("SELECT") else None
         self._rows = [{"chain_seq": 4, "head_hash": "f" * 64}] if head else []
+        if "pg_get_userbyid(c.relowner)" in sql:      # QA-058 startup probe: a provisioned Lakebase
+            self._rows = [{"owner": "dam_lakebase_owner"}]
+        elif "tgenabled" in sql:
+            self._rows = [{"tgenabled": "A"}]
 
     def fetchall(self):
         return self._rows

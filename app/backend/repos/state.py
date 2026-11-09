@@ -200,6 +200,28 @@ SIGNOFF_V2_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_va
 _INT_SIGNOFF_COLS = ("chain_seq", "canon_version")
 
 
+# QA-058 (DA 6420d98, lakebase v1_7_010): workflow tables owned by dam_lakebase_owner on Lakebase. On Postgres the app
+# runs NO DDL on them (no CREATE TABLE, no index): it relies on the owner's schema and verifies it at startup. The DDL
+# string above stays as the sqlite (demo) definition and as the source the DA's 001 parity test compares against.
+OWNER_MANAGED = ("rule_reversion_proposal",)
+REVERSION_TABLE = "rule_reversion_proposal"
+# the app role's column UPDATE grant (v1_7_010); StateStore.decide_pending refuses anything else on this table
+REVERSION_UPDATE_COLS = ("status", "decided_by", "decided_by_id", "decided_at", "decision_rationale", "pub_ids")
+REVERSION_TRIGGER = "t_status_rule_reversion_proposal"
+LAKEBASE_OWNER = "dam_lakebase_owner"
+# startup refusal codes (frontend/src/codes.ts explains them)
+CODE_REVERSION_NOT_OWNER_OWNED = "rule_reversion_not_owner_owned"
+CODE_REVERSION_GUARD_DISABLED = "rule_reversion_transition_guard_disabled"
+
+
+class OwnerSchemaError(RuntimeError):
+    """Startup refusal (fail closed): an owner-managed object is not provisioned as the app requires."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
 class StateStore:
     """Thin DB-API wrapper. `kind` is 'sqlite' or 'postgres'.
 
@@ -343,6 +365,8 @@ class StateStore:
         name, table, exprs, where = PUB_GUARD
         guards.append((name, table, f"{exprs[dialect]} WHERE {where}"))
         for name, table, cols in guards:
+            if self.kind != "sqlite" and table in OWNER_MANAGED:
+                continue   # QA-058: the owner's index (lakebase/001 v1_7_007), never created by the app on Postgres
             if self._pg_not_owned(table):
                 log.info("unique guard %s skipped: %s is owned by the data-layer owner role (DA creates it)", name, table)
                 continue
@@ -378,7 +402,11 @@ class StateStore:
         if self.kind != "sqlite" and self.schema and not self._pg_not_owned():
             self.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
         for ddl in DDL:
+            if self.kind != "sqlite" and any(f"{{s}}{t} (" in ddl for t in OWNER_MANAGED):
+                continue   # QA-058: owner's schema on Postgres - never created or altered by the app
             self.execute(ddl.replace("{serial}", serial))
+        if self.kind != "sqlite":
+            self._verify_reversion_owner()
         # Stable identity (X-Forwarded-User) is bound to the admin-granted email row on first sign-in.
         if self.kind == "sqlite":
             cols = {r["name"] for r in self.execute("PRAGMA table_info(app_user)")}
@@ -436,6 +464,33 @@ class StateStore:
                 # FOR EACH STATEMENT (PG 17 docs, CREATE TRIGGER). sqlite has no TRUNCATE.
                 self.execute(f"CREATE OR REPLACE TRIGGER t_app_notrunc_{t} BEFORE TRUNCATE ON {{s}}{t} "
                              "FOR EACH STATEMENT EXECUTE FUNCTION {s}app_forbid_mutation()")
+
+    def _verify_reversion_owner(self) -> None:
+        """QA-058 startup check (Postgres; fail closed, read only): rule_reversion_proposal must exist, be owned by
+        dam_lakebase_owner (by name: a superuser or the app role owning it is the pre-v1_7_010 layout), and carry the
+        status-transition trigger enabled - tgenabled 'A' (ENABLE ALWAYS, what lakebase/001 sets) or 'O' (origin;
+        accepted with a warning). 'D' (disabled), 'R' (replica only) or a missing trigger refuse start."""
+        s, t = self.schema or "public", REVERSION_TABLE
+        own = self.execute("SELECT pg_get_userbyid(c.relowner) AS owner FROM pg_class c JOIN pg_namespace n "
+                           "ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'", (s, t))
+        owner = (own[0] or {}).get("owner") if own else None
+        if owner != LAKEBASE_OWNER:
+            raise OwnerSchemaError(CODE_REVERSION_NOT_OWNER_OWNED,
+                                   f"{s}.{t} is " + (f"owned by {owner}" if owner else "missing") +
+                                   f"; it must be provisioned and owned by {LAKEBASE_OWNER} (lakebase/001 or migration "
+                                   "v1_7_010_rule_reversion_owner.sql). The app does not create or alter it.")
+        trg = self.execute("SELECT tgenabled::text AS tgenabled FROM pg_trigger WHERE NOT tgisinternal AND tgname = %s "
+                           "AND tgrelid = (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                           "WHERE n.nspname = %s AND c.relname = %s)", (REVERSION_TRIGGER, s, t))
+        state = (trg[0] or {}).get("tgenabled") if trg else None
+        if state not in ("A", "O"):
+            raise OwnerSchemaError(CODE_REVERSION_GUARD_DISABLED,
+                                   f"{s}.{t} status-transition trigger {REVERSION_TRIGGER} is "
+                                   + ({None: "missing", "D": "disabled", "R": "replica-only"}.get(state, f"in state {state!r}"))
+                                   + "; expected ENABLE ALWAYS (tgenabled 'A'): re-run lakebase/001 (v1_7_009 block)")
+        if state == "O":
+            log.warning("%s.%s trigger %s is enabled (origin) but not ALWAYS; lakebase/001 sets ENABLE ALWAYS",
+                        s, t, REVERSION_TRIGGER)
 
     def _legacy_outbox_check(self) -> list[str]:
         """Read-only: report (WARNING + self.legacy_outbox_checks) an outbox whose status CHECK still allows values
@@ -569,6 +624,10 @@ class StateStore:
     @staticmethod
     def decide_pending(q, table: str, key: str, ident: str, fields: dict) -> None:
         """UPDATE one 'pending' workflow row; raises if it was decided concurrently (aborts the chain transaction)."""
+        if table == REVERSION_TABLE and not set(fields) <= set(REVERSION_UPDATE_COLS):
+            # QA-058: the app role may UPDATE only these columns of the owner's table (v1_7_010 column grant)
+            raise ValueError(f"{table}: UPDATE of {sorted(set(fields) - set(REVERSION_UPDATE_COLS))} is not allowed "
+                             f"(only {', '.join(REVERSION_UPDATE_COLS)})")
         sets = ", ".join(f"{k} = %s" for k in fields)
         n = q(f"UPDATE {{s}}{table} SET {sets} WHERE {key} = %s AND status = 'pending' RETURNING {key}",
               (*fields.values(), ident))

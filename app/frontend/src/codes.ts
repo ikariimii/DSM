@@ -17,6 +17,9 @@ export const CODE_MESSAGES: Record<string, string> = {
   go_live_readiness_missing: "The dam is not in the go-live readiness view yet (it is not in ref.dam and has no CDSE assignment). Assign its first CDSE.",
   go_live_readiness_unverifiable: "The go-live readiness view could not be read, so go-live is blocked (fail closed). Try again later.",
   go_live_not_ready: "The go-live readiness view reports the dam as not ready.",
+  // app startup refusals on Lakebase (fail closed; StateStore._verify_reversion_owner, QA-058)
+  rule_reversion_not_owner_owned: "The app did not start: the rule re-version table is missing or not owned by the data-layer owner role. Ask the data team to re-run the Lakebase schema (lakebase/001 or migration v1_7_010).",
+  rule_reversion_transition_guard_disabled: "The app did not start: the rule re-version status-transition trigger is missing or disabled. Ask the data team to re-enable it (ENABLE ALWAYS, lakebase/001).",
   // CDSE load job refusals (dam_cdse_outbox.reason_code)
   cdse_exists: "The data layer refused the assignment: the dam already has a CDSE. Use a CDSE change instead.",
   cdse_stale: "The dam's CDSE changed since this was proposed. Propose the change again against the current CDSE.",

@@ -933,6 +933,44 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Not serialized by the app:** `ref.dam` / `ref.v_dam_reviewer_authority` (live, cdse_exists) and
       `ref.dssmp_version`. Only the DA load jobs change them, and those are fed by the guarded outboxes.
 
+23. **QA-058: `rule_reversion_proposal` is owner-owned; the app writes INSERT + a six-column UPDATE only (v1.7; DA
+    6420d98, `lakebase/migrations/v1_7_010_rule_reversion_owner.sql`, inlined in lakebase/001 as `v1_7_010`).**
+    - **DA side (fixed):** the table is owned by `dam_lakebase_owner`; the app role has `SELECT`, `INSERT` and
+      `UPDATE (status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids)` - nothing else (no
+      `DELETE`, no `TRUNCATE`, no other column). `t_status_rule_reversion_proposal` (v1_7_009,
+      `status_transition_guard('applied', 'rejected')`) is `ENABLE ALWAYS`: pending -> applied | rejected once, a
+      decided row is frozen.
+    - **App writes (all of them):** propose = `st.insert_row(q, "rule_reversion_proposal", row)`; approve / reject =
+      `st.decide_pending(q, "rule_reversion_proposal", "proposal_id", id, {...})` with only those six columns.
+      `state.REVERSION_UPDATE_COLS` lists them and `decide_pending` raises `ValueError` before any SQL for another
+      column on this table. No `UPDATE` / `DELETE` / DDL on it elsewhere in `app/backend`.
+    - **No app DDL on Postgres:** `state.OWNER_MANAGED = ("rule_reversion_proposal",)`. `init_schema` skips its
+      `CREATE TABLE` and the `rule_reversion_one_pending` index there (lakebase/001 `v1_7_005` / `v1_7_007` create
+      them). The `CREATE TABLE` string stays in `state.DDL` as the sqlite (demo) definition and as the text the DA's
+      `tests/test_lakebase_cdse_tables.py` parity test compares against lakebase/001.
+    - **Startup check (Postgres, read only, fail closed; `StateStore._verify_reversion_owner`, right after the DDL
+      loop in the init transaction).** It raises `OwnerSchemaError` (a `RuntimeError` with `.code`), and the app does
+      not start, when:
+      - `rule_reversion_not_owner_owned`: the table is missing, or its owner is not `dam_lakebase_owner` by name. A
+        superuser or app-role owner is the pre-v1_7_010 layout, so `pg_has_role` is not used here.
+      - `rule_reversion_transition_guard_disabled`: `t_status_rule_reversion_proposal` is missing, or its
+        `pg_trigger.tgenabled` is not `'A'` (ALWAYS, what lakebase/001 sets) or `'O'` (origin; accepted with a
+        WARNING). `'D'` (disabled) and `'R'` (replica only) are refused.
+      Both codes are explained in `frontend/src/codes.ts`. To recover, re-run lakebase/001 or migration v1_7_010.
+    - **Tests:**
+      - `app/tests/test_rule_reversion_owner.py`:
+        - a sqlite trace of the real propose / reject / approve routers: every statement on the table is a
+          `SELECT`, an `INSERT` or an `UPDATE` setting only the six columns;
+        - a source scan finds no other write path;
+        - the column guard;
+        - the startup verdicts on a fake pool;
+        - live, as the RESTRICTED app role on a lakebase/001 DB: INSERT and the six-column decide work; `DELETE`,
+          `UPDATE` of `rationale` / `rules` and `DISABLE TRIGGER` give `InsufficientPrivilege`; applied -> pending,
+          rejected -> applied and editing a decided row give `CheckViolation`; a disabled, replica-only or dropped
+          trigger, or app-role ownership, refuses startup.
+      - `app/tests/reversion_owner_stub.py` pre-provisions the owner's table and trigger (function text taken from
+        lakebase/001) for the live tests that bootstrap the app without lakebase/001.
+
 ## 8. Contract items for v1.8 (logged, not implemented)
 
 1. **DSSMP title and revision date columns (Genie).** `ref.dssmp_version` / the outbox carry no title or
