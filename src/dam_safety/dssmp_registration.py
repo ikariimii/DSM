@@ -26,6 +26,8 @@ Outcome: status 'loaded', or 'rejected' with reason_code = the first refusal cod
   version_not_newer / effective_from_not_after_current
   stale                                        the dam's approved versions changed while the row was planned (MERGE
                                                re-check) or the dam has more than one open approved version
+Document copy (dam_safety.dssmp_documents, run by the job between plan and MERGE): dssmp_document_missing,
+dssmp_document_other_dam, dssmp_document_hash_mismatch, dssmp_document_copy_failed; ref.dssmp_version.volume_uri.
 Chain integrity of the approve record (hash, signature, head) is verify_review_chain's job, not repeated here.
 """
 from __future__ import annotations
@@ -39,7 +41,7 @@ from dam_safety.rule_flag_authority import _utc, _who, cdse_dams_at
 
 DSSMP_COLS = ("dssmp_version_id", "dam_id", "version_no", "effective_from", "effective_to", "status", "change_reason",
               "source_ref", "document_uri", "document_sha256", "approved_by", "approved_at", "approval_record_hash",
-              "loaded_from_outbox_id")
+              "loaded_from_outbox_id", "volume_uri")
 OUTBOX_COLS = ("outbox_id", "dam_id", "dssmp_version_id", "version_no", "effective_from", "change_reason",
                "source_ref", "document_uri", "document_sha256", "proposed_by", "approved_by", "approved_at",
                "approval_record_hash", "status", "reason_code", "message", "processed_at")
@@ -193,7 +195,8 @@ def plan(pending: Iterable[Mapping], versions: Iterable[Mapping], approvals: Map
                "status": "approved", "change_reason": r.get("change_reason"), "source_ref": r.get("source_ref"),
                "document_uri": r.get("document_uri"), "document_sha256": r["document_sha256"],
                "approved_by": r["approved_by"], "approved_at": _ts(r["approved_at"]),
-               "approval_record_hash": r["approval_record_hash"], "loaded_from_outbox_id": r["outbox_id"]}
+               "approval_record_hash": r["approval_record_hash"], "loaded_from_outbox_id": r["outbox_id"],
+               "volume_uri": None}                         # set by dssmp_documents.apply_documents before the MERGE
         busy.add(dam)
         decide(r, "applied", "loaded", f"registered {vid} (approved)" + (f", superseding {cur_id}" if cur_id else ""),
                insert=ins, close=({"dssmp_version_id": cur_id, "effective_to": eff} if cur_id else None))

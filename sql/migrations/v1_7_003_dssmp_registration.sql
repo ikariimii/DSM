@@ -1,5 +1,6 @@
 -- Migration v1.7.003 (DSSMP registration; Genie 2026-11-09, promised to App Dev): ref.dssmp_version gains
--- document_sha256, approved_by, approved_at, approval_record_hash, loaded_from_outbox_id; ck_dssmp_version_status
+-- document_sha256, approved_by, approved_at, approval_record_hash, loaded_from_outbox_id, volume_uri (UC copy of the
+-- document in volume ref.dssmp_documents, created here and in sql/ddl/00); ck_dssmp_version_status
 -- (status draft | approved | superseded, version_no >= 1, effective_to after effective_from) and
 -- ck_dssmp_version_approval (an approved row carries its approval fields). audit.review_record accepts subject_type
 -- 'dssmp_version' with action_type dssmp_version_propose | _approve | _reject (decision propose | approve | reject,
@@ -37,6 +38,10 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'ref'
                  AND table_name = 'dssmp_version' AND column_name = 'loaded_from_outbox_id') THEN
     EXECUTE IMMEDIATE 'ALTER TABLE ref.dssmp_version ADD COLUMNS (loaded_from_outbox_id STRING)';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'ref'
+                 AND table_name = 'dssmp_version' AND column_name = 'volume_uri') THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE ref.dssmp_version ADD COLUMNS (volume_uri STRING)';
   END IF;
 END;
 
@@ -82,3 +87,7 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
          OR (action_type = 'dssmp_version_propose' AND subject_type = 'dssmp_version' AND decision = 'propose')
          OR (action_type = 'dssmp_version_approve' AND subject_type = 'dssmp_version' AND decision = 'approve')
          OR (action_type = 'dssmp_version_reject' AND subject_type = 'dssmp_version' AND decision = 'reject')))));
+
+-- v1.7 (b): approved DSSMP documents are copied here by dam_ref_publish (dam_safety.dssmp_documents). Same statement as
+-- sql/ddl/00. The down script leaves the volume and its files in place (no data dropped).
+CREATE VOLUME IF NOT EXISTS ref.dssmp_documents COMMENT 'Approved DSSMP documents copied by dam_ref_publish: /<dam_id>/<dssmp_version_id>/<file> (sha256 checked; v1.7)';

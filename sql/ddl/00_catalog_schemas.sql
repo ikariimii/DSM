@@ -18,4 +18,5 @@ CREATE SCHEMA IF NOT EXISTS ml     COMMENT 'MLflow UC registered models (@Champi
 -- see resources/uc.yml). Managed volume fallback for dev.
 CREATE VOLUME IF NOT EXISTS raw.landing   COMMENT 'Datalogger + manual-entry file drops: /<dam_id>/<instrument_type>/<file>';
 CREATE VOLUME IF NOT EXISTS rpt.artifacts COMMENT 'Frozen certified DSSMR PDFs and report artifacts (hash recorded in audit.review_record)';
+CREATE VOLUME IF NOT EXISTS ref.dssmp_documents COMMENT 'Approved DSSMP documents copied by dam_ref_publish: /<dam_id>/<dssmp_version_id>/<file> (sha256 checked; v1.7)';
 CREATE VOLUME IF NOT EXISTS ops.checkpoints COMMENT 'Structured Streaming checkpoints for job-owned streams (dam_reduce_readings)';

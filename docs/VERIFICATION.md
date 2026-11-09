@@ -243,3 +243,23 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - Note: the patch docstring names a byte-identical app copy `app/backend/catalog.py` checked by
   app/tests/test_settings_prod_guard.py; neither exists on e988454 (App Dev). There is no qa/test_prod_signer_fail_closed.py
   in this tree; the prod fail-closed tests are tests/test_prod_fail_closed.py.
+
+## DSSMP-DOC (document copy to UC volume ref.dssmp_documents, v1.7 (b))
+
+- `src/dam_safety/dssmp_documents.py`, wired in `src/jobs/load_dssmp_registrations.py` between plan and MERGE;
+  `ref.dssmp_version.volume_uri` (sql/ddl/04, v1_7_003); volume `ref.dssmp_documents` (sql/ddl/00 + v1_7_003; the down
+  script keeps the volume, its files and the column); lakebase/001 mirrors the app's `dssmp_document` DDL and grants
+  `dam_lakebase_publisher` SELECT on it; the validator flags any other publisher privilege on it or a missing SELECT.
+- Evidence: tests/test_dssmp_documents.py - copy to the contract path + read-back; mismatch before copy (outbox hash,
+  dssmp_document.sha256, content, bad base64) writes nothing; mismatch after copy removes the copy; an existing
+  different file is not overwritten; missing / other-dam / copy-failure codes; garbled catalog and path traversal
+  refused; a refused decision leaves the MERGE source empty and writes reason_code back; live PG 17: the app's own
+  `StateStore.insert_dssmp_document` stores the document as the app role, the publisher login reads it with DOC_SQL
+  (and cannot UPDATE it), the copy lands in a temporary volume root, the validator passes and then flags a revoked SELECT.
+- "Declared in the bundle": the volume is created by sql/ddl/00 (bundle job `dam_uc_setup`, task ddl_00) like
+  raw.landing / rpt.artifacts / ops.checkpoints, not as a `resources.volumes` entry: the schema `ref` is created by that
+  DDL job after `bundle deploy`, so a bundle-managed volume would fail on a fresh workspace and would double-own an
+  object the DDL also creates. Say if a `resources.volumes` entry is wanted anyway.
+- UNVERIFIED: not run on a workspace - Python file I/O on /Volumes from the serverless job, WRITE VOLUME / READ VOLUME
+  grants for the run_as principal (not added to 10b), the publisher's SELECT on dssmp_document on Lakebase, large
+  documents (content_b64 is read whole into memory).

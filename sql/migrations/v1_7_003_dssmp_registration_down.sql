@@ -1,8 +1,9 @@
 -- DOWN for v1_7_003_dssmp_registration.sql. Data-level fallback: Delta time travel / RESTORE TABLE ref.dssmp_version
 -- (and audit.review_record) TO VERSION AS OF <version before v1_7_003> (DESCRIBE HISTORY); this script never touches
 -- data. What it reverses: ck_dssmp_version_status and ck_dssmp_version_approval are dropped; the review_record CHECKs
--- go back to their v1_6_003 bodies (no dssmp_version subject). What it does NOT reverse, by design: the five
--- ref.dssmp_version columns stay (they hold approval evidence). PRE-CHECK before running it: restoring the v1_6_003
+-- go back to their v1_6_003 bodies (no dssmp_version subject). What it does NOT reverse, by design: the six
+-- ref.dssmp_version columns stay (approval evidence, volume_uri included), and so do the volume ref.dssmp_documents
+-- and its files. PRE-CHECK before running it: restoring the v1_6_003
 -- review_record CHECKs fails (and changes nothing further) if any dssmp_version record exists, because
 -- audit.review_record is append-only and such records must never be deleted:
 --   SELECT review_id FROM audit.review_record WHERE subject_type = 'dssmp_version';   -- must be empty, else stop

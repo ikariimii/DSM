@@ -474,7 +474,7 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
 
 ### 7.1c DSSMP registration and publication (v1.7, Genie 2026-11-09)
 - **`ref.dssmp_version`** (sql/ddl/04 + migration `v1_7_003_dssmp_registration`, down script alongside) gains
-  `document_sha256`, `approved_by`, `approved_at`, `approval_record_hash`, `loaded_from_outbox_id`;
+  `document_sha256`, `approved_by`, `approved_at`, `approval_record_hash`, `loaded_from_outbox_id`, `volume_uri`;
   `ck_dssmp_version_status` (status `draft | approved | superseded`, `version_no >= 1`, `effective_to > effective_from`)
   and `ck_dssmp_version_approval` (an `approved` row carries approver, time, a sha256 document hash and the
   approval record hash). App users get SELECT on it (per-dam row filter, both security modes; grant render).
@@ -512,6 +512,14 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   codes: `missing_required_column`, `invalid_value`, `approval_record_missing` (after 1 h; before that `deferred`),
   `approval_record_wrong_action`, `approval_record_mismatch`, `approval_not_cdse`, `dssmp_version_exists`,
   `version_not_newer`, `effective_from_not_after_current`, `stale` (all written to `reason_code`, status `rejected`).
+- **Document copy (v1.7 (b), `dam_safety.dssmp_documents`, in the loader between plan and MERGE):** the document named
+  by `document_uri` = `lakebase:dam_app.dssmp_document/<document_id>` (app-owned table; `dam_lakebase_publisher` has
+  SELECT on it, nothing else) is copied to `/Volumes/<catalog>/ref/dssmp_documents/<dam_id>/<dssmp_version_id>/<file>`
+  (volume `ref.dssmp_documents`, sql/ddl/00 + v1_7_003; file name reduced to `[A-Za-z0-9._-]`). sha256 must equal
+  `document_sha256` and `dssmp_document.sha256` before the copy and on read-back after it; an existing file at the path
+  is never overwritten (same hash accepted on re-run). `ref.dssmp_version.volume_uri` = that path; `document_uri`
+  keeps the original. Refusals (`reason_code`): `dssmp_document_missing`, `dssmp_document_other_dam`,
+  `dssmp_document_hash_mismatch`, `dssmp_document_copy_failed`; nothing is registered for a refused row.
 - **Threshold publisher and §7.13 apply** refuse a DSSMP version that is not the dam's, approved and in effect
   (`dam_safety.dssmp_check`): `dssmp_missing`, `dssmp_not_found`, `dssmp_other_dam`, `dssmp_draft`,
   `dssmp_superseded`, `dssmp_not_yet_effective`, `dssmp_status_unknown`.

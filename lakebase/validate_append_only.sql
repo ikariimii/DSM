@@ -110,7 +110,7 @@ SELECT * FROM (
     FROM app, pub WHERE pg_has_role(app.oid, pub.oid, 'MEMBER')
   UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has ' || allp.p || ' on dam_app.' || tabs.relname
     FROM pub, tabs, allp WHERE has_table_privilege(pub.oid, tabs.oid, allp.p)
-     AND NOT (allp.p = 'SELECT' AND tabs.relname IN (SELECT t FROM outbox))
+     AND NOT (allp.p = 'SELECT' AND (tabs.relname IN (SELECT t FROM outbox) OR tabs.relname = 'dssmp_document'))
   UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has column ' || cp.p || ' on dam_app.'
       || tabs.relname || '.' || cols.attname
     FROM pub, tabs JOIN cols ON cols.attrelid = tabs.oid, (VALUES ('INSERT'), ('UPDATE'), ('REFERENCES')) cp(p)
@@ -119,6 +119,8 @@ SELECT * FROM (
   UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher lacks UPDATE (' || o.col || ') on dam_app.' || ot.t
     FROM pub, ot JOIN outcome o ON o.t = ot.t
     WHERE ot.oid IS NOT NULL AND NOT has_column_privilege(pub.oid, ot.oid, o.col, 'UPDATE')
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher lacks SELECT on dam_app.dssmp_document'
+    FROM pub, tabs WHERE tabs.relname = 'dssmp_document' AND NOT has_table_privilege(pub.oid, tabs.oid, 'SELECT')
   UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has a privilege on sequence ' || c.relname
     FROM pub, pg_class c WHERE c.relnamespace = to_regnamespace('dam_app') AND c.relkind = 'S'
      AND (has_sequence_privilege(pub.oid, c.oid, 'USAGE') OR has_sequence_privilege(pub.oid, c.oid, 'UPDATE'))

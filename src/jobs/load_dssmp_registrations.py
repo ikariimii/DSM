@@ -6,7 +6,9 @@ approval_record_hash (UC audit.review_record, extracted from the app's chained r
 ref.v_dam_reviewer_authority; plan with dam_safety.dssmp_registration.plan (refuses rows without a matching CDSE
 dssmp_version_approve chain record, stale rows, duplicates); ONE conditional MERGE inserts each new approved version
 and closes the dam's previous approved one in the same statement; then the outcome is written back to the outbox
-(status / reason_code / message / processed_at only: role dam_lakebase_publisher). A crash between the MERGE and the outbox update is
+(status / reason_code / message / processed_at only: role dam_lakebase_publisher). Before the MERGE each
+version's document is copied from dam_app.dssmp_document to /Volumes/<catalog>/ref/dssmp_documents/<dam_id>/
+<dssmp_version_id>/<file> with sha256 checked before and after (dam_safety.dssmp_documents; volume_uri). A crash between the MERGE and the outbox update is
 safe: the next run finds the version with loaded_from_outbox_id = outbox_id (already_applied -> applied).
 UNVERIFIED: never run on a workspace (Delta MERGE with subqueries in the USING source; the publisher Lakebase role on
 a deployed Lakebase; the run_as principal's MODIFY on ref.dssmp_version and SELECT on audit.review_record).
@@ -18,6 +20,7 @@ try:
     from . import _common  # noqa: F401
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
+from dam_safety.dssmp_documents import DOC_SQL, VolumeFS, apply_documents, document_ids
 from dam_safety.dssmp_registration import DSSMP_COLS, OUTBOX_COLS, merge_source_rows, merge_sql, plan
 
 OUTBOX_SQL = (f"SELECT {', '.join(OUTBOX_COLS)} FROM dssmp_registration_outbox WHERE status = 'pending' "
@@ -60,6 +63,10 @@ def main():
             f"revoked_ts FROM {a.catalog}.ref.v_dam_reviewer_authority").collect()]
         now = dt.datetime.now(dt.timezone.utc)
         decisions = plan(pending, versions, approvals, authority, now)
+        if any(d["decision"] == "applied" for d in decisions):   # copy + sha256 before/after, refuse on mismatch
+            cur.execute(DOC_SQL, (document_ids(pending),))
+            docs = {r["document_id"]: r for r in cur.fetchall()}
+            apply_documents(decisions, pending, docs, a.catalog, VolumeFS())
         src = merge_source_rows(decisions)
         if src:
             from pyspark.sql.types import StringType, StructField, StructType

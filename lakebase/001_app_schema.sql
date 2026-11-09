@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS ref_change_publication (pub_id TEXT PRIMARY KEY, kind
   proposal_id TEXT, payload TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL,
   status TEXT NOT NULL, applied_at TEXT, message TEXT);
 
+-- v1.7 app DSSMP document store (same DDL as state.py; app-owned). The DSSMP load job reads it to copy the approved
+-- document to the UC volume ref.dssmp_documents: dam_lakebase_publisher gets SELECT on it (and nothing else).
+CREATE TABLE IF NOT EXISTS dssmp_document (
+        document_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, filename TEXT NOT NULL, content_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, content_b64 TEXT NOT NULL, uploaded_by TEXT NOT NULL,
+        uploaded_at TEXT NOT NULL);
+
 -- ---- v1.7 DSSMP registration outbox: the agreed app contract (app SCHEMA_CONTRACT §7 item 19; same columns as
 -- app/backend/repos/state.py). One row per CDSE-approved DSSMP version, inserted by the app at 'pending' in the
 -- approve transaction; approval_record_hash = record_hash of the chained dssmp_version_approve record. Owned by
@@ -198,7 +205,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
 --   * v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox) are
 --     owned by dam_lakebase_owner: the app has SELECT + INSERT only. A separate NOLOGIN role dam_lakebase_publisher
 --     has USAGE, SELECT and column-level UPDATE (status, message, applied_at; dssmp_registration_outbox: status,
---     reason_code, message, processed_at) on exactly those tables and nothing
+--     reason_code, message, processed_at) on exactly those tables, SELECT on dssmp_document, and nothing
 --     else (no DELETE / INSERT / TRUNCATE, no default privileges). The dam_ref_publish job's login is made a member
 --     via SET dam.publisher_login (it must not be the app role, nor a member of dam_lakebase_owner).
 -- lakebase/validate_append_only.sql (tools/validate_lakebase.py) re-checks all of it after every deploy.
@@ -240,6 +247,7 @@ GRANT SELECT, UPDATE (status, message, applied_at) ON ref_change_publication, on
   TO dam_lakebase_publisher;
 GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox
   TO dam_lakebase_publisher;
+GRANT SELECT ON dssmp_document TO dam_lakebase_publisher;     -- v1.7 (b): document copy to ref.dssmp_documents
 DO $$
 DECLARE o RECORD;
 BEGIN

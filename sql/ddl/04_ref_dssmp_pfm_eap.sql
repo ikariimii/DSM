@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS ref.dssmp_version (
   approved_at           TIMESTAMP COMMENT 'signed_ts of the approve record',
   approval_record_hash  STRING COMMENT 'audit.review_record.record_hash of the dssmp_version_approve record',
   loaded_from_outbox_id STRING COMMENT 'Lakebase dssmp_registration_outbox.outbox_id it was loaded from',
+  volume_uri            STRING COMMENT 'UC copy /Volumes/<catalog>/ref/dssmp_documents/<dam_id>/<dssmp_version_id>/<file> (sha256 = document_sha256, checked before and after the copy); document_uri keeps the app original',
   CONSTRAINT pk_dssmp PRIMARY KEY (dssmp_version_id)
 );
 
