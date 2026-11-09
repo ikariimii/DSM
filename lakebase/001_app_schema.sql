@@ -57,9 +57,14 @@ CREATE TABLE IF NOT EXISTS manual_reading (
   reservoir_el_m DOUBLE PRECISION, entered_by TEXT NOT NULL, entered_at TEXT NOT NULL, note TEXT,
   datum_id TEXT);  -- survey datum (CONVENTIONS.md 'Schema additions'); exported as-is to the landing CSV
 ALTER TABLE manual_reading ADD COLUMN IF NOT EXISTS datum_id TEXT;
--- Append-only guard on the tables the extract job copies (no UPDATE/DELETE after insert).
+-- Append-only guard on the tables the extract job copies (no UPDATE/DELETE/TRUNCATE after insert).
+-- Row-level BEFORE UPDATE OR DELETE triggers do not fire on TRUNCATE (PostgreSQL 17 docs, CREATE TRIGGER:
+-- "triggers may be defined to fire for TRUNCATE, though only FOR EACH STATEMENT"), so each table also gets a
+-- statement-level BEFORE TRUNCATE trigger (QA-045b). Same function; TG_OP names the refused operation.
+-- SQLSTATE 'insufficient_privilege' (42501). Idempotent: CREATE OR REPLACE FUNCTION + DROP TRIGGER IF EXISTS.
 CREATE OR REPLACE FUNCTION forbid_mutation() RETURNS trigger LANGUAGE plpgsql AS
-$$ BEGIN RAISE EXCEPTION '% is append-only', TG_TABLE_NAME; END $$;
+$$ BEGIN RAISE EXCEPTION '% is append-only (% refused)', TG_TABLE_NAME, TG_OP
+     USING ERRCODE = 'insufficient_privilege'; END $$;
 DROP TRIGGER IF EXISTS t_noupd_exceedance_status ON exceedance_status;
 CREATE TRIGGER t_noupd_exceedance_status BEFORE UPDATE OR DELETE ON exceedance_status
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
@@ -69,6 +74,27 @@ CREATE TRIGGER t_noupd_review_signoff BEFORE UPDATE OR DELETE ON review_signoff
 DROP TRIGGER IF EXISTS t_noupd_manual_reading ON manual_reading;
 CREATE TRIGGER t_noupd_manual_reading BEFORE UPDATE OR DELETE ON manual_reading
   FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+DROP TRIGGER IF EXISTS t_notrunc_exceedance_status ON exceedance_status;
+CREATE TRIGGER t_notrunc_exceedance_status BEFORE TRUNCATE ON exceedance_status
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
+DROP TRIGGER IF EXISTS t_notrunc_review_signoff ON review_signoff;
+CREATE TRIGGER t_notrunc_review_signoff BEFORE TRUNCATE ON review_signoff
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
+DROP TRIGGER IF EXISTS t_notrunc_manual_reading ON manual_reading;
+CREATE TRIGGER t_notrunc_manual_reading BEFORE TRUNCATE ON manual_reading
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
+-- Defence in depth: REVOKE TRUNCATE from the app's Postgres role. The role is the app service principal's
+-- Lakebase role, whose name is per-workspace and not known to this file, so it is opt-in: run with
+--   SET dam.app_role = '<app SP role name>';
+-- before this script. Unset or nonexistent role => no-op. NOTE: if that role OWNS the tables (state.py creates
+-- them at startup), REVOKE does not stop it re-granting itself; the trigger above is the binding guard.
+DO $$
+DECLARE r TEXT := nullif(current_setting('dam.app_role', true), '');
+BEGIN
+  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I', r);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS extract_watermark (
   table_name TEXT PRIMARY KEY, last_id BIGINT, last_ts TEXT, updated_at TEXT NOT NULL);
