@@ -5,6 +5,7 @@
 -- canon-2 record unverifiable; audit.review_record is delta.appendOnly). Code rollback caveat: a pre-v1.7.002 extract
 -- builds rows by the table schema and fails (KeyError on the two columns) without moving its watermark; a pre-v1.7
 -- verifier ignores them and reports every canon-2 row as hash_mismatch. Roll code back only together with the app.
+-- PRE-CHECK: none (only a CHECK is dropped).
 -- IDEMPOTENT, safe to re-run (DROP CONSTRAINT IF EXISTS). Re-applying v1_7_002 afterwards restores the CHECK.
 -- UNVERIFIED: not run on a workspace.
 USE CATALOG IDENTIFIER(:catalog);

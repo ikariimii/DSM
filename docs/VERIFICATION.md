@@ -329,3 +329,20 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - UNVERIFIED: Lakebase (advisory locks and hashtext() on Lakebase, the role model); an UNPATCHED app keeps working
   (it only updates the legacy table) but its new heads are then not tamper-resistant until App Dev applies the patch;
   a privileged actor who can drop the guard can still rewrite the log (same limit as review_signoff).
+
+## MIGRATION-DOWN (residual (b): rollback scripts for every UC migration)
+
+- New: `sql/migrations/v1_5_001_contract_down.sql`, `v1_6_001_audit_chain_down.sql`, `v1_6_002_chain_head_down.sql`,
+  `v1_6_003_alarm_rule_flag_down.sql`, `v1_7_001_cdse_ack_down.sql` (v1_7_002 / v1_7_003 downs existed; v1_7_002 got
+  its PRE-CHECK line). Each header names Delta time travel / RESTORE TABLE as the data fallback, lists its PRE-CHECK and
+  what it deliberately keeps. No down drops a table, column, volume or row, updates data, or removes
+  `delta.appendOnly`: downs only drop the CHECKs a migration added or restore the previous CHECK bodies (copied from
+  the earlier migration), and v1_7_001_down only drops NOT NULL / DEFAULT (the false backfill and the Delta
+  allowColumnDefaults protocol feature stay).
+- Evidence: tests/test_migration_downs.py: static (header, forbidden statements, the CHECK state after each down
+  equals the state before its migration, simulated over the whole chain); PostgreSQL 17.11 with a mechanical
+  Delta -> PG translation: base tables, every up twice, every down twice in reverse order with the constraint set
+  checked after each, rows / columns / audit.chain_head / ref.dam_cdse_assignment kept, every up again.
+- UNVERIFIED: none of the downs ran on Delta (`ALTER COLUMN ... DROP DEFAULT` / `DROP NOT NULL`, SQL scripting); the
+  PG translation does not cover Delta-specific semantics (appendOnly, table features, volumes).
+
