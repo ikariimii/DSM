@@ -559,8 +559,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - An apply with no `proposal_id` (a direct set/clear) would then be an error for records signed while the setting
       was on.
     - The setting is app config and is not recorded in the chain, so the DA would need its effective period, e.g. a
-      date from which the rule applies, or a `ref.*` policy row. Alternatively, the app can add the setting to the
-      apply record's `corrected_value` if the DA wants it in the hashed content.
+      date from which the rule applies, or a `ref.*` policy row. The DA asked (2026-11-09) NOT to write
+      `CDSE_FLAG_REQUIRE_SECOND_APPROVER` into the chain yet, so no chained record carries it.
     - Fits the §7.13 authority verifier (`rule_flag_authority_problems`) as a new failure code such as
       `self_approval`.
 17. **Lakebase split ownership: state.py patch applied (DA `tools/patches/v17_lakebase_owner_state_init.patch`,

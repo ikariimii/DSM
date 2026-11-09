@@ -63,11 +63,26 @@ class Settings:
         return f"`{self.catalog}`.`{schema}`.`{table}`"
 
     def check(self) -> None:
-        """Refuse to start in an unsafe configuration (QA-001)."""
+        """Refuse to start in an unsafe configuration (QA-001). Called by create_app before anything is built."""
+        # QA-041: seed data must never be served against the production catalog. Compared after trimming whitespace
+        # and identifier quotes, case-insensitively (' DAM_PROD ', '`dam_prod`'). Deliberately NO override or escape
+        # hatch (no env var, no flag): to demo, point DAM_CATALOG at a non-prod catalog.
+        if self.demo_mode and is_prod_catalog(self.catalog):
+            raise RuntimeError(f"DEMO_MODE=true with the production catalog ({self.catalog!r}) is refused (QA-041): "
+                               "demo seed data must never be served against dam_prod; refusing to start")
         if not self.demo_mode and not self.warehouse_id:
             raise RuntimeError("DEMO_MODE is false but DATABRICKS_WAREHOUSE_ID is not set; refusing to start")
         if not self.demo_mode and not self.sql_on_behalf_of_user:
             raise RuntimeError("SQL_OBO=false is not supported: gold is read only as the signed-in user")
+
+
+PROD_CATALOG = "dam_prod"
+
+
+def is_prod_catalog(catalog) -> bool:
+    """True for the production catalog however it is spelled in config: surrounding whitespace, identifier quotes
+    (backticks / double quotes) and letter case are ignored."""
+    return str(catalog or "").strip().strip("`\"").strip().lower() == PROD_CATALOG
 
 
 def approval_policy(s: "Settings") -> dict:

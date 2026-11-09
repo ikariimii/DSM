@@ -110,6 +110,8 @@ DEMO_MODE=true .venv/bin/uvicorn --factory backend.main:create_app --port 8000
 # open http://localhost:8000 (acts as admin@demo.local; send X-Forwarded-Email to act as someone else)
 ```
 If `DEMO_MODE` is unset or false and `DATABRICKS_WAREHOUSE_ID` is missing, the app refuses to start.
+`DEMO_MODE=true` with `DAM_CATALOG` = `dam_prod` (any case, surrounding whitespace or identifier quotes ignored)
+is also refused at startup (QA-041, `Settings.check()`); there is no override.
 
 ## Tests
 ```bash
