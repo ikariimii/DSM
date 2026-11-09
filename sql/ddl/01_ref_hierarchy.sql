@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS ref.dam (
   subpart_d_applicable BOOLEAN,
   regional_office      STRING,
   cdse_id              STRING COMMENT 'Chief Dam Safety Engineer principal',
+  lifecycle_state      STRING COMMENT 'v1.8 mirror of the open ref.dam_lifecycle_state row (written by dam_ref_publish)',
+  lifecycle_effective_from TIMESTAMP COMMENT 'v1.8 mirror: effective_from of that row',
   timezone             STRING,
   datum                STRING COMMENT 'Project vertical datum for all *_el_m columns',
   normal_pool_el_m     DOUBLE,

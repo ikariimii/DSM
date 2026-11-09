@@ -197,7 +197,10 @@ def _code(sql):
 
 DDL08 = _code(open(os.path.join(ROOT, "sql", "ddl", "08_audit.sql")).read())
 DDL10B = _code(open(os.path.join(ROOT, "sql", "ddl", "10b_reviewer_authority.sql")).read())
-MIG = _code(open(os.path.join(ROOT, "sql", "migrations", "v1_7_003_dssmp_registration.sql")).read())
+MIG_V17 = _code(open(os.path.join(ROOT, "sql", "migrations", "v1_7_003_dssmp_registration.sql")).read())
+# v1.8: the latest migration that re-creates the review_record CHECKs (v1_8_001 adds subject dam_lifecycle) must
+# carry the DDL bodies; v1_7_003 keeps its own (older) bodies, which still accept the three rule_reversion actions.
+MIG = _code(open(os.path.join(ROOT, "sql", "migrations", "v1_8_001_dam_lifecycle.sql")).read())
 
 
 def _ck(name, sql=DDL08):

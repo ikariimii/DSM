@@ -17,8 +17,16 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "src", "jobs"))
 import lakebase_extract as lx  # noqa: E402
 
-JOBS = ["lakebase_extract.py", "load_dssmp_registrations.py", "publish_ref_changes.py", "apply_cdse_assignments.py"]
+JOBS = ["lakebase_extract.py", "load_dssmp_registrations.py", "publish_ref_changes.py", "apply_cdse_assignments.py",
+        "apply_lifecycle_transitions.py"]
 SRC = {j: open(os.path.join(ROOT, "src", "jobs", j)).read() for j in JOBS}
+
+
+def test_every_job_that_opens_lakebase_is_listed():
+    d = os.path.join(ROOT, "src", "jobs")
+    opening = sorted(f for f in os.listdir(d) if f.endswith(".py") and "_connect(" in open(os.path.join(d, f)).read()
+                     and f != "lakebase_extract.py")
+    assert opening == sorted(j for j in JOBS if j != "lakebase_extract.py")
 
 
 @pytest.mark.parametrize("job", JOBS)

@@ -18,7 +18,8 @@ CAT_EXPRS = {"a.catalog", "C", "catalog", "cat", "args.catalog", "CATALOG"}
 CAT = "\x00CAT\x00"
 NAME_CALLS = {"table", "saveAsTable", "insertInto", "toTable", "forName"}
 SQL_CALLS = {"sql"}
-SQL_BUILDERS = {"merge_sql", "dam_sync_sql", "audit_insert_sql"}          # helpers whose args are table names / views
+# helpers whose args are table names / views (v1.8: + the lifecycle loader's)
+SQL_BUILDERS = {"merge_sql", "dam_sync_sql", "audit_insert_sql", "event_insert_sql", "state_merge_sql", "dam_mirror_sql"}
 REF = re.compile(r"(?is)\b(?:FROM|JOIN|INTO|USING|UPDATE|TABLE|DESCRIBE(?:\s+HISTORY)?|OPTIMIZE|VACUUM)\s+"
                  r"(?!\(|SET\b|SELECT\b|TABLE\b|IF\b|VALUES\b|LATERAL\b|UNNEST\b|EXPLODE\b)([^\s,()]+)")
 QUALIFIED = re.compile(r"^" + re.escape(CAT) + r"\.\w+\.\w+$")

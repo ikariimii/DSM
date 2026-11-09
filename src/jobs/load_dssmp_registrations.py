@@ -21,6 +21,10 @@ try:
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
 from dam_safety.dssmp_documents import DOC_SQL, VolumeFS, apply_documents, document_ids
+try:
+    from ._lifecycle_guard import refuse_archived
+except ImportError:        # executed as a script by spark_python_task
+    from _lifecycle_guard import refuse_archived
 from dam_safety.dssmp_registration import DSSMP_COLS, OUTBOX_COLS, merge_source_rows, merge_sql, plan
 
 OUTBOX_SQL = (f"SELECT {', '.join(OUTBOX_COLS)} FROM dssmp_registration_outbox WHERE status = 'pending' "
@@ -48,6 +52,12 @@ def main():
     with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(OUTBOX_SQL)
         pending = cur.fetchall()
+        n_pending = len(pending)
+        pending = refuse_archived(spark, a.catalog, cur, pending, id_key="outbox_id", outbox="dssmp_registration_outbox",
+                                  job="load_dssmp_registrations", update_sql=UPDATE_SQL,
+                                  update_args=lambda x, t: ("rejected", "dam_archived", x["message"], t, x["id"]))
+        if len(pending) < n_pending:
+            conn.commit()
         if not pending:
             print(json.dumps({"pending": 0}))
             return

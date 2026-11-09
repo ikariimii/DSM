@@ -1,4 +1,4 @@
-# DDL job: applies sql/ddl/00..13 in order on a serverless SQL warehouse. Idempotent.
+# DDL job: applies sql/ddl/00..14 in order on a serverless SQL warehouse. Idempotent.
 resources:
   jobs:
     dam_uc_setup:
@@ -61,8 +61,11 @@ resources:
         - task_key: ddl_13_ref_dataset_survey
           depends_on: [ { task_key: ddl_12_gold_interpretation } ]
           sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/13_ref_dataset_survey.sql }, parameters: { catalog: "${var.catalog}" } }
-        - task_key: seed_dataset_catalog
+        - task_key: ddl_14_dam_lifecycle   # v1.8: lifecycle tables, enums (data), current-state / go-live views
           depends_on: [ { task_key: ddl_13_ref_dataset_survey } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/14_dam_lifecycle.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: seed_dataset_catalog
+          depends_on: [ { task_key: ddl_14_dam_lifecycle } ]
           environment_key: py
           spark_python_task:
             python_file: ../src/jobs/seed_dataset_catalog.py

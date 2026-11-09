@@ -26,6 +26,10 @@ try:
     from . import _common  # noqa: F401
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
+try:
+    from ._lifecycle_guard import refuse_archived
+except ImportError:        # executed as a script by spark_python_task
+    from _lifecycle_guard import refuse_archived
 from dam_safety.ref_change_publish import KIND, merge_source_rows, merge_sql, payload_of, plan
 from dam_safety.rule_flag_authority import second_approver_required
 from dam_safety.rule_reversion_authority import CAUSE, SUBJECT
@@ -78,6 +82,12 @@ def main():
     with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(OUTBOX_SQL, (KIND,))
         pending = cur.fetchall()
+        n_pending = len(pending)
+        pending = refuse_archived(spark, a.catalog, cur, pending, id_key="pub_id", outbox="ref_change_publication",
+                                  job="publish_ref_changes", update_sql=UPDATE_SQL,
+                                  update_args=lambda x, t: ("rejected_invalid", x["message"], None, x["id"]))
+        if len(pending) < n_pending:
+            conn.commit()
         if not pending:
             print(json.dumps({"pending": 0}))
             return

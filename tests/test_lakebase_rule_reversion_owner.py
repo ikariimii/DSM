@@ -16,6 +16,7 @@ import uuid
 import pytest
 
 from gitrev import git_show_or_skip  # noqa: E402
+from lbmig import later_than  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DDL = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
@@ -199,6 +200,8 @@ def test_upgrade_from_the_app_owned_layout_rollback_and_validator(env, tmp_path)
     for _ in range(2):
         r = _psql(env["su"], "-f", MIG, env_extra=env["opts"])
         assert r.returncode == 0, r.stderr
+    for m in later_than("v1_7_010"):                                     # then up to date (v1_7_011, v1_8_001, ...)
+        assert _psql(env["su"], "-f", m, env_extra=env["opts"]).returncode == 0, m
     assert _owner(env) == "dam_lakebase_owner" and _val(env) == ""
     assert _psql(env["su"], "-c", f"SELECT count(*) FROM {T}").stdout.strip() == "1"
     assert _psql(env["app"], "-c", f"DELETE FROM {T}").returncode != 0

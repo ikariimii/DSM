@@ -143,8 +143,17 @@ resources:
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
                           "--lb_branch", "production", "--lb_endpoint", "primary",
                           "--lb_schema", "${var.lakebase_schema}" ]
-        - task_key: publish_ref_changes
+        - task_key: apply_lifecycle_transitions   # v1.8: approved lifecycle transitions -> audit.lifecycle_event
           depends_on: [ { task_key: load_dssmp_registrations } ]
+          run_if: ALL_DONE
+          environment_key: pg
+          spark_python_task:
+            python_file: ../src/jobs/apply_lifecycle_transitions.py
+            parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
+                          "--lb_branch", "production", "--lb_endpoint", "primary",
+                          "--lb_schema", "${var.lakebase_schema}", "--job_run_id", "{{job.run_id}}" ]
+        - task_key: publish_ref_changes
+          depends_on: [ { task_key: apply_lifecycle_transitions } ]
           run_if: ALL_DONE
           environment_key: pg
           spark_python_task:

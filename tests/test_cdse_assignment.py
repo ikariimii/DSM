@@ -199,8 +199,10 @@ def test_task_order_in_dam_ref_publish():
     jobs = yaml.safe_load(open(os.path.join(ROOT, "resources", "jobs.yml")))["resources"]["jobs"]
     tasks = jobs["dam_ref_publish"]["tasks"]
     assert [t["task_key"] for t in tasks] == ["apply_cdse_assignments", "load_dssmp_registrations",
-                                               "publish_ref_changes"]
+                                               "apply_lifecycle_transitions", "publish_ref_changes"]
     assert tasks[1]["depends_on"] == [{"task_key": "apply_cdse_assignments"}]
+    assert tasks[2]["depends_on"] == [{"task_key": "load_dssmp_registrations"}]           # v1.8
+    assert tasks[3]["depends_on"] == [{"task_key": "apply_lifecycle_transitions"}]
 
 
 # ---------------------------------------------------------------- UC CHECKs and views, executed in SQLite

@@ -22,10 +22,15 @@ try:
     from . import _common  # noqa: F401
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
-from dam_safety.cdse_assignment import (ASSIGNMENT_COLS, GO_LIVE_ACTION, GO_LIVE_SOURCE, dam_sync_sql, go_live_markers,
-                                       merge_source_rows, merge_sql)
+from dam_safety.cdse_assignment import (ASSIGNMENT_COLS, GO_LIVE_ACTION, GO_LIVE_AMBIGUOUS, GO_LIVE_SOURCE,
+                                       dam_sync_sql, go_live_markers, merge_source_rows, merge_sql)
 from dam_safety.cdse_load import (EVENT_COLS, OUTBOX_COLS, audit_insert_sql, audit_rows, mark_merge_skipped,
                                   outbox_updates, plan)
+from dam_safety.lifecycle import fold_go_live
+try:
+    from ._lifecycle_guard import refuse_archived
+except ImportError:        # executed as a script by spark_python_task
+    from _lifecycle_guard import refuse_archived
 from dam_safety.rule_flag_authority import second_approver_required
 
 OUTBOX_SQL = (f"SELECT {', '.join(OUTBOX_COLS)} FROM dam_cdse_outbox WHERE status = 'pending' "
@@ -53,12 +58,18 @@ def load_context(spark, catalog):
     legacy = {r.dam_id: r.cdse_id for r in dams if r.cdse_id and r.dam_id not in assigned}
     # durable go-live marker (residual 5): the app's onboarding_golive audit_log rows, copied to audit.app_extract.
     # The LIKE is a superset filter; go_live_markers parses (unreadable -> ambiguous -> live, fail closed).
-    # TODO(residual 5): freshness - a go-live not yet extracted is not seen; the proposed contract
-    # (docs/VERIFICATION.md GO-LIVE-MARKER) adds ref.dam.go_live_at loaded from the go-live record.
+    # Freshness (residual 5): a go-live not yet extracted is not seen here; since v1.8 the lifecycle's derived
+    # go-live (ref.v_dam_go_live, below) is folded in as well (no go_live_at column; contract 14:15).
     ax = spark.table(f"{catalog}.audit.app_extract")
     markers = go_live_markers(r.asDict() for r in ax.where(
         (ax.table_name == GO_LIVE_SOURCE) & ax.payload.contains(GO_LIVE_ACTION)).select(
         "table_name", "pk", "dam_id", "payload").collect())
+    # v1.8: go_live_at derived from the lifecycle (ref.v_dam_go_live); the earliest known go-live wins (fail closed)
+    try:
+        lc_go_live = [r.asDict() for r in spark.table(f"{catalog}.ref.v_dam_go_live").collect()]
+    except Exception:  # noqa: BLE001 - view not created yet (before v1.8 dam_uc_setup): v1.7 markers only
+        lc_go_live = None
+    markers = fold_go_live(markers, lc_go_live, GO_LIVE_AMBIGUOUS)
     dam_state = {r.dam_id: {"status": r.status, "live_since": r.live_since, "go_live_at": markers.get(r.dam_id)}
                  for r in dams}
     for d, when in markers.items():           # went live, ref.dam not loaded yet: live from the record
@@ -86,6 +97,12 @@ def main():
     with _connect(a.lb_project, a.lb_branch, a.lb_endpoint, a.lb_schema) as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(OUTBOX_SQL)
         pending = cur.fetchall()
+        n_pending = len(pending)
+        pending = refuse_archived(spark, a.catalog, cur, pending, id_key="outbox_id", outbox="dam_cdse_outbox",
+                                  job="apply_cdse_assignments", update_sql=UPDATE_SQL, job_run_id=run_id,
+                                  update_args=lambda x, t: ("rejected", "dam_archived", x["message"], t, x["id"]))
+        if len(pending) < n_pending:
+            conn.commit()
         if not pending:
             print(json.dumps({"pending": 0}))
             return

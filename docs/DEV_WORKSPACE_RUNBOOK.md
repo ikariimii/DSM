@@ -71,6 +71,8 @@ documented result.
 5. `sql/migrations/v1_7_001_cdse_ack.sql`
 6. `sql/migrations/v1_7_002_canon_v2.sql`
 7. `sql/migrations/v1_7_003_dssmp_registration.sql`
+8. `sql/migrations/v1_8_001_dam_lifecycle.sql` (v1.8; the backfill `v1_8_002_lifecycle_backfill.sql` runs after
+   `dam_uc_setup` and the Lakebase step, see step 7b)
 
 Each file runs as a one-off SQL task on the synced bundle file (dev mode syncs to the deployer's `.bundle` folder;
 the path below is the CLI default, UNVERIFIED):
@@ -78,7 +80,7 @@ the path below is the CLI default, UNVERIFIED):
 ```bash
 FILES=/Workspace/Users/$(databricks current-user me -o json | jq -r .userName)/.bundle/dam_safety/$TARGET/files
 for m in v1_5_001_contract v1_6_001_audit_chain v1_6_002_chain_head v1_6_003_alarm_rule_flag \
-         v1_7_001_cdse_ack v1_7_002_canon_v2 v1_7_003_dssmp_registration; do
+         v1_7_001_cdse_ack v1_7_002_canon_v2 v1_7_003_dssmp_registration v1_8_001_dam_lifecycle; do
   databricks jobs submit --json "{\"run_name\": \"migrate $m\", \"tasks\": [{\"task_key\": \"m\",
     \"sql_task\": {\"warehouse_id\": \"$WH\", \"file\": {\"path\": \"$FILES/sql/migrations/$m.sql\",
     \"source\": \"WORKSPACE\"}, \"parameters\": {\"catalog\": \"$CATALOG\"}}}]}" || break
@@ -146,6 +148,7 @@ lb --file lakebase/migrations/v1_7_008_cdse_outbox_status.sql
 lb --file lakebase/migrations/v1_7_009_status_transition_guard.sql
 lb --file lakebase/migrations/v1_7_010_rule_reversion_owner.sql
 lb --file lakebase/migrations/v1_7_011_migration_ledger.sql
+lb --file lakebase/migrations/v1_8_001_lifecycle_outbox.sql     # v1.8 lifecycle outbox
 ```
 
 A database migrated by hand before the ledger existed: record what is already applied first (writes `baseline`
@@ -153,6 +156,8 @@ rows for that file and every older one; runs nothing), e.g. `lb --file lakebase/
 The runner also probes for the v1_7_006 / v1_7_009 / v1_7_010 effects, so 005 stays refused on such a database
 even before the baseline. Exit codes: 0 applied (validator OK), 2 bad file / arguments, 3 refused (ledger rules),
 4 the file failed (nothing recorded), 5 applied but the validator reports violations (fix forward).
+A validator finding about a table that only a later, not-yet-applied migration creates is printed `PENDING` and
+does not fail the step (v1.8).
 Re-running `lakebase/001_app_schema.sql` stays safe after any migration (it never hands an owner-owned or
 guard-triggered table to the app; tested). Rollbacks: reverse order only (the runner refuses a down that is not the
 newest applied migration; the v1_7_005 down also refuses by itself while v1_7_009's status guard exists).
@@ -394,11 +399,25 @@ databricks bundle run -t $TARGET dam_ref_publish
    rules to re-version; the CDSE approves one `rule_reversion` proposal in the app; `publish_ref_changes` applies the
    per-rule N+1 versions (payload `cause: "dssmp_reversion"`).
 
+## 7b. Dam lifecycle (v1.8)
+
+1. After step 3 (v1_8_001 + `dam_uc_setup`, task `ddl_14_dam_lifecycle`) and step 4 (`v1_8_001_lifecycle_outbox`):
+   `SELECT count(*) FROM dam_dev.ref.lifecycle_citation` -> 15; `... ref.lifecycle_suspension_reason` -> 6.
+2. Backfill (once; idempotent): run `sql/migrations/v1_8_002_lifecycle_backfill.sql` like step 3. It fails (and
+   writes nothing) if any onboarding_golive row has an unreadable ts. Then
+   `SELECT lifecycle_state, count(*) FROM dam_dev.ref.v_dam_lifecycle_current GROUP BY 1` -> `live` per gone-live dam.
+3. `dam_ref_publish` now runs `apply_lifecycle_transitions` between `load_dssmp_registrations` and
+   `publish_ref_changes`; expected `{"pending": 0}` or one JSON line per outbox row (`loaded` / `rejected` with a
+   lifecycle_* reason_code). A dam with lifecycle rows that is not yet live (draft) raises no production alarm.
+4. Spot check: `SELECT * FROM dam_dev.audit.event_log WHERE event_type IN ('LIFECYCLE_LOAD', 'DAM_ARCHIVED_REFUSAL')`.
+Closes LIFECYCLE-UC, LIFECYCLE-LB, LIFECYCLE-LOADER, LIFECYCLE-BACKFILL on dev.
+
 ## 8. Rollback
 
 Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a table, column, volume or row.
 
-* UC, newest first, each once: `v1_7_003_dssmp_registration_down.sql`, `v1_7_002_canon_v2_down.sql`,
+* UC, newest first, each once: `v1_8_002_lifecycle_backfill_down.sql`, `v1_8_001_dam_lifecycle_down.sql`,
+  `v1_7_003_dssmp_registration_down.sql`, `v1_7_002_canon_v2_down.sql`,
   `v1_7_001_cdse_ack_down.sql`, `v1_6_003_alarm_rule_flag_down.sql`, `v1_6_002_chain_head_down.sql`,
   `v1_6_001_audit_chain_down.sql`, `v1_5_001_contract_down.sql`, ONLY through `tools/run_migration.py` (QA-057; it
   binds the `catalog` and `break_glass` parameters the downs' first statement needs, so the plain step-3 `jobs submit`
@@ -409,7 +428,9 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
   a PRE-CHECK; if it returns rows (newer audit records exist), STOP: those records are never deleted and that
   migration stays. Data-level fallback: `DESCRIBE HISTORY <table>` then `RESTORE TABLE <table> TO VERSION AS OF <n>`.
   Views / functions in 10b: re-run the previous `sql/ddl/10b_reviewer_authority.sql` from git.
-* Lakebase, newest first: `lakebase/migrations/v1_7_010_rule_reversion_owner_down.sql` (ownership back to the
+* Lakebase, newest first (through `lb`): `lakebase/migrations/v1_8_001_lifecycle_outbox_down.sql` (triggers,
+  function and the publisher grant only; the table and its rows stay), `v1_7_011_migration_ledger_down.sql` (no-op),
+  `lakebase/migrations/v1_7_010_rule_reversion_owner_down.sql` (ownership back to the
   app role; needs dam.app_role), `v1_7_009_status_transition_guard_down.sql` (triggers + function
   only), `v1_7_008_cdse_outbox_status_down.sql`,
   `v1_7_007_qa056_unique_guards_down.sql`,
@@ -423,6 +444,7 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
 BUNDLE-1, LB-REF (v1.4), QA-037 / LB-REF (v1.5), LAKEBASE-AUTH, LAKEBASE-HA, APP-ACL, UC-GRANTS, MIGRATION-1,
 MIGRATION-2, MIGRATION-2b, MIGRATION-2c, MIGRATION-3, MIGRATION-DOWN (if step 8 is exercised in dev), V15-LB-EXTRACT,
 V16-CHAIN, QA-045d, LB-OWNER, LB-PG14, LB-PUBLISHER, OUTBOX-CONTRACT, PUBLISHER, DSSMP-REG, DSSMP-DOC, LB-CDSE-TABLES,
-CDSE-ASSIGNMENT, RULE-REVERSION, LB-HEAD-LOG, QA-056, QA-057, LB-SEARCH-PATH (step 4b), PROD-SIGNER (prod
+CDSE-ASSIGNMENT, RULE-REVERSION, LB-HEAD-LOG, QA-056, QA-057, LB-SEARCH-PATH (step 4b), LIFECYCLE-UC / -LB / -LOADER /
+-BACKFILL (step 7b), PROD-SIGNER (prod
 target only). Not closed here: engineering defaults
 (section 4 of VERIFICATION.md), INC-WIRE (needs a pyspark run of `reduce_inclinometers`), CANARI-1, DEP-*.

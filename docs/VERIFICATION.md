@@ -596,3 +596,41 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - UNVERIFIED: on Lakebase (deployer membership in dam_lakebase_owner for the ledger INSERT; the runner's
   --lb-endpoint path, same as tools/validate_lakebase.py).
 
+## LIFECYCLE (v1.8 dam lifecycle, contract 2026-11-09 14:20 / 14:22; SCHEMA_CONTRACT §7.1f)
+
+- Verified locally (pure Python + PostgreSQL 17.11): tests/test_lifecycle_engine.py (every edge accepted, every other
+  pair refused, every refusal code, every suspension reason and its evidence, citations as data, 60-day / 15-day
+  warnings, DSSMP rules, go-live readiness, transfer counterpart, void two-person rule with authority at decision
+  time, alarm policy, hash chain tamper / deletion / length-prefix / NULL-vs-empty), tests/test_lifecycle_loader.py
+  (outbox -> chain records -> events, deferral / refusal / idempotence / mismatch, the event INSERT that never forks a
+  chain and the SCD-2 MERGE + mirror executed on PG), tests/test_lifecycle_uc_schema.py (DDL 14 = migration; 15 codes,
+  6 reasons, statuses; the CHECK bodies executed on PG), tests/test_lakebase_lifecycle_outbox.py (fresh 001 and
+  upgrade from 0e11d01: owner, exact app grants SELECT + INSERT, publisher columns, lock-order trigger, status guard,
+  CHECKs, the app cannot DISABLE / DROP / replace, validator regressions, down keeps rows, re-up, the QA-059 runner
+  with v1_8_001), tests/test_lifecycle_integration.py (alarm filter, derived go-live, dam_archived in the other
+  loaders).
+- **LIFECYCLE-UC — UNVERIFIED** on Databricks: `sql/ddl/14_dam_lifecycle.sql` and `v1_8_001_dam_lifecycle.sql` (ARRAY
+  columns and `split(...)` in a `FROM VALUES` seed, the SQL-scripting `BEGIN ... END` guarded ADD COLUMNS, `size()` /
+  `RLIKE` in CHECKs, appendOnly on audit.lifecycle_event), the down, the views.
+- **LIFECYCLE-LOADER — UNVERIFIED** on Databricks: `apply_lifecycle_transitions` (createDataFrame with ARRAY / DATE /
+  BOOLEAN columns, `INSERT ... WHERE NOT EXISTS` on an appendOnly table, the MERGEs with `<=>`), the run_as grants
+  (INSERT on audit.lifecycle_event / audit.event_log, MODIFY on ref.dam_lifecycle_state / ref.dam, SELECT on
+  ref.v_dam_reviewer_authority through its row filter), and the alarm_evaluator / dam_archived wiring in the other
+  jobs (fake Spark only).
+- **LIFECYCLE-LB — UNVERIFIED** on Lakebase: the outbox block (advisory-lock visibility in pg_locks for the trigger,
+  ENABLE ALWAYS, grants) - same primitives as LB-HEAD-LOG / runbook step 4b P5.
+- **LIFECYCLE-AUTHORITY — PROVISIONAL:** who may approve each edge (`dam_safety.lifecycle.APPROVER_ROLES`) and the void
+  pair (CDSE + platform admin) - confirm with the dam-safety owner.
+- **LIFECYCLE-CITATIONS — UNVERIFIED-pending:** 13 of the 15 citation rows (all but `transfer_final_9_3_12_12c` and
+  `surrender_effective_6_2_6_5`). Gap: no code covers suspension_reason `other` (every `other` suspension is refused
+  `lifecycle_citation_invalid` until one is added as data).
+- **LIFECYCLE-BACKFILL — UNVERIFIED** on Databricks (separate commit): `v1_8_002_lifecycle_backfill.sql`.
+- Design choices to confirm: "new DSSMP" = effective_from >= the current state's effective_from; the 60-day notice is
+  measured from the approve record's signed_ts; a ref.dam row without any lifecycle event is `lifecycle_unverifiable`
+  (no ref.dam row: implicit draft); the transfer counterpart event carries the transfer's citation; voided dams are
+  not read-only for the other loaders (only transferred / decommissioned_archived are); `created_ts` is not hashed.
+- QA-059 runner (v1.8): migrations now sort numerically (`mig_key`: v1_10 after v1_9), and a validator finding about
+  a dam_app table that does not exist yet and is only created by a not-yet-applied migration is reported `PENDING`
+  (exit 0) instead of exit 5, so the runbook can step through the files; an existing table without its guard,
+  privileges and owners still fail (exit 5).
+

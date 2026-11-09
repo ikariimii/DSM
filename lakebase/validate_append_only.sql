@@ -28,6 +28,9 @@
 -- trigger checks, so an ownership regression fails CI even while the triggers are still enabled.
 -- v1_7_010: the app role holding anything beyond SELECT,
 -- INSERT and UPDATE (status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids), or lacking one of them.
+-- v1_8_001: dam_app.lifecycle_transition_outbox is a fifth outbox (owner, app SELECT / INSERT only, publisher UPDATE
+-- (status, reason_code, message, processed_at), t_status_ guard); lifecycle_lock_guard_missing = its BEFORE INSERT
+-- dam-lock trigger missing / not ENABLE ALWAYS; lifecycle_outbox_lock_guard() must be owned by dam_lakebase_owner.
 -- QA-059 / v1_7_011: dam_app.schema_migration_ledger (when it exists) is in the owner_not_dam_lakebase_owner list;
 -- ledger_guard_missing = its t_noupd_ / t_notrunc_ forbid_mutation() trigger missing or not ENABLE ALWAYS;
 -- ledger_privilege = PUBLIC or the app role holding ANY table or column privilege on it.
@@ -41,11 +44,11 @@ app AS (SELECT r.* FROM cfg JOIN pg_roles r ON r.rolname = cfg.app),
 pub AS (SELECT r.* FROM pg_roles r WHERE r.rolname = 'dam_lakebase_publisher'),
 ext AS (SELECT r.* FROM pg_roles r WHERE r.rolname = nullif(current_setting('dam.extract_role', true), '')),
 outbox(t) AS (VALUES ('ref_change_publication'), ('onboarding_publication'), ('dssmp_registration_outbox'),
-                     ('dam_cdse_outbox')),
+                     ('dam_cdse_outbox'), ('lifecycle_transition_outbox')),
 outcome(t, col) AS (SELECT t, c FROM (VALUES ('ref_change_publication'), ('onboarding_publication')) a(t),
                            (VALUES ('status'), ('message'), ('applied_at')) b(c)
                     UNION ALL SELECT o.t, c
-                    FROM (VALUES ('dssmp_registration_outbox'), ('dam_cdse_outbox')) o(t),
+                    FROM (VALUES ('dssmp_registration_outbox'), ('dam_cdse_outbox'), ('lifecycle_transition_outbox')) o(t),
                          (VALUES ('status'), ('reason_code'), ('message'), ('processed_at')) b(c)),
 ot AS (SELECT o.t, c.oid, c.relowner FROM outbox o
        LEFT JOIN pg_class c ON c.relname = o.t AND c.relnamespace = to_regnamespace('dam_app')),
@@ -69,7 +72,8 @@ SELECT * FROM (
     FROM gt WHERE oid IS NOT NULL AND relowner::regrole::text <> 'dam_lakebase_owner'
   UNION ALL SELECT 'function_owner', p.oid::regprocedure::text || ' owned by ' || p.proowner::regrole::text
     FROM pg_proc p WHERE p.pronamespace = to_regnamespace('dam_app')
-     AND p.proname IN ('forbid_mutation', 'app_forbid_mutation') AND p.proowner::regrole::text <> 'dam_lakebase_owner'
+     AND p.proname IN ('forbid_mutation', 'app_forbid_mutation', 'lifecycle_outbox_lock_guard')
+     AND p.proowner::regrole::text <> 'dam_lakebase_owner'
   UNION ALL SELECT 'guard_trigger_missing', w.tg || ' on dam_app.' || w.t
     FROM want w JOIN gt ON gt.t = w.t WHERE gt.oid IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM pg_trigger tr WHERE tr.tgrelid = gt.oid AND tr.tgname = w.tg AND NOT tr.tgisinternal
@@ -109,7 +113,7 @@ SELECT * FROM (
      AND array_to_string(s.setconfig, ',') ILIKE '%session_replication_role%'
   UNION ALL SELECT 'status_guard_missing', 't_status_' || sg.t || ' on dam_app.' || sg.t || ' (v1_7_009)'
     FROM (VALUES ('dam_cdse_outbox', 'loaded,rejected'), ('dssmp_registration_outbox', 'loaded,rejected'),
-                 ('rule_reversion_proposal', 'applied,rejected')) sg(t, args)
+                 ('rule_reversion_proposal', 'applied,rejected'), ('lifecycle_transition_outbox', 'loaded,rejected')) sg(t, args)
     WHERE to_regclass('dam_app.' || sg.t) IS NOT NULL AND NOT EXISTS (
       SELECT 1 FROM pg_trigger tr WHERE tr.tgrelid = to_regclass('dam_app.' || sg.t) AND tr.tgname = 't_status_' || sg.t
         AND NOT tr.tgisinternal AND tr.tgfoid = to_regprocedure('dam_app.status_transition_guard()')
@@ -125,11 +129,18 @@ SELECT * FROM (
       AND c.relowner <> coalesce((SELECT oid FROM pg_roles WHERE rolname = 'dam_lakebase_owner'), 0)
       AND (c.relname IN ('exceedance_status', 'review_signoff', 'manual_reading', 'review_chain_head_log',
                          'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
-                         'dam_cdse_outbox', 'rule_reversion_proposal', 'schema_migration_ledger')
+                         'dam_cdse_outbox', 'rule_reversion_proposal', 'schema_migration_ledger',
+                         'lifecycle_transition_outbox')
            OR EXISTS (SELECT 1 FROM pg_trigger tr JOIN pg_proc fp ON fp.oid = tr.tgfoid
                       WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal
                         AND fp.pronamespace = to_regnamespace('dam_app')
                         AND fp.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard')))
+  UNION ALL SELECT 'lifecycle_lock_guard_missing', 't_lock_lifecycle_transition_outbox on dam_app.lifecycle_transition_outbox (v1_8_001)'
+    WHERE to_regclass('dam_app.lifecycle_transition_outbox') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM pg_trigger tr WHERE tr.tgrelid = to_regclass('dam_app.lifecycle_transition_outbox')
+        AND tr.tgname = 't_lock_lifecycle_transition_outbox' AND NOT tr.tgisinternal
+        AND tr.tgfoid = to_regprocedure('dam_app.lifecycle_outbox_lock_guard()')
+        AND (tr.tgtype & 31) = 7 AND tr.tgenabled = 'A')             -- ROW + BEFORE + INSERT only
   UNION ALL SELECT 'ledger_guard_missing', lg.tg || ' on dam_app.schema_migration_ledger (QA-059)'
     FROM (VALUES ('t_noupd_schema_migration_ledger', 'row'), ('t_notrunc_schema_migration_ledger', 'truncate')) lg(tg, kind)
     WHERE to_regclass('dam_app.schema_migration_ledger') IS NOT NULL AND NOT EXISTS (

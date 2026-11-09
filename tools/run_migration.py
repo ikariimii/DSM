@@ -148,8 +148,15 @@ def _lb_up_name(fname):
     return fname[:-len("_down.sql")] + ".sql" if fname.endswith("_down.sql") else fname
 
 
+def mig_key(fname):
+    """Numeric order of v<major>_<minor>_<nnn>_*.sql (v1.8: v1_10_* sorts after v1_9_*, not before v1_2_*)."""
+    m = re.match(r"^v(\d+)_(\d+)_(\d+)_", fname)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), fname) if m else (-1, -1, -1, fname)
+
+
 def lakebase_files():
-    return sorted(f for f in os.listdir(LB_MIG_DIR) if LB_NAME.match(f) and not f.endswith("_down.sql"))
+    return sorted((f for f in os.listdir(LB_MIG_DIR) if LB_NAME.match(f) and not f.endswith("_down.sql")),
+                  key=mig_key)
 
 
 def applied_set(ledger_rows, probed=()) -> set:
@@ -169,7 +176,7 @@ def decide_lakebase(file, ledger_rows, probed=(), rerun_reason=None) -> dict:
         raise Refused(2, f"refusing {file!r}: not a migration file in lakebase/migrations/")
     up, is_down = _lb_up_name(name), name.endswith("_down.sql")
     applied = applied_set(ledger_rows, probed)
-    newest = max(applied, default=None)
+    newest = max(applied, default=None, key=mig_key)
     hard = [m for m in SUPERSEDED.get(up, ()) if m in applied]
     if hard and not is_down:
         raise Refused(3, f"QA-059: refusing {name}: {', '.join(hard)} is applied and {name} would undo it "
@@ -178,7 +185,7 @@ def decide_lakebase(file, ledger_rows, probed=(), rerun_reason=None) -> dict:
     problem = None
     if not is_down and up in applied:
         problem = f"{name} is already applied"
-    elif not is_down and newest is not None and up < newest:
+    elif not is_down and newest is not None and mig_key(up) < mig_key(newest):
         problem = f"{name} is older than the newest applied migration {newest}"
     elif is_down and up not in applied:
         problem = f"{name}: {up} is not applied"
@@ -190,6 +197,26 @@ def decide_lakebase(file, ledger_rows, probed=(), rerun_reason=None) -> dict:
         raise Refused(3, f"QA-059: --rerun needs a reason of at least {MIN_REASON} characters")
     return {"file": path, "name": name, "up": up, "is_down": is_down, "rerun": bool(problem),
             "reason": reason if problem else None, "problem": problem}
+
+
+def split_pending(bad, applied, exists):
+    """v1.8: the validator checks the CURRENT schema, so stepping through the migrations one by one would report the
+    objects of the not-yet-applied ones as missing. A violation is 'pending' (not a failure) only when every dam_app
+    table it names does not exist at all AND is created by an up file that is not applied yet AND is named in no
+    applied up file. Anything else (an existing table without its guard, a privilege, an owner) stays a violation.
+    Returns (pending, real)."""
+    files = lakebase_files()
+    pend = "\n".join(open(os.path.join(LB_MIG_DIR, f)).read() for f in files if f not in applied)
+    done = "\n".join(open(os.path.join(LB_MIG_DIR, f)).read() for f in files if f in applied)
+    pending, real = [], []
+    for check, detail in bad:
+        tabs = re.findall(r"dam_app\.(\w+)", str(detail))
+        if tabs and all(not exists(t) and re.search(rf"CREATE TABLE IF NOT EXISTS dam_app\.{t}\b", pend)
+                        and not re.search(rf"\b{t}\b", done) for t in tabs):
+            pending.append((check, detail))
+        else:
+            real.append((check, detail))
+    return pending, real
 
 
 def _ledger_block():
@@ -235,7 +262,7 @@ def run_lakebase(a, conn) -> int:
                 name = os.path.basename(os.path.abspath(a.file))
                 if not LB_NAME.match(name) or name.endswith("_down.sql") or name not in lakebase_files():
                     raise Refused(2, f"--baseline needs an up file in lakebase/migrations/, not {a.file!r}")
-                todo = [f for f in lakebase_files() if f <= name and f not in applied_set(rows)]
+                todo = [f for f in lakebase_files() if mig_key(f) <= mig_key(name) and f not in applied_set(rows)]
                 for f in todo:
                     cur.execute(f"INSERT INTO {LEDGER} (migration, direction, sha256) VALUES (%s, 'baseline', %s)",
                                 (f, _sha(os.path.join(LB_MIG_DIR, f))))
@@ -263,9 +290,18 @@ def run_lakebase(a, conn) -> int:
         finally:
             cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::bigint)", (RUNNER_LOCK_KEY,))
     bad = validate_lakebase.violations(conn, a.app_role)
+    applied_now = applied_set(rows + [(d["name"], "down" if d["is_down"] else "up")], probed)
+    with conn.cursor() as cur:
+        def exists(t):
+            cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"dam_app.{t}",))
+            return cur.fetchone()[0]
+        pending, bad = split_pending(bad, applied_now, exists)
+    for check, detail in pending:
+        print(f"PENDING {check}: {detail} (created by a later migration that is not applied yet)", file=sys.stderr)
     for check, detail in bad:
         print(f"FAIL {check}: {detail}", file=sys.stderr)
-    print(f"validator: {'OK' if not bad else str(len(bad)) + ' violation(s)'}")
+    print(f"validator: {'OK' if not bad else str(len(bad)) + ' violation(s)'}"
+          + (f" ({len(pending)} pending a later migration)" if pending else ""))
     return 5 if bad else 0
 
 

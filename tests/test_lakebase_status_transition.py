@@ -21,6 +21,8 @@ DDL = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 VAL = os.path.join(ROOT, "lakebase", "validate_append_only.sql")
 MIG = os.path.join(ROOT, "lakebase", "migrations", "v1_7_009_status_transition_guard.sql")
 DOWN = os.path.join(ROOT, "lakebase", "migrations", "v1_7_009_status_transition_guard_down.sql")
+LC_UP = os.path.join(ROOT, "lakebase", "migrations", "v1_8_001_lifecycle_outbox.sql")
+LC_DOWN = os.path.join(ROOT, "lakebase", "migrations", "v1_8_001_lifecycle_outbox_down.sql")
 OUTBOXES = ("dam_cdse_outbox", "dssmp_registration_outbox")
 
 
@@ -179,16 +181,20 @@ def test_validator_reports_a_missing_or_disabled_guard_and_down_reapply(env):
     out = _psql(env["su"], "-f", VAL, env_extra=env["opts"]).stdout
     assert "status_guard_missing|t_status_rule_reversion_proposal" in out
     i = _new(env, "dam_cdse_outbox")
+    r = _psql(env["su"], "-f", DOWN)                       # v1_8_001's outbox trigger uses the function: refused
+    assert r.returncode != 0 and "depends on function" in r.stderr
+    assert _psql(env["su"], "-f", LC_DOWN).returncode == 0  # reverse order: the later down first
     for _ in range(2):
         assert _psql(env["su"], "-f", DOWN).returncode == 0
     out = _psql(env["su"], "-f", VAL, env_extra=env["opts"]).stdout
     assert sorted(re.findall(r"status_guard_missing\|t_status_(\w+)", out)) == sorted(
-        ["dam_cdse_outbox", "dssmp_registration_outbox", "rule_reversion_proposal"])
+        ["dam_cdse_outbox", "dssmp_registration_outbox", "rule_reversion_proposal", "lifecycle_transition_outbox"])
     assert _psql(env["su"], "-c", f"SELECT count(*) FROM dam_app.dam_cdse_outbox WHERE outbox_id = '{i}'"
                  ).stdout.strip() == "1"                                                       # no data dropped
     for _ in range(2):
         r = _psql(env["su"], "-f", MIG)
         assert r.returncode == 0, r.stderr
+    assert _psql(env["su"], "-f", LC_UP, env_extra=env["opts"]).returncode == 0
     assert _psql(env["su"], "-f", VAL, env_extra=env["opts"]).stdout.strip() == ""
 
 

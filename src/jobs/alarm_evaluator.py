@@ -8,6 +8,11 @@ Per sensor: resume ops.alarm_state, read current reduced readings after the wate
   * MERGE the alarm_state projection (the only mutable ops table, by design).
 Notifications: none here. SQL alerts on gold.threshold_exceedances do that (KB rec.).
 Threshold/reading unit mismatch -> threshold skipped and logged (no silent conversion).
+v1.8 lifecycle (rule 1, dam_safety.lifecycle.alarm_filter): a reading is only evaluated when its dam was in a
+production-alarm state at the reading's ts (ref.dam_lifecycle_state, effective-dated): draft / pre-go-live readings
+are test-only and voided / decommissioned / transferred dams are off (no transition, no exceedance); a dam with no
+lifecycle rows, or an unreadable ref.dam_lifecycle_state, is alarmed as production (fail closed, issue
+lifecycle_unverifiable). UNVERIFIED on a workspace.
 """
 import hashlib
 import json
@@ -20,6 +25,7 @@ from _common import args, spark as get_spark
 
 from dam_safety.alarms import cdse_ack_snapshot, evaluate_sensor_batch
 from dam_safety.inclinometer.batch import installation_version_at
+from dam_safety.lifecycle import alarm_filter
 from dam_safety.spark.engine import fq
 
 a = args(("lookback_days", "7"))
@@ -65,6 +71,13 @@ for r in spark.sql(f"""
 
 sens_rows = spark.table(fq(C, "ref", "sensor")).select("sensor_id", "dam_id", "instrument_id").collect()
 dam_of = {r.sensor_id: r.dam_id for r in sens_rows}
+try:   # v1.8 rule 1: alarm only readings taken while the dam was in a production-alarm lifecycle state
+    lc_hist = [r.asDict() for r in spark.table(fq(C, "ref", "dam_lifecycle_state")).select(
+        "dam_id", "lifecycle_state", "effective_from", "effective_to").collect()]
+except Exception:  # noqa: BLE001 - unreadable -> alarms on (alarm_filter logs lifecycle_unverifiable)
+    lc_hist = None
+readings, lc_issues = alarm_filter(readings, dam_of, lc_hist)
+readings = defaultdict(list, readings)
 # v1.6 (app SCHEMA_CONTRACT §7 10d): inclinometer alarms carry installation_version = effective_from of the
 # ref.incl_installation row valid at the reading's ts (half-open; same rule as the reduction, batch.installation_row_at).
 # A sensor is an inclinometer sensor when its instrument has ref.incl_installation rows. No covering row -> NULL
@@ -89,7 +102,7 @@ def inst_version(sid, ts, log):
     return v
 
 
-tr_rows, ex_rows, st_rows, log = [], [], [], []
+tr_rows, ex_rows, st_rows, log = [], [], [], list(lc_issues)
 for sid in sensors:
     rows = readings.get(sid, [])
     units = {r["unit"] for r in rows if r["unit"]}

@@ -6,7 +6,7 @@ USE CATALOG IDENTIFIER(:catalog);
 CREATE TABLE IF NOT EXISTS audit.review_record (
   review_id           STRING NOT NULL,
   dam_id              STRING NOT NULL,
-  subject_type        STRING NOT NULL COMMENT 'reading | exceedance | dssmr | threshold | commentary | rule_finding | incl_correction | alarm_event',
+  subject_type        STRING NOT NULL COMMENT 'reading | exceedance | dssmr | threshold | commentary | rule_finding | incl_correction | alarm_event | alarm_rule | dssmp_version | dam | rule_reversion | dam_lifecycle (v1.8)',
   subject_id          STRING NOT NULL,
   review_level        STRING NOT NULL COMMENT 'technician | engineer | CDSE | IC',
   decision            STRING NOT NULL COMMENT 'incl_correction: approve | reject; alarm_event: acknowledge | close (lowercase)',
@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS audit.review_record (
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
   subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction',
-                   'alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion')
+                   'alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion',
+                   'dam_lifecycle')
   AND (subject_type <> 'incl_correction'
        OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
   AND (subject_type <> 'alarm_event'
@@ -57,6 +58,8 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
        OR (decision IN ('assign', 'propose', 'approve', 'reject') AND comment IS NOT NULL
            AND length(trim(comment)) > 0))
   AND (subject_type <> 'rule_reversion'
+       OR (decision IN ('propose', 'approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
+  AND (subject_type <> 'dam_lifecycle'
        OR (decision IN ('propose', 'approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
 
 -- v1.6 (QA-039 v2): a chained reviewer action carries every required chain field (signature, sig_alg, key_id,
@@ -68,7 +71,8 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
 -- extracts, other subject types) are not affected.
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_chain;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
-  (subject_type NOT IN ('alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion')
+  (subject_type NOT IN ('alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion',
+                        'dam_lifecycle')
    OR action_type IS NOT NULL)
   AND (action_type IS NULL OR (
     action_type IN ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close',
@@ -76,7 +80,8 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
                     'dssmp_version_propose', 'dssmp_version_approve', 'dssmp_version_reject',
                     'dam_cdse_assign', 'dam_cdse_change_propose', 'dam_cdse_change_approve',
                     'dam_cdse_change_reject',
-                    'rule_reversion_propose', 'rule_reversion_approve', 'rule_reversion_reject')
+                    'rule_reversion_propose', 'rule_reversion_approve', 'rule_reversion_reject',
+                    'lifecycle_transition_propose', 'lifecycle_transition_approve', 'lifecycle_transition_reject')
     AND original_value IS NOT NULL AND corrected_value IS NOT NULL AND chain_id IS NOT NULL
     AND chain_seq IS NOT NULL AND chain_seq >= 1 AND prev_hash IS NOT NULL AND record_hash IS NOT NULL
     AND chain_id = dam_id AND comment IS NOT NULL AND length(trim(comment)) > 0
@@ -99,7 +104,13 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
              AND subject_id = dam_id)
          OR (action_type = 'rule_reversion_propose' AND subject_type = 'rule_reversion' AND decision = 'propose')
          OR (action_type = 'rule_reversion_approve' AND subject_type = 'rule_reversion' AND decision = 'approve')
-         OR (action_type = 'rule_reversion_reject' AND subject_type = 'rule_reversion' AND decision = 'reject')))));
+         OR (action_type = 'rule_reversion_reject' AND subject_type = 'rule_reversion' AND decision = 'reject')
+         OR (action_type = 'lifecycle_transition_propose' AND subject_type = 'dam_lifecycle' AND decision = 'propose'
+             AND subject_id = dam_id)
+         OR (action_type = 'lifecycle_transition_approve' AND subject_type = 'dam_lifecycle' AND decision = 'approve'
+             AND subject_id = dam_id)
+         OR (action_type = 'lifecycle_transition_reject' AND subject_type = 'dam_lifecycle' AND decision = 'reject'
+             AND subject_id = dam_id)))));
 
 -- v1.7 canon v2 (migration v1_7_002_canon_v2): a canon-2 record names its actor's app role. Shape only; the token
 -- vocabulary and ordering are checked by the verifier (dam_safety.audit_chain.actor_role_problem: actor_role_invalid).

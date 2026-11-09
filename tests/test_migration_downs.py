@@ -119,7 +119,17 @@ def _strip_comments(sql):
 
 PG_RAISE_ERROR = """CREATE OR REPLACE FUNCTION pg_temp.raise_error(msg text) RETURNS text LANGUAGE plpgsql AS
 $$ BEGIN RAISE EXCEPTION '%', msg; END $$;
+CREATE OR REPLACE FUNCTION pg_temp.sha2(t text, n int) RETURNS text LANGUAGE sql AS
+$$ SELECT encode(sha256(convert_to(t, 'UTF8')), 'hex') $$;
+CREATE OR REPLACE FUNCTION pg_temp.get_json_object(t text, path text) RETURNS text LANGUAGE plpgsql AS
+$$ BEGIN RETURN (t::jsonb) ->> substr(path, 3); EXCEPTION WHEN others THEN RETURN NULL; END $$;
 """
+# v1.8: Spark SQL -> PostgreSQL for the lifecycle migrations (Databricks semantics kept: get_json_object returns NULL
+# on unreadable JSON; split with a literal delimiter; sha2(x, 256) hex; inline VALUES tables)
+PG_FUNCS = ((r"(?<!\.)\bsha2\(", "pg_temp.sha2("), (r"(?<!\.)\bget_json_object\(", "pg_temp.get_json_object("),
+            (r"\bsplit\(", "string_to_array("), (r"\bsize\(", "cardinality("), (r"ARRAY<STRING>", "TEXT[]"),
+            (r"AS STRING\)", "AS TEXT)"), (r"AS TIMESTAMP\)", "AS TIMESTAMPTZ)"),
+            (r"current_timestamp\(\)", "current_timestamp"))
 # Databricks regex [\p{Cf}\p{Z}\s] emulated in PostgreSQL ARE: whitespace + the common format (Cf) code points + every
 # separator (Z: Zs spaces U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000; Zl U+2028; Zp U+2029).
 PG_CF_CLASS = r"'[[:space:]\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]'"
@@ -157,6 +167,9 @@ def _pg(sql, catalog="dam_dev", session="dam_dev", resolved="dam_dev", break_gla
     code = re.sub(r"\)\s*TBLPROPERTIES \([^)]*\)\s*;", ");", code)
     code = re.sub(r"(?i)\bRLIKE\b", "~", code)
     code = re.sub(r"`(\w+)`", r'"\1"', code)
+    for a, b in PG_FUNCS:
+        code = re.sub(a, b, code)
+    code = re.sub(r"(?s)FROM VALUES(.*?) AS (\w+)\(", r"FROM (VALUES\1) AS \2(", code)
 
     def ctab(m):
         lines = []
@@ -199,7 +212,7 @@ def _cks(conn):
 
 
 TABLES = ("silver.incl_reduced", "ops.alarm_transition", "ref.incl_correction", "audit.review_record",
-          "ref.threshold", "ref.dssmp_version")
+          "ref.threshold", "ref.dssmp_version", "ref.dam", "audit.app_extract")
 COUNT_SQL = " UNION ALL ".join(f"SELECT '{t}:' || count(*) FROM {t}" for t in
                                ("ops.alarm_transition", "ref.incl_correction", "audit.review_record", "ref.threshold"))
 
