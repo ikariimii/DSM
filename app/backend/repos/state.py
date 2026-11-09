@@ -187,9 +187,54 @@ class StateStore:
                             attempt + 1, self.retries - 1)
                 time.sleep(min(0.25 * (2 ** attempt), 4.0))
 
+    def _pg_not_owned(self, table: str | None = None) -> bool:
+        """v1.7 Lakebase split ownership (DA lakebase/001_app_schema.sql): True if the schema (table=None) or the table
+        exists and is owned by a role the current user is not a member of (dam_lakebase_owner). DDL on such objects
+        fails with 'must be owner', so init verifies them instead of altering them."""
+        if self.kind == "sqlite":
+            return False
+        if table is None:
+            rows = self.execute("SELECT NOT pg_has_role(current_user, nspowner, 'MEMBER') AS foreign_owner "
+                                "FROM pg_namespace WHERE nspname = %s", (self.schema or "public",))
+        else:
+            rows = self.execute("SELECT NOT pg_has_role(current_user, c.relowner, 'MEMBER') AS foreign_owner "
+                                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                                "WHERE n.nspname = %s AND c.relname = %s", (self.schema or "public", table))
+        return bool(rows) and rows[0].get("foreign_owner") is True
+
+    def _verify_provisioned(self, t: str) -> None:
+        """Fail closed when an owner-owned append-only table lacks what the app needs (columns, chain index, enabled
+        guard triggers): the DA script lakebase/001 must be re-run; the app may not alter it."""
+        s = self.schema or "public"
+        have = {r["column_name"] for r in self.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = %s AND table_name = %s", (s, t))}
+        missing = [c for c in SIGNOFF_V2_COLS if c not in have] if t == "review_signoff" else []
+        trg = {r["tgname"]: r["tgenabled"] for r in self.execute(
+            "SELECT tgname, tgenabled::text AS tgenabled FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = "
+            "(SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = %s AND c.relname = %s)", (s, t))}
+        enabled = [n for n, e in trg.items() if e in ("O", "A")]
+        row_ok = any(n in enabled for n in (f"t_noupd_{t}", f"t_app_noupd_{t}"))
+        trunc_ok = any(n in enabled for n in (f"t_notrunc_{t}", f"t_app_notrunc_{t}"))
+        disabled = sorted(n for n, e in trg.items() if e == "D")
+        idx = bool(self.execute("SELECT 1 AS x FROM pg_indexes WHERE schemaname = %s AND indexname = %s",
+                                (s, "review_signoff_chain_seq"))) if t == "review_signoff" else True
+        # App Dev (integration of the DA patch): the canon-2 CHECK must exist too (validated, not NOT VALID), else a
+        # canon-2 row without actor_app_role could be stored on Lakebase while the app's own DDL would refuse it.
+        canon = bool(self.execute(
+            "SELECT 1 AS x FROM pg_constraint co JOIN pg_class c ON c.oid = co.conrelid JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s AND co.conname = %s "
+            "AND co.contype = 'c' AND co.convalidated", (s, t, "ck_review_signoff_canon"))) \
+            if t == "review_signoff" else True
+        if missing or not row_ok or not trunc_ok or disabled or not idx or not canon:
+            raise RuntimeError(f"Lakebase {s}.{t} is owned by the data-layer owner role but is not provisioned as the "
+                               f"app needs (missing columns {missing}, row guard {row_ok}, truncate guard {trunc_ok}, "
+                               f"disabled triggers {disabled}, chain index {idx}, canon CHECK "
+                               f"ck_review_signoff_canon {canon}); re-run lakebase/001_app_schema.sql")
+
     def _init_schema(self) -> None:
         serial = "INTEGER PRIMARY KEY AUTOINCREMENT" if self.kind == "sqlite" else "BIGSERIAL PRIMARY KEY"
-        if self.kind != "sqlite" and self.schema:
+        if self.kind != "sqlite" and self.schema and not self._pg_not_owned():
             self.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
         for ddl in DDL:
             self.execute(ddl.replace("{serial}", serial))
@@ -206,6 +251,13 @@ class StateStore:
             for col in SIGNOFF_V2_COLS:
                 if col not in have:  # pragma: no cover - only a pre-v2 local sqlite file
                     self.execute(f"ALTER TABLE review_signoff ADD COLUMN {col} {'INTEGER' if col in _INT_SIGNOFF_COLS else 'TEXT'}")
+        elif self._pg_not_owned("review_signoff"):
+            # v1.7: review_signoff belongs to dam_lakebase_owner (DA lakebase/001 adds the v2 + canon-2 columns, the
+            # canon CHECK, the chain index and ALWAYS-enabled guards); the app verifies it and never runs DDL on it.
+            # Nothing below this branch applies to an owner-owned table (index + guards are review_signoff only).
+            for t in APPEND_ONLY:
+                self._verify_provisioned(t)
+            return
         else:
             for col in SIGNOFF_V2_COLS:
                 self.execute(f"ALTER TABLE {{s}}review_signoff ADD COLUMN IF NOT EXISTS {col} "

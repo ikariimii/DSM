@@ -387,6 +387,40 @@ def cdse_flag_changes(old_rules: list[dict] | None, new_rules: list[dict] | None
     return out
 
 
+def dssmp_problems(lookup, dam_id: str, ids) -> dict[str, str]:
+    """{dssmp_version_id: problem} for ids that are NOT a ref.dssmp_version row of `dam_id` (fail closed): unknown id,
+    an id belonging to another dam, or the lookup itself failing (every id is then unverifiable). `lookup(ids)` returns
+    ref.dssmp_version rows (analytics.dssmp_versions). Status (draft/approved/superseded) is not judged here."""
+    ids = sorted({str(i).strip() for i in ids if i is not None and str(i).strip()})
+    if not ids:
+        return {}
+    try:
+        rows = lookup(ids)
+    except Exception as e:  # noqa: BLE001 - unreadable ref.dssmp_version: refuse rather than publish unchecked
+        return {i: f"dssmp_version_id {i} cannot be verified: ref.dssmp_version unreadable ({type(e).__name__})"
+                for i in ids}
+    dams: dict[str, set] = {}
+    for r in rows or []:
+        dams.setdefault(str(r.get("dssmp_version_id")), set()).add(r.get("dam_id"))
+    out = {}
+    for i in ids:
+        if i not in dams:
+            out[i] = f"dssmp_version_id {i} does not exist in ref.dssmp_version"
+        elif dam_id not in dams[i]:
+            out[i] = (f"dssmp_version_id {i} belongs to dam {', '.join(sorted(map(str, dams[i])))}, "
+                      f"not {dam_id}")
+    return out
+
+
+def dssmp_issues(draft: dict, lookup) -> list[dict]:
+    """Go-live check: every threshold's dssmp_version_id must be a ref.dssmp_version row of the draft's dam."""
+    dam_id = (draft.get("details") or {}).get("dam_id")
+    ths = [_canonical_threshold(t) for t in draft.get("thresholds") or [] if isinstance(t, dict)]
+    probs = dssmp_problems(lookup, dam_id, [t.get("dssmp_version_id") for t in ths])
+    return [issue("thresholds", "error", probs[str(t.get("dssmp_version_id")).strip()], rule_key(t))
+            for t in ths if str(t.get("dssmp_version_id") or "").strip() in probs]
+
+
 def _posint(x) -> bool:
     if isinstance(x, bool) or not _isnum(x):
         return False

@@ -39,6 +39,7 @@ class Analytics(Protocol):
     def alarm_events(self, dam_ids: list[str], since: str | None = None) -> list[dict]: ...
     def pfms(self, dam_id: str) -> list[dict]: ...
     def cdse_principals(self, dam_id: str) -> list[str]: ...
+    def dssmp_versions(self, ids: list[str]) -> list[dict]: ...
 
 
 # ============================================================== demo
@@ -187,6 +188,12 @@ class MockAnalytics:
 
     def pfms(self, dam_id):
         return [ct.pfm(copy.deepcopy(p)) for p in self.d["pfms"] if p["dam_id"] == dam_id]
+
+    def dssmp_versions(self, ids):
+        """ref.dssmp_version rows (dssmp_version_id, dam_id, status) for exactly these ids, any dam."""
+        want = set(ids)
+        return [{k: v.get(k) for k in ("dssmp_version_id", "dam_id", "status")}
+                for v in self.d.get("dssmp_versions", []) if v["dssmp_version_id"] in want]
 
     # demo-only: a live alarm-rule flag edit appends the new ref.threshold version immediately (the DA job in prod)
     def apply_threshold_version(self, payload: dict) -> None:
@@ -382,6 +389,15 @@ class SqlAnalytics:
                             "AND (:since IS NULL OR e.event_ts >= CAST(:since AS TIMESTAMP))")
             + " ORDER BY e.event_ts DESC LIMIT 5000",
             {"dams": json.dumps(dam_ids), "since": since})]
+
+    def dssmp_versions(self, ids):
+        """ref.dssmp_version (sql/ddl/04; PK dssmp_version_id) rows for these ids, any dam - the caller checks the dam.
+        Errors propagate: callers fail closed when the table cannot be read."""
+        if not ids:
+            return []
+        return self.q(f"SELECT dssmp_version_id, dam_id, status FROM {self.t('ref', 'dssmp_version')} "
+                      "WHERE array_contains(from_json(:ids, 'ARRAY<STRING>'), dssmp_version_id)",
+                      {"ids": json.dumps(sorted(set(ids)))})
 
     def pfms(self, dam_id):
         return [ct.pfm(r) for r in self.q(

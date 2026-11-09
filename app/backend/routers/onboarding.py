@@ -126,6 +126,7 @@ def check_formulas(draft_id: str, c: Ctx = Depends(ctx), st=Depends(store), an=D
 def validate(draft_id: str, c: Ctx = Depends(ctx), st=Depends(store), an=Depends(analytics)):
     d = _draft(st, c, draft_id)
     issues = ob.validate(d["data"], {s["dam_id"] for s in an.sites()}, an.formulas())
+    issues += ob.dssmp_issues(d["data"], an.dssmp_versions)      # ref.dssmp_version, same dam (fail closed)
     errors = [i for i in issues if i["severity"] == "error"]
     return {"ok": not errors, "errors": len(errors), "warnings": len(issues) - len(errors), "issues": issues}
 
@@ -138,6 +139,7 @@ def golive(draft_id: str, request: Request, c: Ctx = Depends(ctx), st=Depends(st
     if d["status"] != "draft":
         raise HTTPException(409, f"Draft is {d['status']}")
     issues = ob.validate(d["data"], {s["dam_id"] for s in an.sites()}, an.formulas())
+    issues += ob.dssmp_issues(d["data"], an.dssmp_versions)      # ref.dssmp_version, same dam (fail closed)
     if any(i["severity"] == "error" for i in issues):
         raise HTTPException(422, {"message": "Validation errors", "issues": issues})
     payload = ob.golive_payload(d["data"])

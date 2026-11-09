@@ -427,7 +427,11 @@ def build() -> dict:
     return dict(sites=sites, structures=structures, instruments=instruments, calibrations=calibrations,
                 readings=readings, thresholds=thresholds, pfms=pfms, alarm_events=alarm_events,
                 incl_surveys=incl_surveys, incl_installations=incl_installations, formulas=formulas,
-                dam_cdse=dict(DAM_CDSE), project_membership=[dict(m) for m in CDSE_MEMBERSHIP])
+                dam_cdse=dict(DAM_CDSE), project_membership=[dict(m) for m in CDSE_MEMBERSHIP],
+                # ref.dssmp_version (sql/ddl/04): the DSSMP version every seeded threshold is set under (demo data)
+                dssmp_versions=[dict(dssmp_version_id=f"DSSMP-{s['dam_id']}-2026", dam_id=s["dam_id"], version_no=1,
+                                     effective_from="2026-01-01T00:00:00Z", effective_to=None, status="approved")
+                                for s in sites])
 
 
 # ref.threshold rules flagged cdse_ack_required in the demo (CDSE acknowledgement at any level)

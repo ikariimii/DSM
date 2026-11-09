@@ -548,9 +548,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Demo seed:** sets `dssmp_version_id = DSSMP-<dam>-2026`, `tier = AL<level>`, `deadband = 2 % of the limit` and
       `persistence_on / off = 2 / 3`. The BFK cyclic rule uses `AL1, 0.05 mm, 1 / 1`. These values are demo data
       only and are not used by the app's alarm logic.
-    - **DA:** the publish job inserts these columns from the outbox `insert` / `thresholds` rows as given. Does
-      `ref.dssmp` need a FK check on `dssmp_version_id`? The app does not validate it against `ref.dssmp` (it does not
-      read that table).
+    - **DA:** the publish job inserts these columns from the outbox `insert` / `thresholds` rows as given. The app
+      now checks `dssmp_version_id` against `ref.dssmp_version` (item 18).
 16. **Second approver for cdse_ack_required edits (PROVISIONAL app setting `CDSE_FLAG_REQUIRE_SECOND_APPROVER`,
     §5a; a note for the DA, no DA change needed now).** If the setting goes on, the engine and the chain verifier
     could enforce the same rule independently of the app.
@@ -564,3 +563,75 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       apply record's `corrected_value` if the DA wants it in the hashed content.
     - Fits the §7.13 authority verifier (`rule_flag_authority_problems`) as a new failure code such as
       `self_approval`.
+17. **Lakebase split ownership: state.py patch applied (DA `tools/patches/v17_lakebase_owner_state_init.patch`,
+    0274aeb). App-side review.**
+    - **Applied** with one conflict, resolved: the patch predates the canon-2 columns. It was written against the old
+      `ALTER TABLE review_signoff ADD COLUMN` line. Kept both: the canon-2 int column typing and the patch's
+      owner-owned branch.
+    - **Guards are kept:**
+      - Init still runs in ONE transaction after `pg_advisory_xact_lock(4702045)`; the patch's ownership probes run
+        inside it.
+      - On an app-owned table (local / sqlite / pre-split Lakebase), nothing changed: the app's own row and TRUNCATE
+        triggers.
+      - On the owner-owned table, the app runs no DDL. It verifies the following and fails closed (RuntimeError
+        "re-run lakebase/001_app_schema.sql"):
+        - the v2 and canon-2 columns;
+        - an enabled row guard and an enabled TRUNCATE guard (`t_noupd_*` / `t_notrunc_*`, or the app's
+          `t_app_*`), with no disabled trigger;
+        - the chain index.
+    - **App addition inside the patch (trivial):** the verification now also requires the validated CHECK
+      `ck_review_signoff_canon`. Without it, a canon-2 row with no `actor_app_role` could be stored on Lakebase.
+    - **No owner DDL left at app startup:**
+      - `CREATE SCHEMA` is skipped when the schema is foreign-owned.
+      - The canon ALTERs, constraint, chain index and `app_forbid_mutation` / trigger DDL sit after the owner-owned
+        `return`.
+      - The remaining statements touch only app-owned tables (`app_user` user_id, `CREATE TABLE IF NOT EXISTS`,
+        which needs the granted schema CREATE).
+      - Verified live on PostgreSQL 17 as a NOSUPERUSER, non-member LOGIN role
+        (`app/tests/test_lakebase_owner_live.py`): init twice; append and verify canon 2; UPDATE, DELETE, TRUNCATE,
+        DISABLE TRIGGER and DROP CONSTRAINT all refused with 42501; canon-2 without a role refused with 23514; init
+        refuses a dropped CHECK, a disabled guard and a dropped column.
+    - **UPDATE / DELETE audit (nothing needs a new grant):** the app updates or deletes only tables it owns under the
+      DA model:
+      - `app_user`, `dam_role`, `alarm_ack`, `onboarding_draft`;
+      - `review_chain_head` (head pointer; tail deletion is impossible because review_signoff refuses DELETE);
+      - `alarm_rule_flag_proposal` (status pending → applied / rejected).
+
+      `review_signoff` is INSERT-only. So proposal status updates do NOT conflict with the INSERT-only tables. The
+      evidence of every decision is the chained `alarm_rule_flag_*` record; the proposal row is workflow state.
+      **Optional, if the DA wants proposals append-only too:** freeze `alarm_rule_flag_proposal` after insert and
+      add an INSERT-only `alarm_rule_flag_decision (proposal_id PK, status, decided_by, decided_by_id, decided_at,
+      decision_rationale, pub_id, new_threshold_version)`. The PK makes a second decision impossible; status =
+      decision row or 'pending'. The app can switch to this when the DA adds it to the owner DDL. Nothing was
+      granted.
+    - **DA needs:**
+      - (a) The canon-2 DDL of item 14 in `lakebase/001`. With the committed 001 (3d398dd), the patched app
+        correctly refuses to start: "missing columns ['actor_app_role', 'canon_version']".
+      - (b) The publish job must be able to set `status` / `applied_at` / `message` on `ref_change_publication` and
+        `onboarding_publication`. 001 grants the extract role only SELECT; it needs UPDATE on those columns, or an
+        append-only publication-result table.
+      - (c) The extract / publisher role cannot see tables the app creates AFTER 001 ran (`alarm_rule_flag_proposal`,
+        `ref_change_publication` on a first deploy). `GRANT SELECT ON ALL TABLES` covers existing tables only. It
+        needs `ALTER DEFAULT PRIVILEGES FOR ROLE <app role> IN SCHEMA dam_app GRANT SELECT ON TABLES TO <extract
+        role>`, or re-running 001 after the app's first start.
+      - (d) Guards are accepted as enabled when `tgenabled` is O or A. The app role cannot set
+        `session_replication_role`, so O suffices against the app. ALWAYS is the DA's extra hardening, re-checked by
+        `validate_append_only.sql`.
+      - (e) `tools/patches/v17_lakebase_owner_state_init*.{patch,py}` can be removed; the app did not delete DA files.
+18. **`dssmp_version_id` must be a `ref.dssmp_version` row of the same dam (app check, fail closed).** The DDL table
+    is `ref.dssmp_version` (sql/ddl/04), not `ref.dssmp`. New `Analytics.dssmp_versions(ids)`: SQL `SELECT
+    dssmp_version_id, dam_id, status FROM ref.dssmp_version WHERE dssmp_version_id IN (...)`, read on behalf of the
+    user.
+    - **Go-live:** every threshold's id must exist and belong to the draft's dam. Otherwise there is a `thresholds`
+      error in validate and go-live returns 422.
+    - **Flag-apply N+1:** the copied id is re-checked. Otherwise 409, nothing recorded.
+    - An unreadable table fails closed: "cannot be verified".
+    - `status` (draft / approved / superseded) is NOT judged. Open question for Genie/DA: should a superseded or
+      draft DSSMP version be refused?
+    - **Workflow consequence:** a NEW dam's DSSMP version must exist in `ref.dssmp_version` before go-live. The
+      wizard does not create it. DA: who registers it? Options: the data layer before go-live, or the go-live
+      payload carrying a `dssmp_versions` row for the publisher.
+    - **Demo:** the seed has `DSSMP-<dam>-2026` (approved) for each dam. Tests register `DSSMP-NEW-2026` for the
+      onboarded dam.
+    - **Grant:** the app's users need SELECT on `ref.dssmp_version` (the reads are OBO). The DA's publisher checks
+      it too.

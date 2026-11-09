@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from .. import audit_chain as ac
 from ..config import approval_policy
 from ..deps import Ctx, analytics, ctx, require, store
-from ..onboarding import PUBLISH_REQUIRED  # ref.threshold NOT NULL columns carried from version N into N+1
+from ..onboarding import PUBLISH_REQUIRED, dssmp_problems  # ref.threshold NOT NULL columns carried from version N into N+1
 from . import alarms as alarms_router
 from . import signoffs as sg
 
@@ -102,6 +102,10 @@ def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationa
         raise HTTPException(409, f"{tid} v{_version(rule)} lacks the NOT NULL ref.threshold column(s) "
                                  f"{', '.join(missing)}; version {_version(rule) + 1} cannot be published without them "
                                  "(no defaults are invented) - the DA must backfill the current version first")
+    bad = dssmp_problems(an.dssmp_versions, dam_id, [rule["dssmp_version_id"]])
+    if bad:  # copied unchanged into N+1, so it must still be a ref.dssmp_version row of this dam (fail closed)
+        raise HTTPException(409, f"{tid} v{_version(rule)}: {'; '.join(bad.values())}; version "
+                                 f"{_version(rule) + 1} cannot be published")
     now = sg.now_utc()
     new_version = _version(rule) + 1
     insert = {k: v for k, v in rule.items() if k not in DERIVED}

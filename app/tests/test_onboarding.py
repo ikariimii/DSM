@@ -199,7 +199,17 @@ def test_golive_payload():
     assert p["data_source_map"][0]["dam_id"] == "NEW"
 
 
-def _fill(c, did, d, user=ADMIN):
+def register_dssmp(c, dam_id="NEW", dssmp_version_id="DSSMP-NEW-2026", status="approved"):
+    """Demo stand-in for the data layer: the DSSMP version a new project's thresholds are set under must exist in
+    ref.dssmp_version for that dam before go-live (onboarding.dssmp_issues)."""
+    an = c.tc.app.state.analytics_factory(None)
+    an.d.setdefault("dssmp_versions", []).append({"dssmp_version_id": dssmp_version_id, "dam_id": dam_id,
+                                                  "version_no": 1, "status": status})
+
+
+def _fill(c, did, d, user=ADMIN, dssmp=True):
+    if dssmp:
+        register_dssmp(c)
     for step in ob.EDITABLE:
         if step == "formulas":
             continue
