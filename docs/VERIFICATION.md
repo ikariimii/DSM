@@ -561,6 +561,19 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   and separator-only cases. UNVERIFIED on Databricks: `\p{Z}` in regexp_replace (Java regex; runbook probe P8 can check
   it with catalog = 'dam_prod' + U+00A0).
 
+## QA-062 (2026-11-09: extend the no-`\p{...}` CI check to app/ and tests/)
+
+- Check: tests/test_qa062_no_pclass.py scans EVERY .sql / .py / .yml / .yaml file under app/, tests/, qa/,
+  lakebase/, src/, tools/, resources/ and sql/ (no folder excluded). .sql files with `--` comments removed; .py files
+  whole, so PG-bound SQL strings in Python (and Python regexes, which reject `\p` anyway) are covered.
+- Allowlist (files only, exact occurrence counts, each justified in the test): the 10 UC `sql/migrations/*_down.sql`
+  (QA-057 guard, Databricks only), `tools/verify/qa057_guard_probe.sql` (UC probe), `tests/test_migration_downs.py`
+  (the UC -> PG emulation that replaces the class), `tests/test_qa057_prod_guard.py` (asserts the UC guard text),
+  `tests/test_qa059_lakebase_rerun.py` (the live proof that PG 17 rejects it). Nothing under app/, lakebase/, src/
+  or qa/ is allowed; a new occurrence in an allowed file fails too. Found today: no hit in app/ or qa/.
+- Evidence: 3 tests (scan + counts, allowlist shape, the scanner on synthetic .py / .sql text). The old QA-059 test
+  moved here.
+
 ## QA-059 (push blocker, 2026-11-09: re-running an older Lakebase migration undid a later hardening)
 
 - Repro (QA): v1_7_005 re-run after v1_7_010 handed dam_app.rule_reversion_proposal back to the app role, which could
@@ -585,9 +598,8 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - Fix, layer 3: the validator runs after every runner-applied file; any violation = exit 5. Choice: both, because
   the ledger blocks the unsafe file before it runs (the validator alone would only report after the app could
   already have used the window), and the validator catches what no ledger rule anticipated.
-- CI: tests/test_qa059_lakebase_rerun.py::test_no_lakebase_or_postgres_file_uses_unicode_property_escapes (no
-  `\p{...}` in lakebase/ or any runtime file except the UC downs + UC probe); PG 17.11 rejects it live ("invalid
-  escape \ sequence").
+- CI: since QA-062, tests/test_qa062_no_pclass.py (below); PG 17.11 rejects `\p{...}` live ("invalid escape \
+  sequence", tests/test_qa059_lakebase_rerun.py::test_pg17_rejects_unicode_property_escapes).
 - Evidence (PG 17.11): 13 tests in tests/test_qa059_lakebase_rerun.py (010 -> direct psql 005 twice -> validator
   clean and app cannot DISABLE; 001 re-run after 010 and every up re-run, all guarded tables; runner: 005 refused
   without and with --rerun, re-run / older / out-of-order-down refusals, --rerun accepted and recorded, ledger
@@ -609,6 +621,25 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   CHECKs, the app cannot DISABLE / DROP / replace, validator regressions, down keeps rows, re-up, the QA-059 runner
   with v1_8_001), tests/test_lifecycle_integration.py (alarm filter, derived go-live, dam_archived in the other
   loaders).
+- v1.8.003 (Genie 2026-11-09 15:27 + 15:35, FERC Specialist 15:27), verified locally the same way:
+  tests/test_lifecycle_engine.py (voided_in_error read-only for every target; the `dam_archived` body; `other` with
+  suspend_other_internal accepted with cdse_basis >= 20 trimmed + a CDSE's cdse_basis_by and no evidence, refused
+  `lifecycle_rationale_required` for 9 missing / short / non-CDSE / revoked cases; safety_related_ops_event true /
+  false / NULL / absent on both internal codes: never refused, the 12.12(a)(1)(iii)(A) derived cite and the
+  `lifecycle_12_10_review` warning only when true; true on a code without a derived cite or a non-boolean refused;
+  extension hash fields only when set), tests/test_lifecycle_loader.py (outbox flag NULL / false / true, `other`
+  with empty evidence, voided dam refused), tests/test_lifecycle_integration.py (a voided dam across every
+  per-dam loader, the lifecycle loader, the alarm filter and ingestion), tests/test_lifecycle_uc_schema.py (DDL 14 =
+  v1_8_001 + v1_8_003 columns; the new CHECK and the permanent-history view on PG),
+  tests/test_lakebase_lifecycle_outbox.py (block v1_8_002 identical in 001; default false; empty evidence only for
+  'other'; the runner with v1_8_002, its down and re-up), tests/test_lifecycle_backfill.py (hash_sql with the
+  extension fields = Python on PG; the v1_8_002 backfill SQL is byte-identical).
+- **LIFECYCLE-SAFETY-FLAG — UNVERIFIED** on Databricks / Lakebase: `v1_8_003_lifecycle_safety_flag.sql` (guarded ADD
+  COLUMNS on the appendOnly audit.lifecycle_event, the CHECK with `coalesce`, the 9-column seed), its down, the view
+  audit.v_lifecycle_permanent_ops_history, Lakebase `v1_8_002_lifecycle_safety_flag.sql` (ADD COLUMN IF NOT EXISTS
+  ... DEFAULT false, the CHECK swap) and the runbook 7c data step.
+- **UC-MIGRATION-LEDGER — tracked follow-up, UNVERIFIED** until a workspace is connected (Genie 15:27): UC has no
+  applied-migrations ledger like Lakebase's QA-059 one; the QA-057 guard stays as is. SCHEMA_CONTRACT §7.1f.
 - **LIFECYCLE-UC — UNVERIFIED** on Databricks: `sql/ddl/14_dam_lifecycle.sql` and `v1_8_001_dam_lifecycle.sql` (ARRAY
   columns and `split(...)` in a `FROM VALUES` seed, the SQL-scripting `BEGIN ... END` guarded ADD COLUMNS, `size()` /
   `RLIKE` in CHECKs, appendOnly on audit.lifecycle_event), the down, the views.
@@ -619,11 +650,10 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   jobs (fake Spark only).
 - **LIFECYCLE-LB — UNVERIFIED** on Lakebase: the outbox block (advisory-lock visibility in pg_locks for the trigger,
   ENABLE ALWAYS, grants) - same primitives as LB-HEAD-LOG / runbook step 4b P5.
-- **LIFECYCLE-AUTHORITY — PROVISIONAL:** who may approve each edge (`dam_safety.lifecycle.APPROVER_ROLES`) and the void
-  pair (CDSE + platform admin) - confirm with the dam-safety owner.
-- **LIFECYCLE-CITATIONS — UNVERIFIED-pending:** 13 of the 15 citation rows (all but `transfer_final_9_3_12_12c` and
-  `surrender_effective_6_2_6_5`). Gap: no code covers suspension_reason `other` (every `other` suspension is refused
-  `lifecycle_citation_invalid` until one is added as data).
+- **LIFECYCLE-AUTHORITY — PROVISIONAL, pending the user's decision:** who may approve each edge
+  (`dam_safety.lifecycle.APPROVER_ROLES`) and the void pair (CDSE + platform admin).
+- **LIFECYCLE-CITATIONS — UNVERIFIED-pending:** 14 of the 16 citation rows (all but `transfer_final_9_3_12_12c` and
+  `surrender_effective_6_2_6_5`), including `suspend_other_internal` until the FERC Specialist reviews its label.
 - **LIFECYCLE-BACKFILL — UNVERIFIED** on Databricks: `v1_8_002_lifecycle_backfill.sql` (raise_error guards,
   `CAST(... AS TIMESTAMP)` on an invalid date under ANSI mode, `row_number()` window, `split` for the evidence array,
   the MERGE). Verified on PG 17.11 (tests/test_lifecycle_backfill.py, same translation as the full-chain migration
@@ -635,7 +665,9 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - Design choices to confirm: "new DSSMP" = effective_from >= the current state's effective_from; the 60-day notice is
   measured from the approve record's signed_ts; a ref.dam row without any lifecycle event is `lifecycle_unverifiable`
   (no ref.dam row: implicit draft); the transfer counterpart event carries the transfer's citation; voided dams are
-  not read-only for the other loaders (only transferred / decommissioned_archived are); `created_ts` is not hashed.
+  read-only like transferred / decommissioned_archived (Genie 15:27; was: not read-only); readings of a read-only
+  dam are still ingested and reduced (never dropped), only never alarmed; safety_related_ops_event NULL is treated as
+  false (not coerced by a trigger; the loader writes false); `created_ts` is not hashed.
 - QA-059 runner (v1.8): migrations now sort numerically (`mig_key`: v1_10 after v1_9), and a validator finding about
   a dam_app table that does not exist yet and is only created by a not-yet-applied migration is reported `PENDING`
   (exit 0) instead of exit 5, so the runbook can step through the files; an existing table without its guard,

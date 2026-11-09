@@ -139,10 +139,11 @@ No history is rewritten: these records are corrected here only. UNCONFIRMED: non
 
 - **Code:** `src/dam_safety/lifecycle.py`, `src/dam_safety/lifecycle_load.py`, `src/jobs/apply_lifecycle_transitions.py`,
   `src/jobs/_lifecycle_guard.py`, the SQL in `sql/ddl/14_dam_lifecycle.sql`, `sql/migrations/v1_8_00*` and
-  `lakebase/migrations/v1_8_001_*` are original work of the Data Architect agent for this repository (no third-party
+  `lakebase/migrations/v1_8_00*` are original work of the Data Architect agent for this repository (no third-party
   code). The hash scheme (length-prefixed fields, sha256) is the same construction as the v1.6 review chain.
 - **Regulatory references in `ref.lifecycle_citation`:** the 15 codes and their citations are the list agreed on
-  2026-11-09 14:22 (18 CFR Parts 6, 9, 12 and 385; FPA section 8). Only `transfer_final_9_3_12_12c` (18 CFR 9.3;
+  2026-11-09 14:22, plus `suspend_other_internal` (v1.8.003, label from the FERC Specialist review 15:27, which also
+  removed the unconditional 12.12(a)(1)(iii)(A) cite from the drawdown row) (18 CFR Parts 6, 9, 12 and 385; FPA section 8). Only `transfer_final_9_3_12_12c` (18 CFR 9.3;
   12.12(c)) and `surrender_effective_6_2_6_5` (18 CFR 6.2; 6.5; 12.1) are VERIFIED; every other row is
   `UNVERIFIED-pending` and `INTERNAL` rows cite no regulation. The rows are data: verification moves a row to
   VERIFIED by a data change, never by a code change. No regulation text is copied into the repository.

@@ -73,6 +73,8 @@ documented result.
 7. `sql/migrations/v1_7_003_dssmp_registration.sql`
 8. `sql/migrations/v1_8_001_dam_lifecycle.sql` (v1.8; the backfill `v1_8_002_lifecycle_backfill.sql` runs after
    `dam_uc_setup` and the Lakebase step, see step 7b)
+9. `sql/migrations/v1_8_003_lifecycle_safety_flag.sql` (v1.8.003; before `dam_uc_setup`: ddl_14's view
+   audit.v_lifecycle_permanent_ops_history reads its columns)
 
 Each file runs as a one-off SQL task on the synced bundle file (dev mode syncs to the deployer's `.bundle` folder;
 the path below is the CLI default, UNVERIFIED):
@@ -80,7 +82,8 @@ the path below is the CLI default, UNVERIFIED):
 ```bash
 FILES=/Workspace/Users/$(databricks current-user me -o json | jq -r .userName)/.bundle/dam_safety/$TARGET/files
 for m in v1_5_001_contract v1_6_001_audit_chain v1_6_002_chain_head v1_6_003_alarm_rule_flag \
-         v1_7_001_cdse_ack v1_7_002_canon_v2 v1_7_003_dssmp_registration v1_8_001_dam_lifecycle; do
+         v1_7_001_cdse_ack v1_7_002_canon_v2 v1_7_003_dssmp_registration v1_8_001_dam_lifecycle \
+         v1_8_003_lifecycle_safety_flag; do
   databricks jobs submit --json "{\"run_name\": \"migrate $m\", \"tasks\": [{\"task_key\": \"m\",
     \"sql_task\": {\"warehouse_id\": \"$WH\", \"file\": {\"path\": \"$FILES/sql/migrations/$m.sql\",
     \"source\": \"WORKSPACE\"}, \"parameters\": {\"catalog\": \"$CATALOG\"}}}]}" || break
@@ -149,6 +152,7 @@ lb --file lakebase/migrations/v1_7_009_status_transition_guard.sql
 lb --file lakebase/migrations/v1_7_010_rule_reversion_owner.sql
 lb --file lakebase/migrations/v1_7_011_migration_ledger.sql
 lb --file lakebase/migrations/v1_8_001_lifecycle_outbox.sql     # v1.8 lifecycle outbox
+lb --file lakebase/migrations/v1_8_002_lifecycle_safety_flag.sql # v1.8.003 safety_related_ops_event + 'other' evidence
 ```
 
 A database migrated by hand before the ledger existed: record what is already applied first (writes `baseline`
@@ -402,7 +406,9 @@ databricks bundle run -t $TARGET dam_ref_publish
 ## 7b. Dam lifecycle (v1.8)
 
 1. After step 3 (v1_8_001 + `dam_uc_setup`, task `ddl_14_dam_lifecycle`) and step 4 (`v1_8_001_lifecycle_outbox`):
-   `SELECT count(*) FROM dam_dev.ref.lifecycle_citation` -> 15; `... ref.lifecycle_suspension_reason` -> 6.
+   `SELECT count(*) FROM dam_dev.ref.lifecycle_citation` -> 16; `... ref.lifecycle_suspension_reason` -> 6;
+   `SELECT citation_code, safety_derived_citation FROM dam_dev.ref.lifecycle_citation WHERE safety_derived_citation
+   IS NOT NULL` -> suspend_ops_drawdown_internal and suspend_other_internal, both `12.12(a)(1)(iii)(A)`.
 2. Backfill (once; idempotent): run `sql/migrations/v1_8_002_lifecycle_backfill.sql` like step 3. It fails (and
    writes nothing) if any onboarding_golive row has an unreadable ts. Then
    `SELECT lifecycle_state, count(*) FROM dam_dev.ref.v_dam_lifecycle_current GROUP BY 1` -> `live` per gone-live dam.
@@ -410,13 +416,33 @@ databricks bundle run -t $TARGET dam_ref_publish
    `publish_ref_changes`; expected `{"pending": 0}` or one JSON line per outbox row (`loaded` / `rejected` with a
    lifecycle_* reason_code). A dam with lifecycle rows that is not yet live (draft) raises no production alarm.
 4. Spot check: `SELECT * FROM dam_dev.audit.event_log WHERE event_type IN ('LIFECYCLE_LOAD', 'DAM_ARCHIVED_REFUSAL')`.
-Closes LIFECYCLE-UC, LIFECYCLE-LB, LIFECYCLE-LOADER, LIFECYCLE-BACKFILL on dev.
+5. Safety flag: `SELECT count(*) FROM dam_dev.audit.v_lifecycle_permanent_ops_history` runs (0 until a CDSE flags
+   an event); a voided dam's outbox rows come back `rejected` / `dam_archived` with
+   `dam_archived: dam <id> lifecycle_state=voided_in_error (read-only)`.
+Closes LIFECYCLE-UC, LIFECYCLE-LB, LIFECYCLE-LOADER, LIFECYCLE-BACKFILL, LIFECYCLE-SAFETY-FLAG on dev.
+
+## 7c. Lifecycle citation data correction (only if v1_8_001 seeded the catalog BEFORE v1_8_003)
+
+Migrations never overwrite ref data. If step 7b.1's safety_derived_citation query returns only
+suspend_other_internal, the old drawdown row is still in place and `safety_related_ops_event = true` on it is
+refused (`lifecycle_citation_invalid`, fail closed). With the FERC Specialist's / CDSE's review recorded, run once:
+
+```sql
+UPDATE dam_dev.ref.lifecycle_citation
+SET citation = 'INTERNAL: license articles; no unconditional Part 12 cite (12.12(a)(1)(iii)(A) only when the CDSE sets safety_related_ops_event = true)',
+    safety_derived_citation = '12.12(a)(1)(iii)(A)'
+WHERE citation_code = 'suspend_ops_drawdown_internal'
+  AND citation = 'INTERNAL: license articles; record under 12.12(a)(1)(iii)(A)' AND safety_derived_citation IS NULL;
+```
+
+Expected: 1 row (0 on a catalog seeded after v1_8_003). UNVERIFIED (LIFECYCLE-SAFETY-FLAG).
 
 ## 8. Rollback
 
 Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a table, column, volume or row.
 
-* UC, newest first, each once: `v1_8_002_lifecycle_backfill_down.sql`, `v1_8_001_dam_lifecycle_down.sql`,
+* UC, newest first, each once: `v1_8_003_lifecycle_safety_flag_down.sql` (ck_lifecycle_event only; PRE-CHECK: no
+  event with an empty evidence list), `v1_8_002_lifecycle_backfill_down.sql`, `v1_8_001_dam_lifecycle_down.sql`,
   `v1_7_003_dssmp_registration_down.sql`, `v1_7_002_canon_v2_down.sql`,
   `v1_7_001_cdse_ack_down.sql`, `v1_6_003_alarm_rule_flag_down.sql`, `v1_6_002_chain_head_down.sql`,
   `v1_6_001_audit_chain_down.sql`, `v1_5_001_contract_down.sql`, ONLY through `tools/run_migration.py` (QA-057; it
@@ -428,7 +454,8 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
   a PRE-CHECK; if it returns rows (newer audit records exist), STOP: those records are never deleted and that
   migration stays. Data-level fallback: `DESCRIBE HISTORY <table>` then `RESTORE TABLE <table> TO VERSION AS OF <n>`.
   Views / functions in 10b: re-run the previous `sql/ddl/10b_reviewer_authority.sql` from git.
-* Lakebase, newest first (through `lb`): `lakebase/migrations/v1_8_001_lifecycle_outbox_down.sql` (triggers,
+* Lakebase, newest first (through `lb`): `lakebase/migrations/v1_8_002_lifecycle_safety_flag_down.sql` (the
+  evidence CHECK only; the column and its values stay), `lakebase/migrations/v1_8_001_lifecycle_outbox_down.sql` (triggers,
   function and the publisher grant only; the table and its rows stay), `v1_7_011_migration_ledger_down.sql` (no-op),
   `lakebase/migrations/v1_7_010_rule_reversion_owner_down.sql` (ownership back to the
   app role; needs dam.app_role), `v1_7_009_status_transition_guard_down.sql` (triggers + function

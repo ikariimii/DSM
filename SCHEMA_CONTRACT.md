@@ -579,17 +579,27 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   `transferred`, `pending_surrender`, `decommissioned_archived`, `voided_in_error`. **Edges (only these):**
   draft -> live | voided_in_error; live <-> suspended; live -> pending_transfer; pending_transfer -> live |
   transferred; live | suspended -> pending_surrender; pending_surrender -> live | decommissioned_archived;
-  live -> voided_in_error. voided_in_error is terminal; transferred and decommissioned_archived are read-only.
-- **UC tables** (`sql/ddl/14_dam_lifecycle.sql` = migration `v1_8_001_dam_lifecycle.sql`):
+  live -> voided_in_error. voided_in_error is terminal. **Read-only (409 `dam_archived`, alarms off):** transferred,
+  decommissioned_archived and (Genie 2026-11-09 15:27) voided_in_error.
+- **`dam_archived` refusal shape (for App Dev to match):** `dam_safety.lifecycle.archived_refusal(dam_id, state)` =
+  `{"code": "dam_archived", "dam_id": "<dam_id>", "lifecycle_state": "<state>", "message": "dam_archived: dam
+  <dam_id> lifecycle_state=<state> (read-only)"}`. App: `HTTPException(409, archived_refusal(...))`, so the body is
+  `{"detail": {"code": "dam_archived", "dam_id": ..., "lifecycle_state": ..., "message": ...}}` (the app's existing
+  409 `{"detail": {"code", "message"}}` shape plus two keys). Loaders: outbox `reason_code` = `dam_archived`,
+  `message` = the same message text (publish_ref_changes: status `rejected_invalid`, message only).
+- **UC tables** (`sql/ddl/14_dam_lifecycle.sql` = migration `v1_8_001_dam_lifecycle.sql` + `v1_8_003_lifecycle_safety_flag.sql`):
   `audit.lifecycle_event` (append-only, chained per dam: `prev_event_hash` -> `event_hash`, first = 64 x `0`;
   `event_hash` = sha256 of `dam_safety.lifecycle.hash_input`: for each of the 32 `HASH_FIELDS` in order
   `"<len>:<value>|"`, NULL = `"-1:|"`; `effective_ts` as `YYYY-MM-DDTHH:MM:SSZ` (UTC, seconds); `evidence_uri`
-  space-joined; booleans `true`/`false`; `created_ts` and `event_hash` are not hashed); `ref.dam_lifecycle_state`
+  space-joined; booleans `true`/`false`; `created_ts` and `event_hash` are not hashed; v1.8.003 appends
+  `EXT_HASH_FIELDS` `safety_related_ops_event`, `derived_citation` as `"<name>=<len>:<value>|"` ONLY when not NULL,
+  so v1_8_002's back-filled events keep their hash); `ref.dam_lifecycle_state`
   (SCD-2, `state_id` = `event_id`, half-open [effective_from, effective_to)); the mirror `ref.dam.lifecycle_state` /
   `ref.dam.lifecycle_effective_from` (open row); views `ref.v_dam_lifecycle_current` and `ref.v_dam_go_live`
   (**go_live_at is derived, no column**: the first `live` effective_from). Enums are DATA:
   `ref.lifecycle_citation` (citation_code, from_states, to_state, suspension_reasons, citation,
-  verification_status `VERIFIED` | `UNVERIFIED-pending`, withdrawal_notice, active; 15 codes, only
+  verification_status `VERIFIED` | `UNVERIFIED-pending`, withdrawal_notice, active, safety_derived_citation (v1.8.003);
+  16 codes (v1.8.003 adds `suspend_other_internal`), only
   `transfer_final_9_3_12_12c` and `surrender_effective_6_2_6_5` VERIFIED) and `ref.lifecycle_suspension_reason`
   (construction_modification, emergency_modification, drawdown, monitoring_change, other, re_directed). Seeds are
   insert-if-missing: a later data change (e.g. a code moving to VERIFIED) is never overwritten by a re-run.
@@ -605,7 +615,8 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   approval_record_hash unique; the INSERT must hold the dam lock `pg_advisory_xact_lock(4702047,
   hashtext('dam_app.dam:' || dam_id))` (trigger `t_lock_lifecycle_transition_outbox`, ENABLE ALWAYS; lock order
   dam 4702047 -> check -> chain 4702046). CHECKs: states, `(to_state = suspended) = (suspension_reason IS NOT NULL)`,
-  evidence_uri a non-empty JSON array, both hashes 64 lower-case hex. Validator: owner, outbox, status guard, lock
+  evidence_uri a JSON array, non-empty unless suspension_reason = 'other' (block v1_8_002), both hashes 64 lower-case
+  hex. Validator: owner, outbox, status guard, lock
   guard (`lifecycle_lock_guard_missing`), app privileges.
 - **New columns for App Dev** (outbox; all TEXT unless noted): `counterpart_dam_id` (transfer: the new licensee's
   draft record), `withdrawal_filed_date` (YYYY-MM-DD; required with a `*_withdrawn_*` citation),
@@ -615,7 +626,8 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   evidence_uri (JSON array), ferc_docket_or_order, effective_ts, monitoring_rule, notification_checklist (JSON),
   retention_action, rationale, citation_code, proposed_by, approved_by, approved_at, second_approved_by,
   approval_record_hash, dssmp_version_id, suspension_reason, incident_report_uri, sworn_verification_12_13 BOOLEAN,
-  sworn_verification_uri, cdse_basis, cdse_basis_by).
+  sworn_verification_uri, cdse_basis, cdse_basis_by). **v1.8.003 (Lakebase block / migration v1_8_002):
+  `safety_related_ops_event BOOLEAN DEFAULT false`** (set by the CDSE; omitted or NULL = false).
 - **Loader** (job `dam_ref_publish`, task `apply_lifecycle_transitions`, after `load_dssmp_registrations`, before
   `publish_ref_changes`; `dam_safety.lifecycle_load`): re-checks every rule at decision time, appends the event(s)
   (`event_id` `lc:<approval_record_hash>`; the transfer's counterpart `lc:<hash>:counterpart`, draft -> live at the
@@ -629,25 +641,55 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   `lifecycle_sworn_verification_required`, `lifecycle_cdse_basis_required`, `lifecycle_rationale_required`,
   `lifecycle_re_directive_required`, `lifecycle_dssmp_required`, `dam_go_live_not_ready`,
   `lifecycle_transfer_target_invalid`, `lifecycle_approval_invalid`; loader row codes `missing_required_column`,
-  `invalid_value`, `approval_record_missing`, `approval_record_wrong_action`, `approval_record_mismatch`. Warnings
-  (never block): `lifecycle_notice_60_day` (construction_modification, effective_ts < 60 days after the approval),
+  `invalid_value`, `approval_record_missing`, `approval_record_wrong_action`, `approval_record_mismatch`. No new
+  refusal code in v1.8.003 (`lifecycle_safety_flag_required` was dropped by Genie 15:35: the flag defaults false).
+  Warnings (never block): `lifecycle_12_10_review` (safety_related_ops_event = true: the CDSE must decide whether a
+  18 CFR 12.10 condition-affecting-safety report is also due), `lifecycle_notice_60_day` (construction_modification, effective_ts < 60 days after the approval),
   `lifecycle_withdrawal_15_day` (effective_ts < 15 days after withdrawal_filed_date).
 - **Per-reason evidence:** emergency_modification: incident_report_uri + sworn_verification_12_13 = true +
   sworn_verification_uri; construction_modification: the sworn pair; drawdown / monitoring_change: cdse_basis +
-  cdse_basis_by; other: rationale; re_directed: re_directive_uri. Into suspended: a NEW approved DSSMP version
+  cdse_basis_by; re_directed: re_directive_uri. Into suspended: a NEW approved DSSMP version
   (effective_from >= the current state's effective_from) in effect at effective_ts; suspended -> live: an approved
-  version in effect. **Gap:** no seeded citation_code lists `other`, so every `other` suspension is refused
-  `lifecycle_citation_invalid` until a code is added as data.
-- **Authority (PROVISIONAL, decision time = the records' signed_ts):** suspension / resume: the dam's CDSE
+  version in effect.
+- **`other` (Genie 2026-11-09 15:27, FERC Specialist 15:27):** citation `suspend_other_internal` (live -> suspended,
+  reason `other` only; label "Internal: no specific Part 12 basis; CDSE rationale required"; UNVERIFIED-pending until
+  the FERC Specialist reviews the label). The CDSE's recorded rationale is required: `cdse_basis` of at least 20
+  characters after trimming AND `cdse_basis_by` holding CDSE authority for the dam at approved_at, else 409
+  `lifecycle_rationale_required` (the free-text `rationale` column does not count). Evidence is optional for `other`
+  only (every other transition still needs a non-empty evidence_uri).
+- **`safety_related_ops_event` (FERC Specialist 15:27, Genie amendment 15:35):** BOOLEAN, set by the CDSE, on the
+  outbox (`DEFAULT false`) and on `audit.lifecycle_event`. **Defaults to false: NULL is treated as false (never
+  refused) and the loader writes `false` into the event.** Only when it is true on a code with
+  `ref.lifecycle_citation.safety_derived_citation` (seeded: `suspend_other_internal`, `suspend_ops_drawdown_internal`
+  = `12.12(a)(1)(iii)(A)`) does the event carry `derived_citation` = that cite, appear in
+  `audit.v_lifecycle_permanent_ops_history` (the permanent operational history) and raise the warning
+  `lifecycle_12_10_review`. False / NULL: purely internal, no 12.12 cite. true on a code without a derived cite, or a
+  non-boolean: `lifecycle_citation_invalid` / `invalid_value`. Neither internal code cites 12.12(a)(1)(iii)(A)
+  unconditionally any more (the drawdown row's citation text says so). UC CHECK: `derived_citation` only with the flag
+  true.
+- **Approver per edge: PROVISIONAL, pending the user's decision** (Genie 2026-11-09 15:27; `APPROVER_ROLES` in
+  `dam_safety.lifecycle`; decision time = the records' signed_ts): suspension / resume: the dam's CDSE
   (ref.v_dam_reviewer_authority); every other edge: the dam's CDSE or a platform admin (ADMIN on `'*'`); void: two
   distinct people, one CDSE and one platform admin (proposer + approver, either order).
 - **Rules in the other jobs:** alarm_evaluator evaluates a reading only when its dam was in a production-alarm state
   at the reading's ts (draft / before go-live: test-only, voided / decommissioned / transferred: off; no lifecycle
   rows or an unreadable table: production). apply_cdse_assignments / load_dssmp_registrations / publish_ref_changes
-  refuse rows of a read-only dam (`dam_archived`, audit.event_log `DAM_ARCHIVED_REFUSAL`). The CDSE not-live check
+  refuse rows of a read-only dam, voided included (`dam_archived`, audit.event_log `DAM_ARCHIVED_REFUSAL`).
+  **Ingestion is not blocked** for any state (decision, open to review): logger / manual readings of a read-only dam
+  still land and reduce (permanent records; nothing is dropped), they are only never alarmed. The app should refuse
+  NEW manual readings / reviews on a read-only dam with the `dam_archived` body above. The CDSE not-live check
   folds `ref.v_dam_go_live` into the go-live markers (earliest wins).
 - **Backfill** (`sql/migrations/v1_8_002_lifecycle_backfill.sql`, separate commit): one draft -> live event per dam
   from the earliest `onboarding_golive` record in audit.app_extract (strict ts, fail closed, chained, idempotent).
+- **Tracked follow-ups (logged, NOT built):**
+  1. **UC migration ledger** (Genie 15:27): UC has no applied-migrations ledger like Lakebase's QA-059
+     `dam_app.schema_migration_ledger`; UC migrations stay idempotent and guarded (QA-057 prod guard, unchanged).
+     UNVERIFIED until a workspace is connected.
+  2. **Readings during any suspension stay permanent records under 18 CFR 12.12(a)(1)(ii)** (FERC Specialist): no
+     job may purge or overwrite readings of a suspended dam; today nothing filters ingestion by lifecycle state.
+  3. **Lifecycle events must be exportable for site copies under 12.12(b)(2)** (FERC Specialist): an export of
+     `audit.lifecycle_event` (+ the permanent operational history view) per dam.
+  4. **Part 12D projects must provide physical and electronic copies to the RE under 12.12(d)** (FERC Specialist).
 
 ### 7.2 Ownership of writes (v1.1, app Q11)
 The app writes Lakebase only. `dam_lakebase_extract` is the **only** writer of `ALARM_ACK` rows to `audit.event_log`;
@@ -732,6 +774,12 @@ name and fail loudly if it does not resolve.
   `v1_8_001_lifecycle_outbox.sql` through `tools/run_migration.py --lakebase`, then the backfill
   `v1_8_002_lifecycle_backfill.sql`, before the first `dam_ref_publish` run with `apply_lifecycle_transitions`. Down:
   `v1_8_001_dam_lifecycle_down.sql` (CHECKs only; tables, columns and rows stay). UNVERIFIED (LIFECYCLE-UC).
+  **v1.8.003 (safety flag):** `sql/migrations/v1_8_003_lifecycle_safety_flag.sql` right after v1_8_001 and BEFORE
+  `dam_uc_setup` (ddl_14's view reads its columns), and the Lakebase `v1_8_002_lifecycle_safety_flag.sql` after
+  `v1_8_001_lifecycle_outbox.sql`, both before the code that reads / writes the flag. Downs:
+  `v1_8_003_lifecycle_safety_flag_down.sql` (CHECK only), Lakebase `v1_8_002_lifecycle_safety_flag_down.sql` (CHECK
+  only). A catalog seeded by v1_8_001 before v1_8_003 needs the reviewed data step in runbook 7c. UNVERIFIED
+  (LIFECYCLE-SAFETY-FLAG).
 
 ## 9. Sign-off
 | Party | Agent | Status |
