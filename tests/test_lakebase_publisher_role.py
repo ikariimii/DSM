@@ -17,7 +17,8 @@ DDL_PATH = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 VAL_PATH = os.path.join(ROOT, "lakebase", "validate_append_only.sql")
 PG = os.environ.get("DAM_TEST_PG")
 live = pytest.mark.skipif(not PG or not shutil.which("psql"), reason="set DAM_TEST_PG (libpq conninfo) + psql")
-OUTBOXES = ("ref_change_publication", "onboarding_publication", "dssmp_registration_outbox")
+OUTBOXES = ("ref_change_publication", "onboarding_publication", "dssmp_registration_outbox", "dam_cdse_outbox")
+CONTRACT_OUTBOXES = ("dssmp_registration_outbox", "dam_cdse_outbox")     # status / reason_code / message / processed_at
 
 
 def test_static_grants_are_column_level_and_never_default_for_the_publisher():
@@ -25,7 +26,8 @@ def test_static_grants_are_column_level_and_never_default_for_the_publisher():
     assert "CREATE ROLE dam_lakebase_publisher NOLOGIN" in ddl
     assert ("GRANT SELECT, UPDATE (status, message, applied_at) ON ref_change_publication, onboarding_publication\n"
             "  TO dam_lakebase_publisher;") in ddl
-    assert ("GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox\n"
+    assert ("GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox, "
+            "dam_cdse_outbox\n"
             "  TO dam_lakebase_publisher;") in ddl
     assert "ALTER DEFAULT PRIVILEGES FOR ROLE dam_lakebase_owner IN SCHEMA dam_app GRANT SELECT ON TABLES" in ddl
     for line in ddl.splitlines():
@@ -77,7 +79,10 @@ def _ins(e, table):
             "dssmp_registration_outbox": "(outbox_id, dam_id, dssmp_version_id, version_no, effective_from, "
                                          "document_sha256, proposed_by, approved_by, approved_at, "
                                          f"approval_record_hash, status) VALUES ('OB-{n}', 'D1', 'DS-{n}', 1, 't', "
-                                         "'h', 'a', 'c', 't', 'h', 'pending')"}[table]
+                                         "'h', 'a', 'c', 't', 'h', 'pending')",
+            "dam_cdse_outbox": "(outbox_id, dam_id, kind, new_cdse_id, change_reason_code, proposed_by, approved_by, "
+                               f"approved_at, approval_record_hash, status) VALUES ('DCO-{n}', 'D1', 'assign', 'c', "
+                               "'initial_appointment', 'a', 'a', 't', 'h', 'pending')"}[table]
     return _psql(e["as_app"], "-c", f"INSERT INTO dam_app.{table} {vals}")
 
 
@@ -96,7 +101,7 @@ def test_good_setup_passes_the_validator_with_extract_and_publisher(env):
 @live
 @pytest.mark.parametrize("table", OUTBOXES)
 def test_publisher_can_read_and_set_the_outcome_columns_only(env, table):
-    dssmp = table == "dssmp_registration_outbox"
+    dssmp = table in CONTRACT_OUTBOXES
     key = "outbox_id" if dssmp else "pub_id"
     sets = ("status = 'loaded', reason_code = 'x', message = 'm', processed_at = 'now'" if dssmp
             else "status = 'applied', message = 'm', applied_at = 'now'")

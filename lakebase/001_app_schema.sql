@@ -52,6 +52,32 @@ CREATE TABLE IF NOT EXISTS dssmp_document (
         size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, content_b64 TEXT NOT NULL, uploaded_by TEXT NOT NULL,
         uploaded_at TEXT NOT NULL);
 
+-- v1.7 §7 item 20 (dam CDSE bootstrap / change) and item 21 (bulk re-version): dam_cdse_change and
+-- rule_reversion_proposal are app-owned workflow tables; dam_cdse_outbox is a publication outbox (owned by
+-- dam_lakebase_owner like the others: app SELECT + INSERT, publisher SELECT + UPDATE of the 4 bookkeeping columns).
+-- Migration for an existing database: lakebase/migrations/v1_7_005_cdse_reversion_tables.sql (+ _down.sql).
+-- BEGIN v1_7_005 block (app SCHEMA_CONTRACT §7 items 20 / 21; DDL copied verbatim from app/backend/repos/state.py)
+CREATE TABLE IF NOT EXISTS dam_cdse_change (
+        change_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('assign', 'change')),
+        previous_cdse_id TEXT, new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL,
+        rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0), proposed_by TEXT NOT NULL, proposed_by_id TEXT,
+        proposed_at TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+        decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, outbox_id TEXT,
+        approval_record_hash TEXT);
+CREATE TABLE IF NOT EXISTS dam_cdse_outbox (
+        outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL, previous_cdse_id TEXT,
+        new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL, proposed_by TEXT NOT NULL,
+        approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        reason_code TEXT, message TEXT, processed_at TEXT);
+CREATE TABLE IF NOT EXISTS rule_reversion_proposal (
+        proposal_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, to_dssmp_version_id TEXT NOT NULL,
+        rules TEXT NOT NULL, proposed_by TEXT NOT NULL, proposed_by_id TEXT, proposed_at TEXT NOT NULL,
+        rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'rejected')),
+        decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, pub_ids TEXT);
+-- END v1_7_005 block
+
 -- ---- v1.7 DSSMP registration outbox: the agreed app contract (app SCHEMA_CONTRACT §7 item 19; same columns as
 -- app/backend/repos/state.py). One row per CDSE-approved DSSMP version, inserted by the app at 'pending' in the
 -- approve transaction; approval_record_hash = record_hash of the chained dssmp_version_approve record. Owned by
@@ -202,9 +228,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
 --   * The extract job's role (SET dam.extract_role) gets SELECT on all tables + INSERT/UPDATE on extract_watermark,
 --     and SELECT on tables created later by dam_lakebase_owner or the app role (ALTER DEFAULT PRIVILEGES, app
 --     SCHEMA_CONTRACT §7 item 17 (c)). It is never widened beyond that.
---   * v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox) are
+--   * v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox,
+--     dam_cdse_outbox) are
 --     owned by dam_lakebase_owner: the app has SELECT + INSERT only. A separate NOLOGIN role dam_lakebase_publisher
---     has USAGE, SELECT and column-level UPDATE (status, message, applied_at; dssmp_registration_outbox: status,
+--     has USAGE, SELECT and column-level UPDATE (status, message, applied_at; dssmp_registration_outbox and
+--     dam_cdse_outbox: status,
 --     reason_code, message, processed_at) on exactly those tables, SELECT on dssmp_document, and nothing
 --     else (no DELETE / INSERT / TRUNCATE, no default privileges). The dam_ref_publish job's login is made a member
 --     via SET dam.publisher_login (it must not be the app role, nor a member of dam_lakebase_owner).
@@ -230,6 +258,7 @@ ALTER TABLE extract_watermark OWNER TO dam_lakebase_owner;
 ALTER TABLE ref_change_publication OWNER TO dam_lakebase_owner;
 ALTER TABLE onboarding_publication OWNER TO dam_lakebase_owner;
 ALTER TABLE dssmp_registration_outbox OWNER TO dam_lakebase_owner;
+ALTER TABLE dam_cdse_outbox OWNER TO dam_lakebase_owner;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dam_lakebase_publisher') THEN
     CREATE ROLE dam_lakebase_publisher NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
@@ -245,7 +274,7 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA dam_app FROM dam_lakebase_publisher;
 GRANT USAGE ON SCHEMA dam_app TO dam_lakebase_publisher;
 GRANT SELECT, UPDATE (status, message, applied_at) ON ref_change_publication, onboarding_publication
   TO dam_lakebase_publisher;
-GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox
+GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox, dam_cdse_outbox
   TO dam_lakebase_publisher;
 GRANT SELECT ON dssmp_document TO dam_lakebase_publisher;     -- v1.7 (b): document copy to ref.dssmp_documents
 DO $$
@@ -293,7 +322,8 @@ BEGIN
     FOR o IN SELECT c.oid::regclass AS rel FROM pg_class c
              WHERE c.relnamespace = 'dam_app'::regnamespace AND c.relkind IN ('r', 'p')
                AND c.relname NOT IN ('exceedance_status', 'review_signoff', 'manual_reading', 'extract_watermark',
-                                     'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox')
+                                     'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
+                                     'dam_cdse_outbox')
                AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = r) LOOP
       EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, r);
     END LOOP;
@@ -302,9 +332,10 @@ BEGIN
     EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I', r);
     EXECUTE format('GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading TO %I', r);
     EXECUTE format('GRANT USAGE ON SEQUENCE exceedance_status_id_seq, manual_reading_id_seq TO %I', r);
-    EXECUTE format('REVOKE ALL ON ref_change_publication, onboarding_publication, dssmp_registration_outbox FROM %I', r);
+    EXECUTE format('REVOKE ALL ON ref_change_publication, onboarding_publication, dssmp_registration_outbox, '
+                   'dam_cdse_outbox FROM %I', r);
     EXECUTE format('GRANT SELECT, INSERT ON ref_change_publication, onboarding_publication, '
-                   'dssmp_registration_outbox TO %I', r);
+                   'dssmp_registration_outbox, dam_cdse_outbox TO %I', r);
     IF pg_has_role(r, 'dam_lakebase_publisher', 'MEMBER') THEN
       EXECUTE format('REVOKE dam_lakebase_publisher FROM %I', r);
     END IF;

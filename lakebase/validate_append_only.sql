@@ -11,10 +11,11 @@
 -- (table or column), DELETE or TRIGGER on an append-only table, may SET
 -- session_replication_role, or has it preset; a guard trigger is missing, not on forbid_mutation(), or not ENABLE
 -- ALWAYS ('A'); any trigger on an append-only table is disabled (pg_trigger.tgenabled = 'D').
--- v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox): not owned
+-- v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox,
+-- dam_cdse_outbox): not owned
 -- by dam_lakebase_owner, or the app holds anything beyond SELECT / INSERT on them; dam_lakebase_publisher missing,
 -- able to log in / privileged, holding anything beyond USAGE on the schema, SELECT and UPDATE (status, message,
--- applied_at; dssmp_registration_outbox: status, reason_code, message, processed_at) on those three tables (any other table, column, sequence, INSERT, DELETE, TRUNCATE, TRIGGER,
+-- applied_at; dssmp_registration_outbox, dam_cdse_outbox: status, reason_code, message, processed_at) on those four tables (any other table, column, sequence, INSERT, DELETE, TRUNCATE, TRIGGER,
 -- REFERENCES), a member of the owner, or named in a default ACL; the app role a member of the publisher role. With
 -- SET dam.extract_role: the extract role holding anything beyond SELECT (plus INSERT / UPDATE on extract_watermark),
 -- or no default ACL giving it SELECT on future tables of dam_lakebase_owner.
@@ -27,11 +28,13 @@ want(t, tg, kind) AS (SELECT t, 't_noupd_' || t, 'row' FROM guarded UNION ALL SE
 app AS (SELECT r.* FROM cfg JOIN pg_roles r ON r.rolname = cfg.app),
 pub AS (SELECT r.* FROM pg_roles r WHERE r.rolname = 'dam_lakebase_publisher'),
 ext AS (SELECT r.* FROM pg_roles r WHERE r.rolname = nullif(current_setting('dam.extract_role', true), '')),
-outbox(t) AS (VALUES ('ref_change_publication'), ('onboarding_publication'), ('dssmp_registration_outbox')),
+outbox(t) AS (VALUES ('ref_change_publication'), ('onboarding_publication'), ('dssmp_registration_outbox'),
+                     ('dam_cdse_outbox')),
 outcome(t, col) AS (SELECT t, c FROM (VALUES ('ref_change_publication'), ('onboarding_publication')) a(t),
                            (VALUES ('status'), ('message'), ('applied_at')) b(c)
-                    UNION ALL SELECT 'dssmp_registration_outbox', c
-                    FROM (VALUES ('status'), ('reason_code'), ('message'), ('processed_at')) b(c)),
+                    UNION ALL SELECT o.t, c
+                    FROM (VALUES ('dssmp_registration_outbox'), ('dam_cdse_outbox')) o(t),
+                         (VALUES ('status'), ('reason_code'), ('message'), ('processed_at')) b(c)),
 ot AS (SELECT o.t, c.oid, c.relowner FROM outbox o
        LEFT JOIN pg_class c ON c.relname = o.t AND c.relnamespace = to_regnamespace('dam_app')),
 tabs AS (SELECT c.oid, c.relname FROM pg_class c WHERE c.relnamespace = to_regnamespace('dam_app')

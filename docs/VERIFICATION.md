@@ -263,3 +263,16 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - UNVERIFIED: not run on a workspace - Python file I/O on /Volumes from the serverless job, WRITE VOLUME / READ VOLUME
   grants for the run_as principal (not added to 10b), the publisher's SELECT on dssmp_document on Lakebase, large
   documents (content_b64 is read whole into memory).
+
+## LB-CDSE-TABLES (lakebase/001 + migration v1_7_005; app SCHEMA_CONTRACT §7 items 20 / 21)
+
+- lakebase/001 carries the app's DDL verbatim for `dam_cdse_change`, `dam_cdse_outbox`, `rule_reversion_proposal`
+  (block `v1_7_005`, identical in `lakebase/migrations/v1_7_005_cdse_reversion_tables.sql`). `dam_cdse_outbox` is
+  owned by dam_lakebase_owner (app SELECT + INSERT; publisher SELECT + UPDATE (status, reason_code, message,
+  processed_at)); the two workflow tables are app-owned. Validator covers the new outbox. Rollback
+  `_down.sql` revokes the publisher and returns the outbox to the app role; it drops no table, column or row.
+- Evidence (PG 17.11): tests/test_lakebase_cdse_tables.py (fresh 001 -> validator 0 rows, the app's own StateStore
+  writes all three tables as the app role, publisher limited to the 4 columns; upgrade from 001@dfc08bb by migration
+  (twice), rollback (twice) keeps all rows and removes the publisher grant, re-apply and re-run of 001 converge),
+  tests/test_lakebase_publisher_role.py (dam_cdse_outbox added to every outbox case).
+- UNVERIFIED: not run on a Lakebase instance.
