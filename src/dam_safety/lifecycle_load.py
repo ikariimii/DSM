@@ -224,14 +224,19 @@ def insert_sql(target: str, source: str, cols, key: str) -> str:
 
 
 def event_insert_sql(target: str, source: str) -> str:
-    """Append the planned events: idempotent on event_id, and never a fork: an event is only appended while no
-    stored event of the dam already links to the same prev_event_hash (a concurrent writer -> skipped, the outbox row
-    stays pending and is re-planned next run; see mark_insert_skipped)."""
+    """Append the planned events in ONE statement (one Delta commit), idempotent on event_id, never forking a chain,
+    and all-or-nothing per transition: the events of one approval (approval_record_hash; a transfer writes the old
+    record -> transferred AND the new record draft -> live) are skipped TOGETHER when any of them would fork its dam's
+    chain (a stored event other than itself already links to the same prev_event_hash: a concurrent writer). Skipped
+    rows stay pending in the outbox and are re-planned next run (mark_insert_skipped)."""
     cols = ", ".join(L.EVENT_COLS)
     return (f"INSERT INTO {target} ({cols})\nSELECT {', '.join('s.' + c for c in L.EVENT_COLS)} FROM {source} AS s\n"
             f"WHERE NOT EXISTS (SELECT 1 FROM {target} AS e WHERE e.event_id = s.event_id)\n"
             f"  AND NOT EXISTS (SELECT 1 FROM {target} AS e WHERE e.dam_id = s.dam_id "
-            "AND e.prev_event_hash = s.prev_event_hash)")
+            "AND e.prev_event_hash = s.prev_event_hash)\n"
+            f"  AND NOT EXISTS (SELECT 1 FROM {source} AS g JOIN {target} AS e ON e.dam_id = g.dam_id "
+            "AND e.prev_event_hash = g.prev_event_hash AND e.event_id <> g.event_id\n"
+            "    WHERE g.approval_record_hash = s.approval_record_hash)")
 
 
 def mark_insert_skipped(decisions, stored: Mapping[str, str]) -> None:

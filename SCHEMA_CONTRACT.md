@@ -619,7 +619,7 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
 - **Loader** (job `dam_ref_publish`, task `apply_lifecycle_transitions`, after `load_dssmp_registrations`, before
   `publish_ref_changes`; `dam_safety.lifecycle_load`): re-checks every rule at decision time, appends the event(s)
   (`event_id` `lc:<approval_record_hash>`; the transfer's counterpart `lc:<hash>:counterpart`, draft -> live at the
-  same effective_ts), never forks a chain, rebuilds the SCD-2 rows and the mirror, audits every outcome
+  same effective_ts, written in ONE INSERT all-or-nothing per transition), never forks a chain, rebuilds the SCD-2 rows and the mirror, audits every outcome
   (`audit.event_log` `LIFECYCLE_LOAD`, `lifecycle_load:<outbox_id>:<status>`), writes status / reason_code (first
   code) / message (every `<code>: <detail>`, then `warning <code>: ...`) / processed_at. Rows wait (pending) while the
   chain records are not extracted (1 h), or behind another transition of the same dam / counterpart in the run.

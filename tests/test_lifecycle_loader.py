@@ -205,3 +205,47 @@ def test_event_insert_is_idempotent_and_never_forks_and_the_merges_heal():
             assert c.execute("SELECT lifecycle_state FROM lc_t.dam").fetchone()[0] == L.SUSP
         finally:
             c.execute("DROP SCHEMA IF EXISTS lc_t CASCADE")
+
+
+@pytest.mark.skipif(not PG, reason="set DAM_TEST_PG")
+def test_a_transfer_is_written_all_or_nothing():
+    """Brief: transfer is one transaction. Both events go in ONE INSERT; if either would fork its chain (another
+    writer moved the new record), NEITHER is written and the outbox row is deferred, never half a transfer."""
+    import uuid
+
+    import psycopg
+    row = outbox(req(L.P_TRANSFER, L.TRANSFERRED))
+    out, evs = plan([row], records(row), {"D1": PATH_TO[L.P_TRANSFER]})
+    pair = out["events"]
+    assert [e["dam_id"] for e in pair] == ["D1", "NEW"] and len({e["approval_record_hash"] for e in pair}) == 1
+    db = "lclt_" + uuid.uuid4().hex[:8]
+    with psycopg.connect(PG, autocommit=True) as root:
+        root.execute(f"CREATE DATABASE {db}")
+    try:
+        with psycopg.connect(f"{PG} dbname={db}", autocommit=True) as c:
+            c.execute(f"CREATE TABLE ev ({', '.join(x + ' TEXT' for x in L.EVENT_COLS)})")
+            c.execute("CREATE TABLE src (LIKE ev)")
+
+            def put(table, rows):
+                for r in rows:
+                    c.execute(f"INSERT INTO {table} VALUES ({', '.join(['%s'] * len(L.EVENT_COLS))})",
+                              [str(r[k]) if r.get(k) is not None else None for k in L.EVENT_COLS])
+
+            put("ev", evs)
+            other = dict(pair[1], event_id="someone-else", approval_record_hash="f" * 64)   # NEW moved meanwhile
+            put("ev", [other])
+            put("src", pair)
+            sql = LL.event_insert_sql("ev", "src")
+            c.execute(sql)
+            got = {r[0]: r[1] for r in c.execute("SELECT event_id, event_hash FROM ev").fetchall()}
+            assert not any(e["event_id"] in got for e in pair)                  # neither half
+            LL.mark_insert_skipped(out["decisions"], got)
+            assert out["decisions"][0]["status"] is None
+            c.execute("DELETE FROM ev WHERE event_id = 'someone-else'")
+            c.execute(sql)
+            c.execute(sql)                                                      # idempotent
+            got = {r[0]: r[1] for r in c.execute("SELECT event_id, event_hash FROM ev").fetchall()}
+            assert all(got.get(e["event_id"]) == e["event_hash"] for e in pair) and len(got) == len(evs) + 2
+    finally:
+        with psycopg.connect(PG, autocommit=True) as root:
+            root.execute(f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
