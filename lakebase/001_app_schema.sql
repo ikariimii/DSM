@@ -356,8 +356,8 @@ ALTER TABLE review_chain_head_log ENABLE ALWAYS TRIGGER t_noupd_review_chain_hea
 -- a legacy value of an older contract may only be normalized to a terminal state (so v1_7_004 / v1_7_008 still run).
 -- Function owned by dam_lakebase_owner, triggers ENABLE ALWAYS (fire under session_replication_role = replica too).
 -- The outboxes are owner-owned, so neither the app nor the publisher can drop / disable the trigger or replace the
--- function. rule_reversion_proposal is APP-owned (state.py manages it): the app role, as table owner, could still
--- drop or disable its trigger; lakebase/validate_append_only.sql reports that (status_guard_*).)
+-- function. rule_reversion_proposal: owned by dam_lakebase_owner since v1_7_010 (before that the app role, as owner,
+-- could drop or disable its trigger); lakebase/validate_append_only.sql reports a missing / disabled one.)
 CREATE OR REPLACE FUNCTION dam_app.status_transition_guard() RETURNS trigger LANGUAGE plpgsql AS
 $$ BEGIN
   IF NEW.status IS NOT DISTINCT FROM OLD.status THEN
@@ -414,7 +414,7 @@ BEGIN
                AND c.relname NOT IN ('exceedance_status', 'review_signoff', 'manual_reading', 'extract_watermark',
                                      'review_chain_head_log',
                                      'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
-                                     'dam_cdse_outbox')
+                                     'dam_cdse_outbox', 'rule_reversion_proposal')
                AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = r) LOOP
       EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, r);
     END LOOP;
@@ -451,4 +451,35 @@ BEGIN
   END IF;
 END $$;
 
+-- BEGIN v1_7_010 block (App Dev follow-up 1: rule_reversion_proposal owned by dam_lakebase_owner, like the
+-- outboxes. The app keeps SELECT, INSERT and column UPDATE of exactly the columns its decide_pending writes
+-- (app/backend/routers/rule_reversion.py approve / reject -> state.decide_pending): status, decided_by,
+-- decided_by_id, decided_at, decision_rationale, pub_ids. status moves stay guarded by t_status_rule_reversion_proposal
+-- (v1_7_009, ENABLE ALWAYS); no table-level UPDATE, DELETE, TRUNCATE, REFERENCES or TRIGGER, and as a non-owner the
+-- app can no longer ALTER, drop or disable the table's triggers. Refuses to run when the table is owned by an
+-- unprivileged role (the app) and dam.app_role is not set, because the app would lose all access.)
+DO $$
+DECLARE
+  r TEXT := nullif(current_setting('dam.app_role', true), '');
+BEGIN
+  IF (r IS NULL OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r)) AND EXISTS (
+       SELECT 1 FROM pg_class c JOIN pg_roles o ON o.oid = c.relowner
+       WHERE c.oid = 'dam_app.rule_reversion_proposal'::regclass
+         AND o.rolname <> 'dam_lakebase_owner' AND NOT o.rolsuper) THEN
+    RAISE EXCEPTION 'v1_7_010: SET dam.app_role to the app role first (it owns dam_app.rule_reversion_proposal and would lose access)'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  ALTER TABLE dam_app.rule_reversion_proposal OWNER TO dam_lakebase_owner;
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'dam_app.rule_reversion_proposal'::regclass
+             AND tgname = 't_status_rule_reversion_proposal') THEN
+    ALTER TABLE dam_app.rule_reversion_proposal ENABLE ALWAYS TRIGGER t_status_rule_reversion_proposal;
+  END IF;
+  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('REVOKE ALL ON dam_app.rule_reversion_proposal FROM %I', r);
+    EXECUTE format('GRANT SELECT, INSERT ON dam_app.rule_reversion_proposal TO %I', r);
+    EXECUTE format('GRANT UPDATE (status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids) '
+                   'ON dam_app.rule_reversion_proposal TO %I', r);
+  END IF;
+END $$;
+-- END v1_7_010 block
 COMMIT;

@@ -14,8 +14,8 @@ BEGIN;
 -- a legacy value of an older contract may only be normalized to a terminal state (so v1_7_004 / v1_7_008 still run).
 -- Function owned by dam_lakebase_owner, triggers ENABLE ALWAYS (fire under session_replication_role = replica too).
 -- The outboxes are owner-owned, so neither the app nor the publisher can drop / disable the trigger or replace the
--- function. rule_reversion_proposal is APP-owned (state.py manages it): the app role, as table owner, could still
--- drop or disable its trigger; lakebase/validate_append_only.sql reports that (status_guard_*).)
+-- function. rule_reversion_proposal: owned by dam_lakebase_owner since v1_7_010 (before that the app role, as owner,
+-- could drop or disable its trigger); lakebase/validate_append_only.sql reports a missing / disabled one.)
 CREATE OR REPLACE FUNCTION dam_app.status_transition_guard() RETURNS trigger LANGUAGE plpgsql AS
 $$ BEGIN
   IF NEW.status IS NOT DISTINCT FROM OLD.status THEN

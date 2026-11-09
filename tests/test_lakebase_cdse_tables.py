@@ -149,6 +149,8 @@ def test_upgrade_by_migration_then_rollback_keeps_every_row_and_reapply_restores
     assert _counts(env) == ["1", "1", "1"]                                  # nothing dropped
     assert _pub_update(env).returncode != 0                                 # publisher grants reverted
     assert _psql(env["conn"], "-f", MIG, env_extra=env["opts"]).returncode == 0
+    for m in later_than("v1_7_005"):        # v1_7_005 hands rule_reversion_proposal to the app; v1_7_010 takes it back
+        assert _psql(env["conn"], "-f", m, env_extra=env["opts"]).returncode == 0, m
     assert _valid(env) == "" and _pub_update(env).returncode == 0 and _counts(env) == ["1", "1", "1"]
     # re-running the full current 001 on top converges to the same state
     assert _psql(env["conn"], "-f", DDL_PATH, env_extra=env["opts"]).returncode == 0 and _valid(env) == ""

@@ -516,3 +516,32 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   onboarding_publication load job from the publication's go-live record, used first by is_live.
 - Preconditions UNVERIFIED: the dam_ref_publish run_as identity sees every audit.app_extract row through the dam row
   filter (the same as audit.review_record today); the audit_log payload `ts` is the app's ISO-8601 UTC text.
+
+## QA-058 (strict; App Dev follow-up 1, 2026-11-09: rule_reversion_proposal owned by dam_lakebase_owner)
+
+- App UPDATE columns (exact; derived from app/backend: the only UPDATE is StateStore.decide_pending called by
+  routers/rule_reversion.py approve / reject; asserted by tests/test_lakebase_rule_reversion_owner.py):
+  `status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids`. The app also needs SELECT (WHERE /
+  RETURNING, rows()) and INSERT (insert_row). Nothing else: no table-level UPDATE, DELETE, TRUNCATE, REFERENCES,
+  TRIGGER; as a non-owner it cannot ALTER / drop the table or drop / disable its triggers.
+- lakebase/001 block v1_7_010 = lakebase/migrations/v1_7_010_rule_reversion_owner.sql: ALTER TABLE OWNER TO
+  dam_lakebase_owner, t_status_rule_reversion_proposal ENABLE ALWAYS (function already owner-owned since v1_7_009;
+  the trigger follows the table), REVOKE ALL + the grants above to dam.app_role; the 001 app-role loop no longer
+  re-owns the table. It refuses to run when the table is owned by an unprivileged role and dam.app_role is unset.
+  Down: ownership back to dam.app_role; drops nothing (rows, trigger, function kept).
+- Validator: `owner_not_dam_lakebase_owner` checks pg_class.relowner directly for EVERY guarded table
+  (exceedance_status, review_signoff, manual_reading, review_chain_head_log, ref_change_publication,
+  onboarding_publication, dssmp_registration_outbox, dam_cdse_outbox, rule_reversion_proposal, plus any dam_app table
+  with a trigger on forbid_mutation / app_forbid_mutation / status_transition_guard), as its own finding separate
+  from status_guard_missing; tested by changing ONLY the owner of each of the 9 tables (to the app role and to a
+  bystander role, triggers untouched and still ENABLE ALWAYS) and by a new trigger-protected table. Plus
+  `app_workflow_privilege` (any extra table or column privilege, or a missing one). The v1_7_009 comment no longer
+  calls the table app-owned.
+- Evidence (PG 17.11, as the app role): every allowed column updates; the 8 other columns, DELETE, TRUNCATE,
+  DISABLE TRIGGER / ALL, DROP TRIGGER, ADD COLUMN, OWNER, DROP TABLE, CREATE TRIGGER, SET session_replication_role
+  are refused; status stays guarded (applied -> pending refused, terminal row frozen); the app's real
+  init_schema + insert_row + decide_pending (approve with pub_ids, reject, a second decision -> "no longer pending")
+  work and leave the validator at 0 rows; upgrade from 001@c7bca54 (app-owned) twice, down twice (owner back, row
+  and trigger kept), re-up and 001 re-run converge. Note: re-running the older v1_7_005 migration hands the table
+  back to the app (it predates v1_7_010); run the later migrations after it (the validator reports it otherwise).
+  UNVERIFIED: on Lakebase.

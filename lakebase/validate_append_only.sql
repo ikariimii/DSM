@@ -22,6 +22,12 @@
 -- v1_7_009: t_status_<table> missing on dam_cdse_outbox / dssmp_registration_outbox / rule_reversion_proposal, not
 -- BEFORE UPDATE FOR EACH ROW on dam_app.status_transition_guard() with its terminal-state arguments, not ENABLE ALWAYS,
 -- or the function not owned by dam_lakebase_owner.
+-- QA-058: owner_not_dam_lakebase_owner = pg_class.relowner checked directly for EVERY guarded table (the four
+-- append-only tables incl. review_chain_head_log, the four outboxes, rule_reversion_proposal, and any dam_app table
+-- carrying a trigger on forbid_mutation / app_forbid_mutation / status_transition_guard), independent of the
+-- trigger checks, so an ownership regression fails CI even while the triggers are still enabled.
+-- v1_7_010: the app role holding anything beyond SELECT,
+-- INSERT and UPDATE (status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids), or lacking one of them.
 WITH cfg AS (SELECT nullif(current_setting('dam.app_role', true), '') AS app,
                     'dam_lakebase_owner'::text AS own),
 guarded(t) AS (VALUES ('exceedance_status'), ('review_signoff'), ('manual_reading'), ('review_chain_head_log')),
@@ -110,6 +116,35 @@ SELECT * FROM (
       || p.proowner::regrole::text
     FROM pg_proc p WHERE p.pronamespace = to_regnamespace('dam_app') AND p.proname = 'status_transition_guard'
      AND p.proowner::regrole::text <> 'dam_lakebase_owner'
+  UNION ALL SELECT 'owner_not_dam_lakebase_owner', 'dam_app.' || c.relname || ' owned by ' || c.relowner::regrole::text
+    FROM pg_class c
+    WHERE c.relnamespace = to_regnamespace('dam_app') AND c.relkind IN ('r', 'p')
+      AND c.relowner <> coalesce((SELECT oid FROM pg_roles WHERE rolname = 'dam_lakebase_owner'), 0)
+      AND (c.relname IN ('exceedance_status', 'review_signoff', 'manual_reading', 'review_chain_head_log',
+                         'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
+                         'dam_cdse_outbox', 'rule_reversion_proposal')
+           OR EXISTS (SELECT 1 FROM pg_trigger tr JOIN pg_proc fp ON fp.oid = tr.tgfoid
+                      WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal
+                        AND fp.pronamespace = to_regnamespace('dam_app')
+                        AND fp.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard')))
+  UNION ALL SELECT 'app_workflow_privilege', app.rolname || ' has ' || allp.p || ' on dam_app.rule_reversion_proposal'
+    FROM app, allp WHERE to_regclass('dam_app.rule_reversion_proposal') IS NOT NULL
+     AND allp.p NOT IN ('SELECT', 'INSERT')
+     AND has_table_privilege(app.oid, to_regclass('dam_app.rule_reversion_proposal'), allp.p)
+  UNION ALL SELECT 'app_workflow_privilege', app.rolname || ' has column ' || cp.p || ' (' || a.attname
+      || ') on dam_app.rule_reversion_proposal'
+    FROM app, pg_attribute a, (VALUES ('UPDATE'), ('REFERENCES')) cp(p)
+    WHERE a.attrelid = to_regclass('dam_app.rule_reversion_proposal') AND a.attnum > 0 AND NOT a.attisdropped
+      AND NOT (cp.p = 'UPDATE' AND a.attname IN ('status', 'decided_by', 'decided_by_id', 'decided_at',
+                                                 'decision_rationale', 'pub_ids'))
+      AND has_column_privilege(app.oid, a.attrelid, a.attname, cp.p)
+  UNION ALL SELECT 'app_workflow_privilege', app.rolname || ' lacks ' || need.p || ' on dam_app.rule_reversion_proposal'
+    FROM app, (VALUES ('SELECT', NULL), ('INSERT', NULL), ('UPDATE', 'status'), ('UPDATE', 'decided_by'),
+                      ('UPDATE', 'decided_by_id'), ('UPDATE', 'decided_at'), ('UPDATE', 'decision_rationale'),
+                      ('UPDATE', 'pub_ids')) need(p, col)
+    WHERE to_regclass('dam_app.rule_reversion_proposal') IS NOT NULL AND CASE WHEN need.col IS NULL
+      THEN NOT has_table_privilege(app.oid, to_regclass('dam_app.rule_reversion_proposal'), need.p)
+      ELSE NOT has_column_privilege(app.oid, to_regclass('dam_app.rule_reversion_proposal'), need.col, need.p) END
   UNION ALL SELECT 'outbox_missing', 'dam_app.' || t FROM ot WHERE oid IS NULL
   UNION ALL SELECT 'outbox_owner', 'dam_app.' || t || ' owned by ' || relowner::regrole::text
     FROM ot WHERE oid IS NOT NULL AND relowner::regrole::text <> 'dam_lakebase_owner'

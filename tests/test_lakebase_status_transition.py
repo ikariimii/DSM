@@ -169,9 +169,13 @@ def test_the_publisher_cannot_bypass_the_guard(env, t):
 def test_validator_reports_a_missing_or_disabled_guard_and_down_reapply(env):
     _fresh(env)
     assert _psql(env["su"], "-f", VAL, env_extra=env["opts"]).stdout.strip() == ""
-    # the app OWNS rule_reversion_proposal, so it can disable that trigger: the validator must report it
-    assert _psql(env["app"], "-c", "ALTER TABLE dam_app.rule_reversion_proposal DISABLE TRIGGER "
-                                   "t_status_rule_reversion_proposal").returncode == 0
+    # since v1_7_010 the app no longer owns rule_reversion_proposal: it cannot disable the trigger; if the owner
+    # side does, the validator reports it
+    r = _psql(env["app"], "-c", "ALTER TABLE dam_app.rule_reversion_proposal DISABLE TRIGGER "
+                                "t_status_rule_reversion_proposal")
+    assert r.returncode != 0 and "must be owner" in r.stderr
+    assert _psql(env["su"], "-c", "ALTER TABLE dam_app.rule_reversion_proposal DISABLE TRIGGER "
+                                  "t_status_rule_reversion_proposal").returncode == 0
     out = _psql(env["su"], "-f", VAL, env_extra=env["opts"]).stdout
     assert "status_guard_missing|t_status_rule_reversion_proposal" in out
     i = _new(env, "dam_cdse_outbox")
