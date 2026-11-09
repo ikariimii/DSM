@@ -38,7 +38,7 @@ QA-059: Lakebase migrations (lakebase/migrations/*.sql) go through the same tool
   not, a file in SUPERSEDED once a later hardening that it would undo is applied (v1_7_005 after v1_7_010).
 * After every applied file the validator lakebase/validate_append_only.sql runs; any violation = exit 5 (the file
   is applied and recorded; fix forward). A file that fails = exit 4, nothing recorded.
-* A session advisory lock (RUNNER_LOCK) serialises concurrent runners.
+* A session advisory lock (hashtext(RUNNER_LOCK_KEY)) serialises concurrent runners.
 Why both a ledger and the validator: the ledger stops an unsafe file BEFORE it runs (the validator only detects
 afterwards, when the app may already have used the window); the validator still catches what no rule anticipated.
 The files themselves are also ownership-safe on a direct psql re-run (defense in depth; QA-059 tests).
@@ -67,7 +67,8 @@ LB_MIG_DIR = os.path.join(ROOT, "lakebase", "migrations")
 LB_NAME = re.compile(r"^(v\d+_\d+_\d{3})_[a-z0-9_]+\.sql$")
 LEDGER = "dam_app.schema_migration_ledger"
 LEDGER_FILE = os.path.join(LB_MIG_DIR, "v1_7_011_migration_ledger.sql")
-RUNNER_LOCK = 4702049                 # != INIT 4702045, chain 4702046, dam 4702047
+RUNNER_LOCK_KEY = "dam_safety:tools/run_migration.py"   # single-key advisory lock on hashtext(key); no new numeric
+# lock constant (QA-056: only INIT 4702045, chain 4702046 and dam 4702047 exist; two-key locks are a separate space)
 # file -> the later migrations that harden what it would undo: refused once ANY of them is applied, no flag overrides
 SUPERSEDED = {"v1_7_005_cdse_reversion_tables.sql": ("v1_7_010_rule_reversion_owner.sql",)}
 # migration -> SQL that is true when its effect is present (databases migrated by hand before the ledger existed)
@@ -217,7 +218,7 @@ def run_lakebase(a, conn) -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import validate_lakebase
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_lock(%s)", (RUNNER_LOCK,))
+        cur.execute("SELECT pg_advisory_lock(hashtext(%s)::bigint)", (RUNNER_LOCK_KEY,))
         try:
             _set_gucs(cur, a)
             cur.execute("BEGIN")
@@ -260,7 +261,7 @@ def run_lakebase(a, conn) -> int:
             cur.execute(f"INSERT INTO {LEDGER} (migration, direction, sha256, rerun_reason) VALUES (%s, %s, %s, %s)",
                         (d["name"], "down" if d["is_down"] else "up", _sha(d["file"]), d["reason"]))
         finally:
-            cur.execute("SELECT pg_advisory_unlock(%s)", (RUNNER_LOCK,))
+            cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::bigint)", (RUNNER_LOCK_KEY,))
     bad = validate_lakebase.violations(conn, a.app_role)
     for check, detail in bad:
         print(f"FAIL {check}: {detail}", file=sys.stderr)
