@@ -166,7 +166,10 @@ def signer_probe_problem(signer) -> str | None:
 def require_signer_for_catalog(catalog: str, signer) -> None:
     """Fail closed: a job that verifies chains must not run against a production catalog without a real signer,
     because a fully stripped chain verifies under the no-op signer (QA-045c). Call at job start, before any read.
-    QA-052: a real-looking signer must also pass the load-time round trip (signer_probe_problem)."""
+    QA-052: a real-looking signer must also pass the load-time round trip (signer_probe_problem).
+    QA-055: the name is canonicalized first; an unknown or garbled name raises ValueError (fail closed)."""
+    from .catalog import normalize_catalog
+    catalog = normalize_catalog(catalog)
     if catalog in PROD_CATALOGS and not is_real_signer(signer):
         raise SignerConfigError(
             f"refusing to verify reviewer chains in {catalog}: no real (non-no-op) signer is configured "

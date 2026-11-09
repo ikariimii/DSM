@@ -16,8 +16,11 @@ def args(*extra):
     for name, default in extra:
         p.add_argument(f"--{name}", default=default)
     a, _ = p.parse_known_args()
-    if a.catalog not in ("dam_dev", "dam_test", "dam_prod"):
-        raise SystemExit(f"refusing unknown catalog {a.catalog!r}")
+    from dam_safety.catalog import normalize_catalog  # QA-055: one shared check (src/ is on sys.path above)
+    try:
+        a.catalog = normalize_catalog(a.catalog)     # canonical name from here on (== "dam_prod" checks downstream)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     return a
 
 
