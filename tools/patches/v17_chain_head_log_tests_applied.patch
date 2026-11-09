@@ -1,0 +1,40 @@
+diff --git a/tests/test_chain_head_log.py b/tests/test_chain_head_log.py
+index bc3c718..a8627ba 100644
+--- a/tests/test_chain_head_log.py
++++ b/tests/test_chain_head_log.py
+@@ -53,9 +53,22 @@ def test_001_and_validator_guard_the_head_log():
+     assert "('review_chain_head_log')" in open(VAL_PATH).read()
+ 
+ 
++def _app_already_patched(rev: str | None = None) -> bool:
++    """App Dev applied the patch (merged with QA-056's dam lock in append_chained): state.py carries its effect, so
++    the patch no longer applies forward. Then check the effect instead of the patch. rev=None reads the working tree
++    (what `git apply --check` sees); rev="HEAD" reads the committed file (what `git archive HEAD` exports)."""
++    if rev is None:
++        st = open(os.path.join(ROOT, "app", "backend", "repos", "state.py")).read()
++    else:
++        st = git_show_or_skip(ROOT, rev, "app/backend/repos/state.py")
++    code = "\n".join(l for l in st.splitlines() if not l.lstrip().startswith("#"))
++    return ("CHAIN_LOCK_CLASS" in code and "review_chain_head_log" in code and '"review_chain_head_log")' in code
++            and 'q("UPDATE {s}review_chain_head' not in code and '" FOR UPDATE"' not in code)
++
++
+ def test_patch_applies_to_the_app_at_head_and_drops_update_of_the_head():
+     r = subprocess.run(["git", "-C", ROOT, "apply", "--check", PATCH], capture_output=True, text=True)
+-    assert r.returncode == 0, r.stderr
++    assert r.returncode == 0 or _app_already_patched(), r.stderr
+     txt = open(PATCH).read()
+     state = txt[txt.index("+++ b/app/backend/repos/state.py"):txt.index("diff ", txt.index("+++ b/app/backend/repos/state.py"))]
+     added = [l[1:] for l in state.splitlines() if l.startswith("+") and not l.startswith("+++")
+@@ -132,8 +145,9 @@ def test_patched_app_appends_heads_and_reads_the_latest(env):
+     require_git(ROOT, "`git archive HEAD app` (the patch is applied to HEAD's committed app/)")
+     tar = subprocess.run(["git", "-C", ROOT, "archive", "HEAD", "app"], capture_output=True, check=True).stdout
+     tarfile.open(fileobj=io.BytesIO(tar)).extractall(dst, filter="data")
+-    r = subprocess.run(["git", "apply", PATCH], cwd=dst, capture_output=True, text=True)
+-    assert r.returncode == 0, r.stderr
++    if not _app_already_patched("HEAD"):
++        r = subprocess.run(["git", "apply", PATCH], cwd=dst, capture_output=True, text=True)
++        assert r.returncode == 0, r.stderr
+     code = f"""
+ import sys; sys.path.insert(0, {str(dst / 'app')!r})
+ from psycopg_pool import ConnectionPool

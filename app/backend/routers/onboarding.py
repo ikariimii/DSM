@@ -129,7 +129,7 @@ def _dssmp_issues(st, an, data: dict) -> list[dict]:
     regs = st.dssmp_registrations(dam_id) if dam_id else []
     return ob.dssmp_issues(data, an.dssmp_versions, an.dssmp_versions_for_dam, registrations=regs,
                            outbox=st.dssmp_outbox(dam_id) if dam_id else []) \
-        + ob.cdse_authority_issues(getattr(an, "cdse_principals", None), dam_id)   # go-live readiness (fail closed)
+        + ob.go_live_readiness_issues(getattr(an, "go_live_readiness", None), dam_id)   # DA view (fail closed)
 
 
 @router.post("/drafts/{draft_id}/validate")

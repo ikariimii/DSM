@@ -120,7 +120,10 @@ def test_flag_apply_refused_when_version_n_lacks_a_field(c, field):
     st = c.tc.app.state.store
     n_chain = len(st.chain_rows("CRD"))
     r = c.post(f"{BASE}/{RULE}/cdse-flag", user=CDSE, json={"cdse_ack_required": True, "rationale": "CDSE decision"})
-    assert r.status_code == 409 and field in r.json()["detail"] and "no defaults" in r.json()["detail"]
+    if field == "dssmp_version_id":   # DA publisher code dssmp_missing, mirrored (re-version the rule first)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "dssmp_missing", r.text
+    else:
+        assert r.status_code == 409 and field in r.json()["detail"] and "no defaults" in r.json()["detail"]
     assert len(st.chain_rows("CRD")) == n_chain and st.ref_publications("CRD") == []
     # the proposal route is refused the same way at approval, and the proposal stays pending
     pid = c.post(f"{BASE}/{RULE}/cdse-flag/proposals", user=ADMIN,

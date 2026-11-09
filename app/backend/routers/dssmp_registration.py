@@ -172,7 +172,7 @@ def _view(st, an, rows: list[dict]) -> list[dict]:
         # where the column lives - SCHEMA_CONTRACT §7 item 19)
         if r["status"] == "pending":   # shown on the approval screen: the rules this version would supersede
             try:
-                aff = [x["threshold_id"] for x in rr.affected_rules(an, r["dam_id"], r["dssmp_version_id"])]
+                aff = [x["threshold_id"] for x in rr.preview_affected(an, r["dam_id"], r["dssmp_version_id"])[0]]
             except Exception:  # noqa: BLE001
                 aff = None
             r = {**r, "affected_rules": aff, "affected_count": None if aff is None else len(aff)}

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from test_onboarding import _fill, good_draft
 
 from backend import audit_chain as ac
+from backend import onboarding as ob
 from backend.main import create_app
 
 DAMADMIN = "damadmin.crd@demo.local"
@@ -136,10 +137,10 @@ def test_reject_writes_chain_and_no_outbox(k):
 
 
 def test_outbox_rejection_is_surfaced(k, monkeypatch):
-    monkeypatch.setattr(_an(k), "load_dssmp_outbox", lambda row: ("rejected_invalid", "dssmp_other_dam", "clash"))
+    monkeypatch.setattr(_an(k), "load_dssmp_outbox", lambda row: ("rejected", "dssmp_other_dam", "dssmp_other_dam: clash"))
     rid = propose(k).json()["registration_id"]
     o = decide(k, rid).json()["outbox"]
-    assert (o["status"], o["reason_code"], o["message"]) == ("rejected_invalid", "dssmp_other_dam", "clash")
+    assert (o["status"], o["reason_code"], o["message"]) == ("rejected", "dssmp_other_dam", "dssmp_other_dam: clash")
     reg = k.get(REGS.format(d="CRD"), user=ENG).json()["registrations"][0]
     assert reg["outbox"]["reason_code"] == "dssmp_other_dam" and reg["ref"] is None
 
@@ -238,7 +239,7 @@ def test_golive_blocked_by_ref_state(k, row, code):
 
 def test_golive_new_dam_end_to_end_and_not_loaded_fails_closed(k, monkeypatch):
     did = _new_draft(k)
-    assert _codes(k, did) == (422, {"dssmp_not_found", "cdse_authority_missing"})  # missing, no CDSE yet
+    assert _codes(k, did) == (422, {"dssmp_not_found", "go_live_readiness_missing"})  # missing, no CDSE yet
     _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE                                   # DA exposes the new dam's CDSE
     rid = propose(k, dam="NEW", user=ADMIN, vid="DSSMP-NEW-2026", version_no=1).json()["registration_id"]
     v = k.post(f"/api/onboarding/drafts/{did}/validate").json()
@@ -319,19 +320,57 @@ def test_direct_registration_refused_with_second_approver(demo_settings):
     assert propose(c).status_code == 200                                     # dam_admin proposal still works
 
 
-# ------------------------------------------------------------------ go-live readiness: CDSE authority row
+# ------------------------------------------------------------------ go-live readiness: ref.v_dam_go_live_readiness
 def test_golive_needs_the_new_dams_cdse_in_the_authority_view(k, monkeypatch):
     did = _new_draft(k)
     _ref(k)                                                                  # DSSMP loaded, approved
     status, codes = _codes(k, did)
-    assert status == 422 and codes == {"cdse_authority_missing"}
+    assert status == 422 and codes == {"go_live_readiness_missing"}          # no readiness row at all
     def boom(dam_id):
         raise RuntimeError("view unreadable")
     _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE
-    monkeypatch.setattr(_an(k), "cdse_principals", boom)                     # fail closed on a lookup error
-    assert _codes(k, did) == (422, {"cdse_authority_missing"})
+    monkeypatch.setattr(_an(k), "go_live_readiness", boom)                   # fail closed on a lookup error
+    assert _codes(k, did) == (422, {"go_live_readiness_unverifiable"})
     monkeypatch.undo()
     assert k.post(f"/api/onboarding/drafts/{did}/golive").status_code == 200
+
+
+def test_golive_gates_on_the_readiness_view_ready_flag_and_blocking_reason(k, monkeypatch):
+    """ready=false -> blocked with blocking_reason as the code; ready=true still needs the app's DSSMP check;
+    the view's has_current_dssmp=true does not override the app's own check."""
+    did = _new_draft(k)
+    _ref(k)
+    row = {"dam_id": "NEW", "ready": False, "has_current_dssmp": True, "blocking_reason": "no_cdse_in_reviewer_authority"}
+    monkeypatch.setattr(_an(k), "go_live_readiness", lambda dam: dict(row))
+    status, codes = _codes(k, did)
+    assert status == 422 and codes == {"no_cdse_in_reviewer_authority"}
+    row["blocking_reason"] = None                                            # false with no reason: still blocked
+    assert _codes(k, did) == (422, {"go_live_not_ready"})
+    row.update(ready=None)                                                   # NULL is not TRUE
+    assert _codes(k, did) == (422, {"go_live_not_ready"})
+    row.update(ready=True)
+    _an(k).d["dssmp_versions"] = [v for v in _an(k).d["dssmp_versions"] if v["dam_id"] != "NEW"]
+    status, codes = _codes(k, did)                                           # view ready, app DSSMP check fails
+    assert status == 422 and "dssmp_not_found" in codes and not codes & {"no_cdse_in_reviewer_authority"}
+    monkeypatch.setattr(_an(k), "go_live_readiness", None, raising=False)   # no lookup at all: fail closed
+    assert "go_live_readiness_unverifiable" in _codes(k, did)[1]
+
+
+def test_go_live_no_longer_uses_the_direct_authority_check(k, monkeypatch):
+    """The deprecated cdse_authority_issues shim is not on the go-live path (readiness view only)."""
+    did = _new_draft(k)
+    _ref(k)
+    _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE
+    monkeypatch.setattr(ob, "cdse_authority_issues", lambda *a: (_ for _ in ()).throw(AssertionError("called")))
+    assert k.post(f"/api/onboarding/drafts/{did}/golive").status_code == 200
+
+
+def test_threshold_without_dssmp_is_coded_dssmp_missing():
+    """DA publisher code dssmp_missing is mirrored as a coded go-live issue (not just a message)."""
+    d = good_draft()
+    d["thresholds"][0]["dssmp_version_id"] = None
+    iss = [i for i in ob.validate(d, set()) if i.get("code") == "dssmp_missing"]
+    assert len(iss) == 1 and iss[0]["message"].startswith("dssmp_missing: ") and iss[0]["step"] == "thresholds"
 
 
 # ------------------------------------------------------------------ cross-check with the DA engine (86993d0)

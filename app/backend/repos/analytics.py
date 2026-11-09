@@ -41,6 +41,9 @@ class Analytics(Protocol):
     def cdse_principals(self, dam_id: str) -> list[str]: ...
     def dssmp_versions(self, ids: list[str]) -> list[dict]: ...
     def dssmp_versions_for_dam(self, dam_id: str) -> list[dict]: ...
+    def go_live_readiness(self, dam_id: str) -> dict | None: ...
+    def designated_cdse(self, dam_id: str) -> str | None: ...
+    def dssmp_affected_rules(self, dam_id: str, to: str) -> list[dict]: ...
 
 
 # ============================================================== demo
@@ -58,6 +61,22 @@ class MockAnalytics:
         out += [m["principal"] for m in self.d.get("project_membership", [])
                 if m.get("dam_id") == dam_id and (m.get("role") or "").upper() == "CDSE" and not m.get("revoked_ts")]
         return [p for p in out if p]
+
+    def designated_cdse(self, dam_id):
+        """Demo ref.dam.cdse_id: the dam's ONE designated CDSE (not the membership grants)."""
+        return self.d.get("dam_cdse", {}).get(dam_id) or None
+
+    def go_live_readiness(self, dam_id):
+        """Demo ref.v_dam_go_live_readiness (DA 10b): a row for every dam in ref.dam plus every dam with an assignment
+        (demo: sites + dam_cdse); ready = a CDSE in the reviewer authority; blocking_reason otherwise."""
+        known = {s["dam_id"] for s in self.d["sites"]} | set(self.d.get("dam_cdse", {}))
+        if dam_id not in known:
+            return None
+        ready = bool(self.cdse_principals(dam_id))
+        cur = [v for v in self.d.get("dssmp_versions", []) if v["dam_id"] == dam_id and v.get("status") == "approved"
+               and v.get("effective_to") is None]
+        return {"dam_id": dam_id, "ready": ready, "has_current_dssmp": bool(cur),
+                "blocking_reason": None if ready else "no_cdse_in_reviewer_authority"}
 
     def structures(self, dam_id):
         return [dict(s) for s in self.d["structures"] if s["dam_id"] == dam_id]
@@ -206,7 +225,7 @@ class MockAnalytics:
         clash = next((v for v in vs if v["dssmp_version_id"] == row["dssmp_version_id"]), None)
         if clash is not None:
             code = "dssmp_other_dam" if clash["dam_id"] != row["dam_id"] else "dssmp_duplicate"
-            return "rejected_invalid", code, f"dssmp_version_id {row['dssmp_version_id']} already exists " \
+            return "rejected", code, f"dssmp_version_id {row['dssmp_version_id']} already exists " \
                                              f"(dam {clash['dam_id']})"
         for v in vs:
             if v["dam_id"] == row["dam_id"] and v["status"] == "approved" and v.get("effective_to") is None:
@@ -222,9 +241,9 @@ class MockAnalytics:
     def load_cdse_outbox(self, row: dict) -> tuple[str, str | None, str | None]:
         cur = self.d.setdefault("dam_cdse", {}).get(row["dam_id"])
         if row["kind"] == "assign" and cur:
-            return "rejected_invalid", "cdse_exists", f"dam {row['dam_id']} already has CDSE {cur}"
+            return "rejected", "cdse_exists", f"cdse_exists: dam {row['dam_id']} already has CDSE {cur}"
         if row["kind"] == "change" and (cur or "").lower() != (row.get("previous_cdse_id") or "").lower():
-            return "rejected_invalid", "cdse_stale", f"current CDSE is {cur}, not {row.get('previous_cdse_id')}"
+            return "rejected", "cdse_stale", f"cdse_stale: current CDSE is {cur}, not {row.get('previous_cdse_id')}"
         self.d["dam_cdse"][row["dam_id"]] = row["new_cdse_id"]
         return "loaded", None, None
 
@@ -438,6 +457,34 @@ class SqlAnalytics:
     def dssmp_versions_for_dam(self, dam_id):
         return self.q(f"SELECT {self.DSSMP_COLS} FROM {self.t('ref', 'dssmp_version')} WHERE dam_id = :dam_id "
                       "ORDER BY version_no DESC", {"dam_id": dam_id})
+
+    def go_live_readiness(self, dam_id):
+        """The DA's ref.v_dam_go_live_readiness (sql/ddl/10b): ONE row per dam (dam_id, ready, has_current_dssmp,
+        blocking_reason) or None. Errors propagate: the go-live check fails closed."""
+        rows = self.q(f"SELECT dam_id, ready, has_current_dssmp, blocking_reason FROM "
+                      f"{self.t('ref', 'v_dam_go_live_readiness')} WHERE dam_id = :dam_id", {"dam_id": dam_id})
+        return rows[0] if rows else None
+
+    def designated_cdse(self, dam_id):
+        """The dam's ONE designated CDSE (ref.dam_cdse_assignment in force, else the legacy ref.dam.cdse_id), read
+        through ref.v_dam_reviewer_authority's cdse_id column (the app never reads ref.dam). None = no CDSE; more than
+        one value is ambiguous and raises (callers fail closed)."""
+        layer, name = self.REVIEWER_AUTHORITY_VIEW
+        rows = self.q(f"SELECT DISTINCT cdse_id FROM {self.t(layer, name)} WHERE dam_id = :dam_id "
+                      "AND authority_source IN ('DAM_CDSE_ASSIGNMENT', 'DAM_CDSE_ID') AND cdse_id IS NOT NULL "
+                      "AND (granted_ts IS NULL OR granted_ts <= current_timestamp()) "
+                      "AND (revoked_ts IS NULL OR revoked_ts > current_timestamp())", {"dam_id": dam_id})
+        vals = sorted({str(r["cdse_id"]).strip().lower() for r in rows if r.get("cdse_id")})
+        if len(vals) > 1:
+            raise RuntimeError(f"{dam_id} has {len(vals)} designated CDSE values in force: {vals}")
+        return vals[0] if vals else None
+
+    def dssmp_affected_rules(self, dam_id, to):
+        """The DA's ref.dssmp_affected_rules(dam, to) (sql/ddl/10b): the current rules a re-version to `to` must
+        cover. Errors propagate (callers fall back to the app's own computation)."""
+        return self.q(f"SELECT threshold_id, threshold_version, dssmp_version_id, cdse_ack_required FROM "
+                      f"{self.t('ref', 'dssmp_affected_rules')}(:dam_id, :to) ORDER BY threshold_id",
+                      {"dam_id": dam_id, "to": to})
 
     def pfms(self, dam_id):
         return [ct.pfm(r) for r in self.q(

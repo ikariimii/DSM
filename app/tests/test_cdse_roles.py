@@ -262,3 +262,38 @@ def test_live_cdse_lookup_other_errors_fail_closed_in_signoffs(monkeypatch):
     class C:
         user_id, email = f"uid-{CDSE}", CDSE
     assert sg.is_cdse(C, "CRD", a) is False and sg.review_level.__name__ == "review_level"
+
+
+def test_live_designated_cdse_reads_one_value_from_the_authority_view(monkeypatch):
+    fake = _FakeSql(rows=[{"cdse_id": CDSE}, {"cdse_id": CDSE.upper()}])
+    a = _sql_analytics(fake, monkeypatch)
+    assert a.designated_cdse("CRD") == CDSE
+    (stmt, params), = fake.sql
+    low = stmt.lower()
+    assert "v_dam_reviewer_authority" in low and params == {"dam_id": "CRD"} and "membership_cdse" not in low
+    assert "'dam_cdse_assignment', 'dam_cdse_id'" in low and "ref`.`dam`" not in low
+    assert _sql_analytics(_FakeSql(rows=[]), monkeypatch).designated_cdse("CRD") is None
+    with pytest.raises(RuntimeError, match="designated CDSE"):              # ambiguous -> callers fail closed
+        _sql_analytics(_FakeSql(rows=[{"cdse_id": "a@x"}, {"cdse_id": "b@x"}]), monkeypatch).designated_cdse("CRD")
+
+
+def test_live_go_live_readiness_reads_the_da_view(monkeypatch):
+    row = {"dam_id": "CRD", "ready": False, "has_current_dssmp": True,
+           "blocking_reason": "no_cdse_in_reviewer_authority"}
+    fake = _FakeSql(rows=[row])
+    a = _sql_analytics(fake, monkeypatch)
+    assert a.go_live_readiness("CRD") == row
+    (stmt, params), = fake.sql
+    assert "v_dam_go_live_readiness" in stmt and "blocking_reason" in stmt and params == {"dam_id": "CRD"}
+    assert _sql_analytics(_FakeSql(rows=[]), monkeypatch).go_live_readiness("CRD") is None
+    with pytest.raises(RuntimeError):
+        _sql_analytics(_FakeSql(error=RuntimeError("down")), monkeypatch).go_live_readiness("CRD")
+
+
+def test_live_dssmp_affected_rules_calls_the_da_function(monkeypatch):
+    fake = _FakeSql(rows=[{"threshold_id": "T1", "threshold_version": 1, "dssmp_version_id": None,
+                           "cdse_ack_required": False}])
+    a = _sql_analytics(fake, monkeypatch)
+    assert a.dssmp_affected_rules("CRD", "D2")[0]["threshold_id"] == "T1"
+    (stmt, params), = fake.sql
+    assert "dssmp_affected_rules`(:dam_id, :to)" in stmt and params == {"dam_id": "CRD", "to": "D2"}

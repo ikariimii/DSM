@@ -664,11 +664,14 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Final table name: `dam_app.dssmp_registration_outbox`** (Lakebase schema `dam_app`; app tables are
       unprefixed). Columns exactly as agreed: `outbox_id` (TEXT, `DSO-<uuid>`), `dam_id`, `dssmp_version_id`,
       `version_no` INTEGER, `effective_from` (TEXT ISO UTC `YYYY-MM-DDTHH:MM:SSZ`), `change_reason`, `source_ref`,
-      `document_uri`, `document_sha256`, `proposed_by`, `approved_by` (emails), `approved_at` (ISO UTC),
+      `document_uri`, `document_sha256` **NOT NULL**, `proposed_by`, `approved_by` (emails), `approved_at` (ISO UTC),
       `approval_record_hash`, `status`, `reason_code`, `message`, `processed_at`.
-    - **Status CHECK:** `status IN ('pending','loaded','rejected','rejected_invalid')`. The contract says both
-      `rejected` (outbox) and `rejected_invalid` (publisher rows). Both are accepted and shown as rejections; DA:
-      confirm one spelling.
+    - **Status (aligned, v1.7 steering): `pending | loaded | rejected`.** There is no `rejected_invalid` in this
+      outbox (that spelling belongs to `ref_change_publication`: `pending|applied|rejected_stale|rejected_invalid`).
+      The DA load job writes `rejected` + `reason_code` (the first code) + `message` (`<code>: <detail>`), and the app's
+      demo stand-in does the same. The app's own CHECK still lists `rejected_invalid` as a tolerated legacy value ONLY
+      because the DA's `tests/test_dssmp_outbox_contract.py` pins that CHECK text. **DA: drop it from the CHECK
+      together with that assertion; the app will follow in the same change.** The UI still shows it as a rejection.
     - **Guards (app-side, while the app owns the table):** triggers refuse DELETE/TRUNCATE and any UPDATE that
       changes a column other than `status, reason_code, message, processed_at`. The app inserts only and never
       updates (demo mode excepted: a stand-in loader sets the bookkeeping columns).
@@ -680,7 +683,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       If the DA moves the outbox to `dam_lakebase_owner`, the app needs INSERT+SELECT only. The app then skips its
       guard DDL (`_pg_not_owned`) and the DA owns the guards.
     - **Load job (DA):** inserts `ref.dssmp_version` (status approved, `loaded_from_outbox_id`, v1_7_003 columns),
-      closes the dam's previous approved version, and sets outbox `loaded` or `rejected_invalid` + `reason_code` +
+      closes the dam's previous approved version, and sets outbox `loaded` or `rejected` + `reason_code` +
       `message`. The UI shows the rejection reason_code/message on the wizard step and the CDSE panel.
     - **Go-live:** the version must be LOADED in `ref.dssmp_version` as approved and not superseded.
       **Approved-but-not-loaded fails closed** (`dssmp_not_found`, with the message naming the pending/rejected
@@ -752,10 +755,24 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       row. It mirrors the cdse_ack_required direct apply. With `CDSE_FLAG_REQUIRE_SECOND_APPROVER` on it returns
       403 `second_approver_required` (PROVISIONAL), same as the flag edits. dam_admin / admin still only propose.
       The CDSE may also upload the document.
-    - **Go-live readiness: CDSE authority (fail closed).** Go-live (and validate) returns 422 `cdse_authority_missing`
-      (step `users`) when the dam has no CDSE row in `ref.v_dam_reviewer_authority`: empty result, missing lookup or
-      lookup error. It is implemented app-side against the view in ONE function, `onboarding.cdse_authority_issues`.
-      **DA: switch it to your ref go-live readiness object once it lands** (send its name and shape).
+    - **Go-live readiness: `ref.v_dam_go_live_readiness` (DA sql/ddl/10b; fail closed).** Go-live (and validate)
+      requires BOTH:
+      1. the dam's ONE row in the view with `ready = true` (`onboarding.go_live_readiness_issues`, step `users`):
+         - `ready` false or NULL: 422 with `blocking_reason` as the code (e.g. `no_cdse_in_reviewer_authority`;
+           `go_live_not_ready` if the view gives no reason);
+         - no row (dam neither in `ref.dam` nor in `ref.dam_cdse_assignment`): `go_live_readiness_missing`;
+         - view unreadable or no lookup: `go_live_readiness_unverifiable`;
+      2. the app's own approved-DSSMP check (`dssmp_issues`, unchanged): every rule's version and the dam itself must
+         have a LOADED, approved, in-effect `ref.dssmp_version`. The view's `has_current_dssmp` is informational
+         only; it never overrides the app's check.
+      This REPLACES the direct `ref.v_dam_reviewer_authority` check (`cdse_authority_missing` is no longer a go-live
+      code). Reads: `SELECT dam_id, ready, has_current_dssmp, blocking_reason FROM ref.v_dam_go_live_readiness
+      WHERE dam_id = :dam_id` (analytics `go_live_readiness`, OBO).
+    - **DSSMP codes mirrored from the DA (`dam_safety.dssmp_check.CODES`):** `dssmp_missing` (a rule with no
+      `dssmp_version_id`: a coded go-live issue, and the flag-apply 409 `{code: dssmp_missing}`), `dssmp_not_found`,
+      `dssmp_other_dam`, `dssmp_draft`, `dssmp_superseded`, `dssmp_not_yet_effective`, `dssmp_status_unknown` (+ the
+      app's `dssmp_unverifiable`). The UI explains every code (`frontend/src/codes.ts`, parity test
+      `app/tests/test_ui_codes.py` against the DA's declared tuples).
     - **Flag-apply 409 `dssmp_superseded`:** the body is `{code, superseded_dssmp_version_id, threshold_id,
       affected_rules: [threshold_id of every current rule of the dam on that version], message}` and states that
       the rules must be re-versioned. There is no grace path. Other codes keep the plain 409 text.
@@ -766,7 +783,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
 20. **Dam CDSE: first-CDSE bootstrap and CDSE changes (v1.7, Genie).** The app NEVER writes `ref.dam`.
     - **Bootstrap:** `POST /api/dams/{dam}/cdse/assign` `{cdse_id, reason_code, rationale}`.
       - Who and when: the PLATFORM ADMIN only, and only while the dam has no CDSE (`ref.v_dam_reviewer_authority`
-        empty) and is not live (no `ref.dam` row in the app's dam list).
+        empty AND no designated CDSE, re-read under the dam lock) and is not live (no `ref.dam` row in the app's dam
+        list).
       - Refusals: 403 for any other role; 409 `dam_live` / `cdse_exists` / `cdse_assign_pending` (an assignment
         waiting for the load job); 409 `cdse_unverifiable` / `dam_state_unverifiable` when the lookups fail (fail
         closed); 422 `reason_code_invalid`, missing rationale, or a `cdse_id` that is not an e-mail principal.
@@ -776,7 +794,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       PROPOSAL (`dam_cdse_change_propose`; 409 `cdse_authority_missing` when the dam has no CDSE yet, so use assign;
       `cdse_unchanged`; `cdse_change_pending`). `POST .../cdse/changes/{change_id}/approve|reject` `{rationale}` is
       for the dam's CURRENT CDSE only (`dam_cdse_change_approve` / `_reject`, subject `dam`). It returns 409
-      `cdse_stale` if the current CDSE no longer equals the proposal's `previous_cdse_id`. Self-approval follows the
+      `cdse_stale` if the designated CDSE no longer equals the proposal's `previous_cdse_id`. Self-approval follows the
       PROVISIONAL `CDSE_FLAG_REQUIRE_SECOND_APPROVER` (403 `self_approval_forbidden`). Approve inserts ONE outbox row
       in the same transaction. `GET /api/dams/{dam}/cdse` returns the state; `GET /api/cdse-changes/pending` is the
       caller's queue.
@@ -786,7 +804,7 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Outbox `dam_app.dam_cdse_outbox`** (same pattern and guards as item 19): `outbox_id` (`DCO-<uuid>`),
       `dam_id`, `kind` (`assign`|`change`), `previous_cdse_id` (NULL for assign), `new_cdse_id`,
       `change_reason_code`, `proposed_by`, `approved_by`, `approved_at` (= the deciding record's `signed_ts`),
-      `approval_record_hash`, `status` (`pending`|`loaded`|`rejected`|`rejected_invalid`), `reason_code`, `message`,
+      `approval_record_hash`, `status` (`pending`|`loaded`|`rejected`), `reason_code`, `message`,
       `processed_at`. The app inserts only. The guard triggers allow UPDATE of `status, reason_code, message,
       processed_at` only, and refuse DELETE/TRUNCATE.
     - **DA to provision:**
@@ -796,19 +814,46 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
         assign, refuse if `ref.dam.cdse_id` is already set (`cdse_exists`); for change, refuse if it is not
         `previous_cdse_id` (`cdse_stale`). Then set `ref.dam.cdse_id` and expose it in
         `ref.v_dam_reviewer_authority`.
-    - Go-live still requires the CDSE row in the view (`cdse_authority_missing`, item 19). Demo mode has a stand-in
-      loader with the same refusals.
+    - **`previous_cdse_id` is ONE value (v1.7 steering): the dam's current DESIGNATED CDSE**, i.e. `ref.dam.cdse_id`
+      (or the in-force `ref.dam_cdse_assignment`), never a list of reviewer-authority principals (the view also
+      holds `MEMBERSHIP_CDSE` grants, which are not "the" CDSE). The app reads it through the view's `cdse_id`
+      column (analytics `designated_cdse`: `SELECT DISTINCT cdse_id ... WHERE authority_source IN
+      ('DAM_CDSE_ASSIGNMENT','DAM_CDSE_ID')` and in force; the app never reads `ref.dam`; more than one value is
+      ambiguous and fails closed with 409 `cdse_unverifiable`).
+      - **Read under the lock:** propose reads it to build the row, then re-reads it inside `check(q)` AFTER the
+        per-dam advisory lock (item 22); any difference is 409 `cdse_stale` with nothing written. So the stored
+        value is exactly the value as read under the lock. Approve re-reads it the same way and compares it with the
+        stored `previous_cdse_id` before inserting the outbox row.
+      - The same single value is stored in `dam_cdse_change.previous_cdse_id`, `dam_cdse_outbox.previous_cdse_id`,
+        the propose record's `original_value.cdse_id` and `corrected_value.previous_cdse_id`. The DA's `cdse_stale`
+        comparison (`_set(previous_cdse_id)`) and `approval_record_mismatch` (set compare) accept a single value
+        unchanged.
+    - **Load refusal codes shown in the UI** (`dam_cdse_outbox.reason_code`, `dam_safety.cdse_load.CODES`):
+      `missing_required_column`, `invalid_value`, `approval_record_missing`, `approval_record_wrong_action`,
+      `approval_record_mismatch`, `cdse_exists`, `cdse_stale`, `approval_not_authorized`.
+    - Go-live readiness is item 19's `ref.v_dam_go_live_readiness` gate (`no_cdse_in_reviewer_authority` until the
+      CDSE is loaded). Demo mode has a stand-in loader with the same refusals.
 21. **Bulk re-version of rules after a DSSMP revision (v1.7, Genie).** The 409 `dssmp_superseded` stays (no grace
     path).
-    - **Affected rules** = the dam's current `ref.threshold` rows whose `dssmp_version_id` is not the new version.
-      The DSSMP approval screen shows their count and ids for each pending registration (`affected_count`,
-      `affected_rules`); `GET /api/dams/{dam}/rule-reversions?to=<vid>` gives the preview and the proposals.
+    - **Affected rules** = the dam's current `ref.threshold` rows whose `dssmp_version_id` is missing or is not the
+      new version. The DSSMP approval screen shows their count and ids for each pending registration
+      (`affected_count`, `affected_rules`); `GET /api/dams/{dam}/rule-reversions?to=<vid>` gives the preview and the
+      proposals. For these DISPLAY counts the app calls the DA's `ref.dssmp_affected_rules(:dam_id, :to)` and falls
+      back to its own computation if the function is missing or errors (`affected_source`: `ref.dssmp_affected_rules`
+      | `app`). The proposal and its approval always use the app's computation from the current rules, because they
+      build the N+1 payloads.
+    - **Publisher outcomes per proposal:** the preview's `proposals[].publications` lists `{pub_id, threshold_id,
+      status, code, message}` for each queued publication. `code` is parsed from the DA's `<code>: <detail>`
+      message. The UI explains `reversion_approval_missing`, `reversion_approval_wrong_action`,
+      `reversion_approval_mismatch`, `reversion_not_authorized`, `reversion_fields_changed`, `payload_invalid`
+      (+ `unknown_kind`, `missing_not_null_column`, `unknown_columns`).
     - **Proposal:** `POST /api/dams/{dam}/rule-reversions` `{to_dssmp_version_id, rationale}`. Who: dam_admin,
       platform admin, or the dam's CDSE. It is ONE proposal covering EVERY affected rule (`rule_reversion_propose`).
       DSSMP approve / direct registration also accept `propose_reversion: true`. That proposal is created after the
       approval in its own transaction; if the version is not loaded yet, `reversion_error` is returned and the
       proposal is made as a follow-up. Refusals: target not loaded, approved and in effect (409 with the
-      `dssmp_findings` code), `nothing_to_reversion`, `reversion_pending`, and rules lacking NOT NULL columns.
+      `dssmp_findings` code), `nothing_to_reversion`, `reversion_pending`, and rules lacking NOT NULL columns
+      other than `dssmp_version_id` (a `dssmp_missing` rule is exactly what a re-version fixes).
     - **Decision:** `POST .../{proposal_id}/approve|reject` `{rationale}`, the dam's CDSE only.
       - Self-approval follows the provisional setting.
       - Approve re-checks the target and every rule. Any rule changed or not covered gives 409 `reversion_stale`
@@ -829,10 +874,17 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     and writes nothing.
     - **Lock:** every chained write (`routers/signoffs.append`) runs
       `pg_advisory_xact_lock(DAM_LOCK_NS = 4702047, hashtext('dam_app.dam:' || dam_id))` FIRST in its transaction.
-      This two-key form is a separate advisory keyspace from the single-bigint init lock `INIT_LOCK_KEY 4702045`, and class 4702047 is distinct from the DA chain-lock class 4702046 (`tools/patches/v17_chain_head_log_state.patch`). **DA: when you re-base that patch onto `append_chained`, take the chain lock AFTER `lock_dam` + `check(q)`** (order dam → chain).
+      This two-key form is a separate advisory keyspace from the single-bigint init lock `INIT_LOCK_KEY 4702045`,
+      and class 4702047 is distinct from the DA chain-lock class `CHAIN_LOCK_CLASS 4702046`.
       The route's state checks then re-run on the transaction's own connection (`check(q)`), and only after that is
-      the chain head locked (`FOR UPDATE`). Lock order is always dam → chain head, so there is no deadlock. sqlite
-      (demo) is serialized by `BEGIN IMMEDIATE`; the checks run inside it too.
+      the chain locked. **The DA's `v17_chain_head_log_state.patch` (residual (a), append-only
+      `review_chain_head_log`) is applied in the app with this order:** `lock_dam` → `check(q)` →
+      `pg_advisory_xact_lock(4702046, hashtext(chain_id))` → read the head log top (seed from the legacy head or
+      genesis) → INSERT `review_signoff` → INSERT the head-log row → upsert the legacy head → `also` rows. Lock order
+      is always dam → chain, so there is no deadlock (a chained write without a dam key takes only the chain lock).
+      sqlite (demo) is serialized by `BEGIN IMMEDIATE`; the checks run inside it too. Because the DA's
+      `tests/test_chain_head_log.py` applies that patch forward, **DA: apply
+      `tools/patches/v17_chain_head_log_tests_applied.patch`** (it accepts the already-applied state).
     - **Re-checked inside the transaction:**
       - first-CDSE assign: open assignment, or a pending CDSE outbox row (409 `cdse_assign_pending`);
       - CDSE change propose: one pending change per dam (`cdse_change_pending`);
@@ -848,9 +900,9 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       - Created by the app on the tables it owns: `dam_cdse_change_one_pending (dam_id) WHERE status='pending'`,
         `dssmp_registration_one_open (dssmp_version_id) WHERE status IN ('pending','approved')` and
         `rule_reversion_one_pending (dam_id) WHERE status='pending'`.
-      - On tables owned by `dam_lakebase_owner`, the app skips them. **DA: apply
-        `tools/patches/qa056_unique_guards.patch`.** It adds lakebase/001 block `v1_7_007` and migration `v1_7_007`
-        (+ down) with three indexes:
+      - On tables owned by `dam_lakebase_owner`, the app skips them. `tools/patches/qa056_unique_guards.patch` was
+        **applied by the DA in 424c6e3** (lakebase/001 block `v1_7_007` + migration `v1_7_007` + down, which also
+        mirrors the app-owned `dam_cdse_change_one_pending` / `rule_reversion_one_pending`) with three owner-table indexes:
         - `dam_cdse_outbox_one_pending (dam_id) WHERE status='pending'`;
         - `dssmp_outbox_one_pending (dssmp_version_id) WHERE status='pending'`;
         - `ref_change_publication_one_version (dam_id, payload->>threshold_id, payload->insert->>threshold_version)

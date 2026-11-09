@@ -51,7 +51,8 @@ def _chain(st, k=4, dam="CRD"):
 
 def _unguard(st):
     """Simulate a privileged actor bypassing the app (drops the append-only triggers on the sqlite file)."""
-    for t in ("t_noupdate_review_signoff", "t_nodelete_review_signoff"):
+    for t in ("t_noupdate_review_signoff", "t_nodelete_review_signoff", "t_noupdate_review_chain_head_log",
+              "t_nodelete_review_chain_head_log"):
         st.execute(f"DROP TRIGGER IF EXISTS {t}")
 
 
@@ -126,7 +127,9 @@ def test_delete_middle_is_a_gap_and_delete_tail_is_a_head_mismatch():
     st2.execute("DELETE FROM review_signoff WHERE chain_seq = 4")
     v = _verify(st2)
     assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 4, "head_mismatch")
-    st2.execute("DELETE FROM review_chain_head")
+    st2.execute("DELETE FROM review_chain_head")                     # v1.7: the legacy head no longer decides
+    assert _verify(st2)["reason"] == "head_mismatch"
+    st2.execute("DELETE FROM review_chain_head_log")                 # only a privileged actor (guards dropped)
     assert _verify(st2)["reason"] == "head_missing"
 
 
@@ -134,6 +137,11 @@ def test_head_altered_or_first_record_not_at_genesis():
     st = _store()
     rows = _chain(st, 2)
     st.execute("UPDATE review_chain_head SET head_hash = %s", ("e" * 64,))
+    assert _verify(st)["ok"]                                         # v1.7: legacy head is not the anchor any more
+    with pytest.raises(Exception):                                   # the head log is append-only
+        st.execute("UPDATE review_chain_head_log SET head_hash = %s", ("e" * 64,))
+    _unguard(st)
+    st.execute("UPDATE review_chain_head_log SET head_hash = %s WHERE chain_seq = 2", ("e" * 64,))
     assert _verify(st)["reason"] == "head_mismatch"
     bad = {**rows[0], "prev_hash": "1" * 64}
     bad["record_hash"] = ac.record_hash(bad)
@@ -255,8 +263,11 @@ def test_postgres_append_serializes_on_head_row_in_one_transaction():
     assert pool.borrowed == n + 1 and pool.committed >= 1          # one connection = one transaction
     assert row["chain_seq"] == 5 and row["prev_hash"] == "f" * 64
     kinds = [s.split()[0] + (" FOR UPDATE" if "FOR UPDATE" in s else "") for s in pool.log]
-    assert kinds == ["INSERT", "SELECT FOR UPDATE", "INSERT", "UPDATE", "UPDATE"]
-    assert "ON CONFLICT (chain_id) DO NOTHING" in pool.log[0] and '"dam_app".review_chain_head' in pool.log[1]
+    # v1.7: per-chain advisory lock, current head from the append-only log, INSERT record, INSERT new head (log),
+    # keep the legacy head row in step, then also(q). No UPDATE of any head and no FOR UPDATE (needs UPDATE privilege).
+    assert kinds == ["SELECT", "SELECT", "INSERT", "INSERT", "INSERT", "UPDATE"]
+    assert "pg_advisory_xact_lock" in pool.log[0] and '"dam_app".review_chain_head_log' in pool.log[1]
+    assert '"dam_app".review_chain_head_log' in pool.log[3] and "ON CONFLICT (chain_id) DO UPDATE" in pool.log[4]
     rb = pool.rolled_back
     with pytest.raises(ValueError):
         st.append_chained("CRD", ac.GENESIS, ac.finalizer(_base()), lambda q: (_ for _ in ()).throw(ValueError("x")))

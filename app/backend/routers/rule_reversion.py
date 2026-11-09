@@ -52,6 +52,23 @@ def affected_rules(an, dam_id: str, to: str) -> list[dict]:
                   key=lambda r: r["threshold_id"])
 
 
+def preview_affected(an, dam_id: str, to: str) -> tuple[list[dict], str]:
+    """For DISPLAY (count / list on the approval screen and the preview): the DA's ref.dssmp_affected_rules(dam, to)
+    when the source has it and it answers, else the app's own affected_rules (fallback). The proposal and its
+    approval always use affected_rules (current ref.threshold rows: they build the N+1 payloads)."""
+    fn = getattr(an, "dssmp_affected_rules", None)
+    if fn is not None:
+        try:
+            rows = fn(dam_id, to)
+            return sorted(({"threshold_id": x["threshold_id"], "threshold_version": x.get("threshold_version"),
+                            "dssmp_version_id": x.get("dssmp_version_id"),
+                            "cdse_ack_required": bool(x.get("cdse_ack_required"))} for x in rows or []),
+                          key=lambda x: x["threshold_id"]), "ref.dssmp_affected_rules"
+        except Exception:  # noqa: BLE001 - function missing / unreadable: fall back to the app's computation
+            pass
+    return affected_rules(an, dam_id, to), "app"
+
+
 def _may_propose(c: Ctx, dam_id: str, an) -> bool:
     return c.is_admin or (c.roles or {}).get(dam_id) == "dam_admin" or sg.is_cdse(c, dam_id, an)
 
@@ -74,8 +91,24 @@ def _record(c, request, an, dam_id, pid, action, decision, rationale, original, 
     return base
 
 
-def _out(r: dict) -> dict:
-    return {**r, "rules": json.loads(r["rules"]), "pub_ids": json.loads(r["pub_ids"]) if r.get("pub_ids") else None}
+def _out(r: dict, pubs: dict | None = None) -> dict:
+    out = {**r, "rules": json.loads(r["rules"]), "pub_ids": json.loads(r["pub_ids"]) if r.get("pub_ids") else None}
+    if pubs is not None:
+        out["publications"] = [pubs[p] for p in out["pub_ids"] or [] if p in pubs]
+    return out
+
+
+def pub_code(message: str | None) -> str | None:
+    """The DA publisher writes ref_change_publication.message as '<code>: <detail>' (reversion_approval_missing,
+    reversion_fields_changed, payload_invalid, ...): the code, or None."""
+    head = str(message or "").split(":", 1)[0].strip()
+    return head if head and head.replace("_", "").isalnum() and head.islower() else None
+
+
+def _pub_outcomes(st, dam_id: str) -> dict:
+    return {p["pub_id"]: {"pub_id": p["pub_id"], "status": p.get("status"), "code": pub_code(p.get("message")),
+                          "message": p.get("message"), "threshold_id": ((p.get("payload") or {}).get("insert") or {}).get("threshold_id")}
+            for p in st.ref_publications(dam_id)}
 
 
 @router.get("")
@@ -83,10 +116,11 @@ def preview(dam_id: str, request: Request, to: str | None = None, c: Ctx = Depen
             st=Depends(store)):
     if not (c.can(dam_id, "viewer") or sg.is_cdse(c, dam_id, an)):
         raise HTTPException(403, f"No access to dam {dam_id}")
-    rules = affected_rules(an, dam_id, to.strip()) if to else None
-    return {"dam_id": dam_id, "to_dssmp_version_id": to, "affected_rules": rules,
+    rules, source = preview_affected(an, dam_id, to.strip()) if to else (None, None)
+    pubs = _pub_outcomes(st, dam_id)
+    return {"dam_id": dam_id, "to_dssmp_version_id": to, "affected_rules": rules, "affected_source": source,
             "affected_count": None if rules is None else len(rules),
-            "proposals": [_out(r) for r in st.rows("rule_reversion_proposal", "proposed_at DESC", dam_id=dam_id)],
+            "proposals": [_out(r, pubs) for r in st.rows("rule_reversion_proposal", "proposed_at DESC", dam_id=dam_id)],
             "can_propose": _may_propose(c, dam_id, an), "can_decide": sg.is_cdse(c, dam_id, an),
             "approval_policy": approval_policy(request.app.state.settings)}
 
@@ -106,7 +140,8 @@ def create(c: Ctx, request: Request, an, st, dam_id: str, to: str, rationale: st
                                   "message": f"every current rule of {dam_id} is already set under {to}"})
     full = {t["threshold_id"]: t for t in an.thresholds(dam_id)}
     lacking = [r["threshold_id"] for r in rules
-               if any(full[r["threshold_id"]].get(k) in (None, "") for k in PUBLISH_REQUIRED)]
+               if any(full[r["threshold_id"]].get(k) in (None, "") for k in PUBLISH_REQUIRED
+                      if k != "dssmp_version_id")]   # dssmp_missing rules are exactly what a re-version fixes
     if lacking:
         raise HTTPException(409, f"rules {', '.join(lacking)} lack NOT NULL ref.threshold columns; the DA must "
                                  "backfill them before they can be re-versioned (no defaults are invented)")

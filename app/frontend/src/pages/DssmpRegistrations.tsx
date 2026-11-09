@@ -6,9 +6,10 @@ import { api } from "../api";
 import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
 import { CdseChangeQueue } from "./CdsePanel";
+import { codeOf, explain } from "../codes";
 
 const REG_BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad" };
-// contract spellings (loaded / rejected) and the DA load job's (applied / rejected_stale / rejected_invalid)
+// contract statuses pending | loaded | rejected (§7 19); applied / rejected_stale / rejected_invalid tolerated as legacy
 const OUTBOX_BADGE: Record<string, string> = { pending: "warn", loaded: "ok", applied: "ok", rejected: "bad", rejected_invalid: "bad", rejected_stale: "bad" };
 
 function ProvisionalNote({ policy }: { policy: any }) {
@@ -25,7 +26,7 @@ function Status({ r }: { r: any }) {
       {r.ref && <span className={`badge ${r.ref.status === "approved" && !r.ref.effective_to ? "ok" : "bad"}`}>ref {r.ref.status}{r.ref.effective_to ? ` until ${utc(r.ref.effective_to)}` : ""}</span>}
       {(o?.volume_uri || r.ref?.volume_uri) && <div className="muted">volume: {o?.volume_uri || r.ref?.volume_uri}</div>}
       {o && o.reason_code === "dssmp_document_hash_mismatch" && <div className="error">Load job rejected it: <b>dssmp_document_hash_mismatch</b> — the document does not match its sha256 ({r.document_sha256?.slice(0, 12)}…). Register the version again with the correct document or hash.{o.message ? ` (${o.message})` : ""}</div>}
-      {o && o.reason_code !== "dssmp_document_hash_mismatch" && (o.reason_code || o.message) && <div className="error">Load job rejected it: <b>{o.reason_code || "no reason_code"}</b> {o.message}</div>}
+      {o && o.reason_code !== "dssmp_document_hash_mismatch" && (o.reason_code || o.message) && <div className="error">Load job rejected it: <b>{o.reason_code || "no reason_code"}</b>{explain(o.reason_code) ? ` — ${explain(o.reason_code)}` : ""}<div className="muted">{o.message}</div></div>}
     </span>
   );
 }
@@ -102,7 +103,7 @@ export function ReversionPanel({ damId, to, policy }: { damId: string; to?: stri
       <h4>Rule re-version {to ? `to ${to}` : ""}</h4>
       {err && <div className="error">{err}</div>}
       {to && data.affected_count > 0 && !pend.length && data.can_propose && (
-        <div><span className="muted">{data.affected_count} rules are set under a superseded version: {data.affected_rules.map((r: any) => r.threshold_id).join(", ")}</span>
+        <div><span className="muted">{data.affected_count} rules are not set under {to} (missing or superseded DSSMP): {data.affected_rules.map((r: any) => r.threshold_id).join(", ")}</span>
           <input placeholder="rationale (required)" value={why._new || ""} onChange={(e) => setWhy({ ...why, _new: e.target.value })} />
           <button onClick={() => post("", { to_dssmp_version_id: to, rationale: why._new || "" })}>Propose re-version of {data.affected_count} rules</button></div>)}
       {to && data.affected_count === 0 && <div className="muted">Every current rule is set under {to}.</div>}
@@ -114,6 +115,11 @@ export function ReversionPanel({ damId, to, policy }: { damId: string; to?: stri
             {p.rules.length} rules → {p.to_dssmp_version_id} <span className="muted">by {p.proposed_by} {utc(p.proposed_at)}: {p.rationale}</span>
             <div className="muted">{p.rules.map((r: any) => `${r.threshold_id} v${r.threshold_version}`).join(", ")}</div>
             {p.decided_by && <div className="muted">{p.status} by {p.decided_by} {utc(p.decided_at)}: {p.decision_rationale}{p.pub_ids ? ` — ${p.pub_ids.length} publications queued` : ""}</div>}
+            {(p.publications || []).filter((x: any) => x.status && x.status !== "pending" && x.status !== "applied").map((x: any) => {
+              const code = x.code || codeOf(x.message);
+              return <div key={x.pub_id} className="error">{x.threshold_id || x.pub_id}: publisher {x.status} <b>{code || ""}</b>{explain(code) ? ` — ${explain(code)}` : ""}<div className="muted">{x.message}</div></div>;
+            })}
+            {p.publications?.length > 0 && <div className="muted">{p.publications.filter((x: any) => x.status === "applied").length}/{p.publications.length} publications applied</div>}
             {p.status === "pending" && data.can_decide && (
               <div><input placeholder="rationale (required)" value={why[p.proposal_id] || ""} onChange={(e) => setWhy({ ...why, [p.proposal_id]: e.target.value })} />
                 {!self && <button onClick={() => post(`/${p.proposal_id}/approve`, { rationale: why[p.proposal_id] || "" })}>Approve re-version</button>}

@@ -5,8 +5,9 @@ import { useState } from "react";
 import { api } from "../api";
 import { useApi } from "../hooks";
 import { Loading, utc } from "../components/ui";
+import { explain } from "../codes";
 
-const BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad", loaded: "ok", rejected_invalid: "bad" };
+const BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad", loaded: "ok", rejected_invalid: "bad" };  // rejected_invalid: legacy alias
 
 function ChangeRow({ ch, canDecide, policy, onDone }: { ch: any; canDecide: boolean; policy?: any; onDone: () => void }) {
   const [why, setWhy] = useState("");
@@ -18,12 +19,12 @@ function ChangeRow({ ch, canDecide, policy, onDone }: { ch: any; canDecide: bool
   const self = policy?.cdse_flag_require_second_approver && ch.proposed_by === policy?.me;
   return (
     <tr>
-      <td>{ch.dam_id}</td><td>{ch.kind}</td><td>{ch.previous_cdse_id || "—"} → <b>{ch.new_cdse_id}</b></td>
+      <td>{ch.dam_id}</td><td>{ch.kind}</td><td title="previous = the dam's designated CDSE when proposed">{ch.previous_cdse_id || "—"} → <b>{ch.new_cdse_id}</b></td>
       <td>{ch.change_reason_code}<div className="muted">{ch.rationale}</div></td>
       <td>{ch.proposed_by}<div className="muted">{utc(ch.proposed_at)}</div></td>
       <td><span className={`badge ${BADGE[ch.status] || "muted"}`}>{ch.status}</span>
         {ch.outbox && <span className={`badge ${BADGE[ch.outbox.status] || "muted"}`}>DA load {ch.outbox.status}</span>}
-        {ch.outbox?.reason_code && <div className="error">{ch.outbox.reason_code} {ch.outbox.message}</div>}
+        {ch.outbox?.reason_code && <div className="error">DA load refused: <b>{ch.outbox.reason_code}</b>{explain(ch.outbox.reason_code) ? ` — ${explain(ch.outbox.reason_code)}` : ""}<div className="muted">{ch.outbox.message}</div></div>}
         {ch.decided_by && <div className="muted">by {ch.decided_by} {utc(ch.decided_at)}: {ch.decision_rationale}</div>}</td>
       <td>{canDecide && ch.status === "pending" && (
         <div><input placeholder="rationale (required)" value={why} onChange={(e) => setWhy(e.target.value)} />
@@ -63,7 +64,7 @@ export function CdsePanel({ damId }: { damId?: string }) {
     <div>
       <h4>Dam CDSE</h4>
       <Loading error={error} loading={loading} />
-      {data && <div>Current CDSE: {data.current_cdse?.length ? <b>{data.current_cdse.join(", ")}</b> : <span className="badge bad">none — go-live blocked (cdse_authority_missing)</span>}
+      {data && <div>Current CDSE: {data.current_cdse?.length ? <b>{data.current_cdse.join(", ")}</b> : <span className="badge bad" title={explain("no_cdse_in_reviewer_authority") || ""}>none — go-live blocked (no_cdse_in_reviewer_authority)</span>}
         {data.live && <span className="badge ok">live</span>}</div>}
       {data?.can_assign && form("Assign first CDSE (platform admin, signed)", "assign")}
       {data?.can_propose_change && form("Propose CDSE change (current CDSE approves)", "changes")}

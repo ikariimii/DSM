@@ -251,7 +251,8 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
             out.append(issue("thresholds", "error", f"limit_type must be one of {'|'.join(LIMIT_TYPES)}", ref))
         if t.get("direction") not in DIRECTIONS:
             out.append(issue("thresholds", "error", f"direction must be one of {'|'.join(DIRECTIONS)}", ref))
-        out.extend(issue("thresholds", "error", m, ref) for m in publish_field_problems(t))
+        out.extend(issue("thresholds", "error", m, ref, "dssmp_missing" if m.startswith("dssmp_missing") else None)
+                   for m in publish_field_problems(t))
         if not _isnum(t.get("value")):
             out.append(issue("thresholds", "error", "limit value must be numeric", ref))
             continue
@@ -469,23 +470,52 @@ def dssmp_problems(lookup, dam_id: str, ids, now: datetime | None = None) -> dic
     return {i: f"{f['code']}: {f['message']}" for i, f in dssmp_findings(lookup, dam_id, ids, now).items()}
 
 
+# ref.v_dam_go_live_readiness.blocking_reason codes the DA publishes (sql/ddl/10b) + the app's fail-closed codes
+READINESS_MISSING = "go_live_readiness_missing"
+READINESS_UNVERIFIABLE = "go_live_readiness_unverifiable"
+
+
+def go_live_readiness_issues(lookup, dam_id: str | None) -> list[dict]:
+    """Go-live gate on the DA's ref.v_dam_go_live_readiness (sql/ddl/10b; one row per dam): `ready` must be TRUE.
+    ready false -> blocked with blocking_reason as the code (e.g. no_cdse_in_reviewer_authority); no row ->
+    go_live_readiness_missing; no lookup or an unreadable view -> go_live_readiness_unverifiable (fail closed).
+    `lookup(dam_id)` is analytics.go_live_readiness. The app's own approved-DSSMP check (dssmp_issues) is separate and
+    ALSO required (the view's has_current_dssmp is informational). Replaces the direct ref.v_dam_reviewer_authority
+    check (cdse_authority_missing)."""
+    if not dam_id:
+        return []
+    if lookup is None:
+        return [issue("users", "error", f"{READINESS_UNVERIFIABLE}: no go-live readiness lookup available",
+                      dam_id, READINESS_UNVERIFIABLE)]
+    try:
+        row = lookup(dam_id)
+    except Exception as e:  # noqa: BLE001 - never treat an unreadable view as ready
+        return [issue("users", "error", f"{READINESS_UNVERIFIABLE}: ref.v_dam_go_live_readiness unreadable "
+                      f"({type(e).__name__}); go-live blocked", dam_id, READINESS_UNVERIFIABLE)]
+    if not row:
+        return [issue("users", "error", f"{READINESS_MISSING}: dam {dam_id} has no row in ref.v_dam_go_live_readiness "
+                      "(not in ref.dam and no CDSE assignment yet: assign the dam's first CDSE)", dam_id, READINESS_MISSING)]
+    if row.get("ready") is True:
+        return []
+    code = str(row.get("blocking_reason") or "").strip() or "go_live_not_ready"
+    hint = (" - the dam's CDSE must be assigned and loaded into the reviewer authority (Users & roles step)"
+            if code == "no_cdse_in_reviewer_authority" else "")
+    return [issue("users", "error", f"{code}: dam {dam_id} is not go-live ready in ref.v_dam_go_live_readiness{hint}",
+                  dam_id, code)]
+
+
 def cdse_authority_issues(lookup, dam_id: str | None) -> list[dict]:
-    """Go-live readiness: the dam must have a CDSE row in ref.v_dam_reviewer_authority (fail closed: an empty result,
-    a missing lookup or a lookup error all block, code cdse_authority_missing). `lookup(dam_id)` is
-    analytics.cdse_principals (live mode: the view). App-side stand-in until the DA's ref go-live readiness object
-    lands (SCHEMA_CONTRACT §7 item 19) - then switch this one function to it."""
+    """DEPRECATED (v1.7 steering): NOT used by go-live any more; the gate is go_live_readiness_issues on the DA's
+    ref.v_dam_go_live_readiness. Kept only so QA's existing import (qa/test_qa055_..._cdse.py) still resolves until QA
+    moves to go_live_readiness_issues. Fail closed: no principals / no lookup / a lookup error -> cdse_authority_missing."""
     if not dam_id:
         return []
     try:
-        found = [p for p in (lookup(dam_id) or []) if p and str(p).strip()] if lookup else []
-        why = "" if lookup else " (no lookup available)"
-    except Exception as e:  # noqa: BLE001 - never treat an unreadable view as 'has a CDSE'
-        found, why = [], f" (ref.v_dam_reviewer_authority unreadable: {type(e).__name__})"
-    if found:
-        return []
-    return [issue("users", "error", f"cdse_authority_missing: dam {dam_id} has no CDSE row in "
-                  f"ref.v_dam_reviewer_authority{why}; the data layer must register the dam's CDSE before go-live",
-                  dam_id, "cdse_authority_missing")]
+        found = [x for x in (lookup(dam_id) or []) if x and str(x).strip()] if callable(lookup) else []
+    except Exception:  # noqa: BLE001
+        found = []
+    return [] if found else [issue("users", "error", f"cdse_authority_missing: dam {dam_id} has no CDSE row in "
+                                   "ref.v_dam_reviewer_authority", dam_id, "cdse_authority_missing")]
 
 
 def _pending_note(dam_id: str, i: str | None, registrations, outbox) -> str:
@@ -553,7 +583,7 @@ def publish_field_problems(t: dict) -> list[str]:
     unit = t.get("unit") or "rule unit"
     out = []
     if not str(t.get("dssmp_version_id") or "").strip():
-        out.append("dssmp_version_id is required (the DSSMP version this limit is set under)")
+        out.append("dssmp_missing: dssmp_version_id is required (the DSSMP version this limit is set under)")
     if not str(t.get("tier") or "").strip():
         out.append("tier is required (DESIGN_BASIS, THRESHOLD or AL1..ALn)")
     elif not TIER_RE.match(str(t["tier"]).strip()):

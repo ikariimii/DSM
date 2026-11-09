@@ -144,3 +144,52 @@ def test_cdse_queue_lists_pending_reversions(k):
     pid = k.post(RV, user=DAMADMIN, json={"to_dssmp_version_id": NEWV, "rationale": "x"}).json()["proposal_id"]
     assert [p["proposal_id"] for p in k.get("/api/rule-reversions/pending", user=CDSE).json()["proposals"]] == [pid]
     assert k.get("/api/rule-reversions/pending", user="cdse.bfk@demo.local").json()["proposals"] == []
+
+
+def test_affected_count_prefers_the_da_function_with_a_fallback(k, monkeypatch):
+    """ref.dssmp_affected_rules(dam, to) drives the preview / approval-screen count when it answers; the app's own
+    computation is the fallback (function missing or unreadable). The proposal itself always uses current rules."""
+    _approved_dssmp(k)
+    calls = []
+    def da(dam, to):
+        calls.append((dam, to))
+        return [{"threshold_id": "CRD-PZ-2-T1", "threshold_version": 1, "dssmp_version_id": None,
+                 "cdse_ack_required": False}]
+    monkeypatch.setattr(_an(k), "dssmp_affected_rules", da, raising=False)
+    r = k.get(RV, user=CDSE, params={"to": NEWV}).json()
+    assert (r["affected_count"], r["affected_source"], calls) == (1, "ref.dssmp_affected_rules", [("CRD", NEWV)])
+    def boom(dam, to):
+        raise RuntimeError("function missing")
+    monkeypatch.setattr(_an(k), "dssmp_affected_rules", boom, raising=False)
+    r = k.get(RV, user=CDSE, params={"to": NEWV}).json()
+    assert (r["affected_count"], r["affected_source"]) == (len(_rules(k)), "app")
+
+
+def test_rules_without_a_dssmp_are_re_versionable(k):
+    """dssmp_missing rules are exactly what a re-version fixes: not refused as 'lacking' publication fields."""
+    _approved_dssmp(k)
+    for t in _an(k).d["thresholds"]:
+        if t["threshold_id"] == "CRD-PZ-2-T1":
+            t["dssmp_version_id"] = None
+    r = k.post(RV, user=CDSE, json={"to_dssmp_version_id": NEWV, "rationale": "fix missing"})
+    assert r.status_code == 200, r.text
+    assert "CRD-PZ-2-T1" in [x["threshold_id"] for x in r.json()["rules"]]
+
+
+def test_publisher_refusal_codes_are_exposed_per_proposal(k):
+    rid = register(k)
+    rv = k.post(f"{REGS}/{rid}/approve", user=CDSE, json={"rationale": "ok", "propose_reversion": True}).json()["reversion"]
+    pub_ids = k.post(f"{RV}/{rv['proposal_id']}/approve", user=CDSE, json={"rationale": "go"}).json()["pub_ids"]
+    st = _st(k)
+    st.execute("UPDATE {s}ref_change_publication SET status = 'rejected_invalid', "
+               "message = 'reversion_fields_changed: tier differs from version N' WHERE pub_id = %s", (pub_ids[0],))
+    (p,) = [x for x in k.get(RV, user=CDSE).json()["proposals"] if x["proposal_id"] == rv["proposal_id"]]
+    bad = [x for x in p["publications"] if x["pub_id"] == pub_ids[0]][0]
+    assert (bad["status"], bad["code"]) == ("rejected_invalid", "reversion_fields_changed") and bad["threshold_id"]
+    assert len(p["publications"]) == len(pub_ids)
+
+
+def test_pub_code_parses_only_a_code_prefix():
+    from backend.routers.rule_reversion import pub_code
+    assert pub_code("payload_invalid: missing insert") == "payload_invalid"
+    assert pub_code("Something went wrong: x") is None and pub_code(None) is None and pub_code("") is None

@@ -4,6 +4,7 @@ import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
 import { DssmpRegistrationStep } from "./DssmpRegistrations";
 import { CdsePanel } from "./CdsePanel";
+import { explain } from "../codes";
 
 type Col = { key: string; label?: string; type?: "text" | "number" | "select" | "json" | "date" | "checkbox"; options?: string[] };
 
@@ -236,7 +237,7 @@ function Issues({ issues }: { issues: any[] }) {
   return (
     <table><tbody>
       {issues.map((i, n) => (
-        <tr key={n}><td><span className={`badge ${i.severity === "error" ? "bad" : "warn"}`}>{i.severity}</span></td><td>{i.step}</td><td>{i.ref || ""}</td><td>{i.message}</td></tr>
+        <tr key={n}><td><span className={`badge ${i.severity === "error" ? "bad" : "warn"}`}>{i.severity}</span></td><td>{i.step}</td><td>{i.ref || ""}</td><td>{i.message}{explain(i.code) && <div className="muted">{explain(i.code)}</div>}</td></tr>
       ))}
     </tbody></table>
   );

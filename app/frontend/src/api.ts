@@ -1,5 +1,7 @@
 // Thin fetch wrapper. In Databricks Apps the proxy adds X-Forwarded-Email; in demo mode the
 // backend honours X-Demo-User (ignored outside demo mode) so the user switcher can test ACLs.
+import { explain } from "./codes";
+
 const DEMO_KEY = "dam-demo-user";
 
 export function demoUser(): string | null {
@@ -15,7 +17,7 @@ export class ApiError extends Error {
     const d = detail as any;
     // coded refusals (e.g. {code: "self_approval_forbidden", message}) show "code: message"
     super(typeof detail === "string" ? detail : d && typeof d.code === "string" && typeof d.message === "string"
-      ? `${d.code}: ${d.message}` : JSON.stringify(detail));
+      ? `${d.code}: ${d.message}${explain(d.code) ? ` — ${explain(d.code)}` : ""}` : JSON.stringify(detail));
   }
 }
 

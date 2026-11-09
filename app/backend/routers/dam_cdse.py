@@ -86,6 +86,20 @@ def _current(an, dam_id: str) -> list[str]:
                                   "message": f"ref.v_dam_reviewer_authority unreadable ({type(e).__name__})"}) from e
 
 
+def _designated(an, dam_id: str) -> str | None:
+    """The dam's ONE designated CDSE (ref.dam_cdse_assignment in force / legacy ref.dam.cdse_id, via the authority
+    view's cdse_id column): the value stored as previous_cdse_id. 409 cdse_unverifiable if unreadable/ambiguous."""
+    fn = getattr(an, "designated_cdse", None)
+    if fn is None:
+        raise HTTPException(409, {"code": "cdse_unverifiable", "message": "no designated-CDSE lookup available"})
+    try:
+        v = fn(dam_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(409, {"code": "cdse_unverifiable",
+                                  "message": f"the designated CDSE of {dam_id} cannot be read ({type(e).__name__})"}) from e
+    return str(v).strip().lower() if v and str(v).strip() else None
+
+
 def _is_live(an, dam_id: str) -> bool:
     try:
         return dam_id in {s["dam_id"] for s in an.sites()}
@@ -166,8 +180,10 @@ def _no_pending_load_q(q, dam_id: str) -> None:
                                   "message": f"a CDSE event of {dam_id} is still waiting for the DA load job"})
 
 
-def _assign_check(dam_id: str):
+def _assign_check(dam_id: str, an):
     def check(q):
+        if _designated(an, dam_id):          # re-read under the dam lock
+            raise HTTPException(409, {"code": "cdse_exists", "message": f"{dam_id} already has a designated CDSE"})
         if _open_assignment_q(q, dam_id):
             raise HTTPException(409, {"code": "cdse_assign_pending",
                                       "message": f"{dam_id} already has a first-CDSE assignment (concurrent or waiting "
@@ -176,8 +192,18 @@ def _assign_check(dam_id: str):
     return check
 
 
-def _propose_check(dam_id: str):
+def _same_designated(an, dam_id: str, previous: str | None):
+    """QA-056 + §7.20: previous_cdse_id is the designated CDSE as read UNDER the dam lock: re-read and compare."""
+    now = _designated(an, dam_id)
+    if (now or None) != (previous or None):
+        raise HTTPException(409, {"code": "cdse_stale", "message": f"the designated CDSE of {dam_id} is now "
+                                  f"{now or 'none'}, not {previous or 'none'}; nothing was written"})
+
+
+def _propose_check(dam_id: str, an=None, previous: str | None = None):
     def check(q):
+        if an is not None:
+            _same_designated(an, dam_id, previous)
         if q("SELECT change_id FROM {s}dam_cdse_change WHERE dam_id = %s AND status = 'pending'", (dam_id,)):
             raise HTTPException(409, {"code": "cdse_change_pending",
                                       "message": f"{dam_id} already has a pending change"})
@@ -226,7 +252,7 @@ def assign(dam_id: str, body: AssignBody, request: Request, c: Ctx = Depends(ctx
     if _is_live(an, dam_id):
         raise HTTPException(409, {"code": "dam_live", "message": f"{dam_id} is live: a CDSE change is a proposal the "
                                                                  "current CDSE approves (POST .../cdse/changes)"})
-    cur = _current(an, dam_id)
+    cur = sorted(set(_current(an, dam_id)) | ({d} if (d := _designated(an, dam_id)) else set()))
     if cur:
         raise HTTPException(409, {"code": "cdse_exists", "message": f"{dam_id} already has a CDSE ({', '.join(cur)})"})
     if _open_assignment(st, dam_id):
@@ -245,7 +271,7 @@ def assign(dam_id: str, body: AssignBody, request: Request, c: Ctx = Depends(ctx
             "approval_record_hash": rec["record_hash"]})
         _outbox_insert(st, q, row, outbox_id, c.email, rec)
 
-    rec = sg.append(st, request, base, c=c, an=an, also_row=also_row, check=_assign_check(dam_id))
+    rec = sg.append(st, request, base, c=c, an=an, also_row=also_row, check=_assign_check(dam_id, an))
     st.audit(c.email, "dam_cdse_assign", dam_id, new, {"outbox_id": outbox_id, "reason_code": code})
     _demo_load(request, an, st, outbox_id)
     return {**_view(st, st.rows("dam_cdse_change", "proposed_at", change_id=row["change_id"]))[0],
@@ -260,20 +286,20 @@ def propose_change(dam_id: str, body: AssignBody, request: Request, c: Ctx = Dep
     code = _reason(body.reason_code)
     rationale = sg.rationale_of(body.rationale)
     new = _principal(body.cdse_id)
-    cur = _current(an, dam_id)
+    cur = _designated(an, dam_id)
     if not cur:
         raise HTTPException(409, {"code": "cdse_authority_missing",
                                   "message": f"{dam_id} has no CDSE in ref.v_dam_reviewer_authority yet: a not-live "
                                              "dam's first CDSE is assigned (POST .../cdse/assign)"})
-    if new in cur:
+    if new == cur:
         raise HTTPException(409, {"code": "cdse_unchanged", "message": f"{new} already is the CDSE of {dam_id}"})
     if st.rows("dam_cdse_change", "proposed_at", dam_id=dam_id, status="pending"):
         raise HTTPException(409, {"code": "cdse_change_pending", "message": f"{dam_id} already has a pending change"})
-    row = _new(c, request, dam_id, "change", ",".join(cur), new, code, rationale)
+    row = _new(c, request, dam_id, "change", cur, new, code, rationale)   # ONE value: the designated CDSE
     base = _record(c, request, an, dam_id, "dam_cdse_change_propose", "propose", rationale,
-                   {"cdse_id": ",".join(cur)}, _snap(row) | {"state": "pending"})
+                   {"cdse_id": cur}, _snap(row) | {"state": "pending"})
     rec = sg.append(st, request, base, lambda q: st.insert_row(q, "dam_cdse_change", row), c=c, an=an,
-                    check=_propose_check(dam_id))
+                    check=_propose_check(dam_id, an, cur))
     st.audit(c.email, "dam_cdse_change_propose", dam_id, new, {"change_id": row["change_id"], "reason_code": code})
     return {**_view(st, [row])[0], "chain_seq": rec["chain_seq"]}
 
@@ -300,7 +326,7 @@ def _decide(dam_id: str, change_id: str, body: DecisionBody, request: Request, c
             raise HTTPException(403, {"code": "self_approval_forbidden", "provisional": True,
                                       "setting": "CDSE_FLAG_REQUIRE_SECOND_APPROVER",
                                       "message": f"{c.email} proposed {change_id} and cannot approve it"})
-        if ",".join(_current(an, dam_id)) != r["previous_cdse_id"]:
+        if _designated(an, dam_id) != (r["previous_cdse_id"] or "").strip().lower():
             raise HTTPException(409, {"code": "cdse_stale", "message": "the dam's CDSE changed since the proposal; "
                                                                        "reject it and propose again"})
     outbox_id = f"DCO-{uuid.uuid4().hex}" if verb == "approve" else None
@@ -318,7 +344,8 @@ def _decide(dam_id: str, change_id: str, body: DecisionBody, request: Request, c
 
     try:
         rec = sg.append(st, request, base, c=c, an=an, also_row=also_row,
-                        check=(lambda q: _no_pending_load_q(q, dam_id)) if outbox_id else None)
+                        check=(lambda q: (_same_designated(an, dam_id, (r["previous_cdse_id"] or "").strip().lower()),
+                                          _no_pending_load_q(q, dam_id))) if outbox_id else None)
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     st.audit(c.email, f"dam_cdse_change_{verb}", dam_id, r["new_cdse_id"], {"change_id": change_id})

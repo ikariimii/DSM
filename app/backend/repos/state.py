@@ -98,10 +98,12 @@ DDL = [
         size_bytes INTEGER NOT NULL, sha256 TEXT NOT NULL, content_b64 TEXT NOT NULL, uploaded_by TEXT NOT NULL,
         uploaded_at TEXT NOT NULL)""",
     # DA contract (fixed): the app INSERTs at 'pending' only after CDSE approval; only the DA publisher role sets
-    # status / reason_code / message / processed_at. 'rejected_invalid' is accepted as the DA's rejection spelling.
+    # status / reason_code / message / processed_at. Contract (§7 item 19): status pending|loaded|rejected and
+    # document_sha256 NOT NULL. 'rejected_invalid' stays in this CHECK only because the DA's
+    # tests/test_dssmp_outbox_contract.py pins it; the DA job never writes it - drop it together with that test.
     """CREATE TABLE IF NOT EXISTS {s}dssmp_registration_outbox (
         outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, dssmp_version_id TEXT NOT NULL, version_no INTEGER NOT NULL,
-        effective_from TEXT NOT NULL, change_reason TEXT, source_ref TEXT, document_uri TEXT, document_sha256 TEXT,
+        effective_from TEXT NOT NULL, change_reason TEXT, source_ref TEXT, document_uri TEXT, document_sha256 TEXT NOT NULL,
         proposed_by TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL,
         approval_record_hash TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
@@ -132,9 +134,18 @@ DDL = [
     # deleted LAST record detectable. Updated only inside the append transaction.
     """CREATE TABLE IF NOT EXISTS {s}review_chain_head (
         chain_id TEXT PRIMARY KEY, chain_seq INTEGER NOT NULL, head_hash TEXT NOT NULL, updated_ts TEXT NOT NULL)""",
+    # v1.7 (DA residual a, lakebase/001): append-only head log. One row per head advance; current head = highest
+    # chain_seq. On Lakebase it is owned by dam_lakebase_owner (app SELECT + INSERT only), so the app role cannot
+    # rewind or delete a head. review_chain_head above is still written (compatibility) but no longer trusted alone.
+    """CREATE TABLE IF NOT EXISTS {s}review_chain_head_log (
+        chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL CHECK (chain_seq >= 0), head_hash TEXT NOT NULL,
+        updated_ts TEXT NOT NULL, PRIMARY KEY (chain_id, chain_seq))""",
 ]
 
-APPEND_ONLY = ("review_signoff",)
+APPEND_ONLY = ("review_signoff", "review_chain_head_log")
+# per-chain append lock (two-key advisory lock: class key + hashtext(chain_id)); replaces SELECT ... FOR UPDATE on
+# review_chain_head, which needs UPDATE privilege the app no longer has on the head log
+CHAIN_LOCK_CLASS = 4702046
 # Outbox rows are immutable except the publisher's bookkeeping columns (DA contract); DELETE / TRUNCATE refused.
 OUTBOX_GUARDED = ("dssmp_registration_outbox", "dam_cdse_outbox")
 OUTBOX_MUTABLE_COLS = ("status", "reason_code", "message", "processed_at")
@@ -781,11 +792,13 @@ class StateStore:
 
     def append_chained(self, chain_id: str, genesis: str, finalize, also=None, also_row=None, *,
                        lock_key: str | None = None, check=None) -> dict:
-        """Append one record to `chain_id` atomically. Under the chain-head lock (Postgres: SELECT ... FOR UPDATE on
-        review_chain_head; sqlite: the BEGIN IMMEDIATE write lock) read (seq, head_hash), call
-        finalize(seq + 1, head_hash) -> complete row, INSERT it, advance the head, then run also(q) (e.g. the alarm
-        state change) in the SAME transaction. Two app instances therefore cannot fork the chain; the UNIQUE
-        (chain_id, chain_seq) index is the backstop. Nothing is ever updated in review_signoff.
+        """Append one record to `chain_id` atomically. Under the per-chain lock (Postgres: transaction-scoped
+        advisory lock CHAIN_LOCK_CLASS / hashtext(chain_id); sqlite: the BEGIN IMMEDIATE write lock) read the current
+        head = the highest chain_seq in review_chain_head_log (seeded once from the legacy review_chain_head, else
+        genesis at seq 0), call finalize(seq + 1, head_hash) -> complete row, INSERT it, APPEND the new head to the
+        log (and keep the legacy head row in step for older readers), then run also(q) / also_row(q, row) in the SAME
+        transaction. The PRIMARY KEY (chain_id, chain_seq) of the log and the UNIQUE (chain_id, chain_seq) index of
+        review_signoff are the backstops. Nothing is ever updated in review_signoff or review_chain_head_log.
         QA-056: with `lock_key` the per-dam lock is taken FIRST, then check(q) re-runs the caller's state checks on
         this transaction's connection (raise to abort: nothing is written), and only then the chain head is locked.
         Lock order is therefore always dam -> chain head (no deadlock with appends that take no dam lock)."""
@@ -794,17 +807,27 @@ class StateStore:
                 self.lock_dam(q, lock_key)
             if check is not None:
                 check(q)
-            ins = ("INSERT INTO {s}review_chain_head (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s, 0, %s, %s) "
-                   "ON CONFLICT (chain_id) DO NOTHING")
-            q(ins, (chain_id, genesis, now_iso()))
-            lock = " FOR UPDATE" if self.kind != "sqlite" else ""
-            head = q("SELECT chain_seq, head_hash FROM {s}review_chain_head WHERE chain_id = %s" + lock, (chain_id,))[0]
+            if self.kind != "sqlite":   # chain lock AFTER lock_dam + check(q): order dam -> chain (QA-056)
+                q("SELECT pg_advisory_xact_lock(%s, hashtext(%s)) AS locked", (CHAIN_LOCK_CLASS, chain_id))
+            top = "SELECT chain_seq, head_hash FROM {s}review_chain_head_log WHERE chain_id = %s ORDER BY chain_seq DESC LIMIT 1"
+            head = q(top, (chain_id,))
+            if not head:
+                legacy = q("SELECT chain_seq, head_hash FROM {s}review_chain_head WHERE chain_id = %s", (chain_id,))
+                seed = (int(legacy[0]["chain_seq"]), legacy[0]["head_hash"]) if legacy else (0, genesis)
+                q("INSERT INTO {s}review_chain_head_log (chain_id, chain_seq, head_hash, updated_ts) "
+                  "VALUES (%s, %s, %s, %s) ON CONFLICT (chain_id, chain_seq) DO NOTHING",
+                  (chain_id, seed[0], seed[1], now_iso()))
+                head = q(top, (chain_id,))
+            head = head[0]
             row = finalize(int(head["chain_seq"]) + 1, head["head_hash"])
             cols = self.SIGNOFF_COLS
             q(f"INSERT INTO {{s}}review_signoff ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
               tuple(row.get(c) for c in cols))
-            q("UPDATE {s}review_chain_head SET chain_seq = %s, head_hash = %s, updated_ts = %s WHERE chain_id = %s",
-              (row["chain_seq"], row["record_hash"], now_iso(), chain_id))
+            q("INSERT INTO {s}review_chain_head_log (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s, %s, %s, %s)",
+              (chain_id, row["chain_seq"], row["record_hash"], now_iso()))
+            q("INSERT INTO {s}review_chain_head (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s, %s, %s, %s) "
+              "ON CONFLICT (chain_id) DO UPDATE SET chain_seq = excluded.chain_seq, head_hash = excluded.head_hash, "
+              "updated_ts = excluded.updated_ts", (chain_id, row["chain_seq"], row["record_hash"], now_iso()))
             if also is not None:
                 also(q)
             if also_row is not None:  # needs the finalized record (e.g. its record_hash) in the same transaction
@@ -816,12 +839,17 @@ class StateStore:
                             (chain_id,))
 
     def chain_head(self, chain_id: str) -> dict | None:
-        r = self.execute("SELECT * FROM {s}review_chain_head WHERE chain_id = %s", (chain_id,))
+        """Current head: the highest chain_seq in the append-only log; the legacy row only if the log has none."""
+        r = self.execute("SELECT chain_id, chain_seq, head_hash, updated_ts FROM {s}review_chain_head_log "
+                         "WHERE chain_id = %s ORDER BY chain_seq DESC LIMIT 1", (chain_id,))
+        if not r:
+            r = self.execute("SELECT * FROM {s}review_chain_head WHERE chain_id = %s", (chain_id,))
         return r[0] if r else None
 
     def chain_ids(self) -> list[str]:
         ids = {r["chain_id"] for r in self.execute("SELECT DISTINCT chain_id FROM {s}review_signoff")}
         ids |= {r["chain_id"] for r in self.execute("SELECT chain_id FROM {s}review_chain_head")}
+        ids |= {r["chain_id"] for r in self.execute("SELECT DISTINCT chain_id FROM {s}review_chain_head_log")}
         return sorted(i for i in ids if i)
 
     def review_signoffs(self, subject_type: str, subject_ids: list[str]) -> list[dict]:

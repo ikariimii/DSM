@@ -2,6 +2,7 @@
 CDSE of a not-live dam with no CDSE; later changes are admin proposals the CURRENT CDSE approves or rejects. Chained,
 reason_code + rationale required, outbox to the DA (the app never writes ref.dam)."""
 import dataclasses
+import json
 import sqlite3
 
 import pytest
@@ -57,7 +58,8 @@ def test_admin_assigns_first_cdse_and_go_live_then_passes_the_check(k):
                                        "effective_from": "2026-01-01T00:00:00Z", "effective_to": None,
                                        "status": "approved"})
     r = k.post(f"/api/onboarding/drafts/{did}/golive")
-    assert r.status_code == 422 and {i.get("code") for i in r.json()["detail"]["issues"]} == {"cdse_authority_missing"}
+    # NEW is not in ref.dam and has no assignment: no ref.v_dam_go_live_readiness row -> blocked (fail closed)
+    assert r.status_code == 422 and {i.get("code") for i in r.json()["detail"]["issues"]} == {"go_live_readiness_missing"}
     s = k.get("/api/dams/NEW/cdse", user=ADMIN).json()
     assert s["can_assign"] and s["live"] is False and s["current_cdse"] == []
     r = assign(k)
@@ -146,6 +148,43 @@ def test_change_rejected_and_stale(k):
                   json={"rationale": "x"}).json()["detail"]["code"] == "cdse_stale"
 
 
+def test_previous_cdse_id_is_the_single_designated_cdse_not_the_authority_principals(k):
+    """§7.20: previous_cdse_id = the dam's ONE designated CDSE (ref.dam.cdse_id / assignment), never the list of
+    reviewer-authority principals (which also holds MEMBERSHIP_CDSE grants)."""
+    _an(k).d.setdefault("project_membership", []).append({"dam_id": "CRD", "principal": "extra@demo.local",
+                                                          "role": "CDSE"})
+    assert len(_an(k).cdse_principals("CRD")) > 1
+    r = change(k)
+    assert r.status_code == 200, r.text
+    (row,) = _st(k).rows("dam_cdse_change", "change_id", dam_id="CRD")
+    assert row["previous_cdse_id"] == CDSE and "," not in row["previous_cdse_id"]
+    (rec,) = _st(k).chain_rows("CRD")
+    val = lambda v: json.loads(v) if isinstance(v, str) else v  # noqa: E731
+    assert val(rec["original_value"]) == {"cdse_id": CDSE}
+    assert val(rec["corrected_value"])["previous_cdse_id"] == CDSE
+    k.post(f"/api/dams/CRD/cdse/changes/{r.json()['change_id']}/approve", user=CDSE, json={"rationale": "ok"})
+    (o,) = _st(k).rows("dam_cdse_outbox", "outbox_id", dam_id="CRD")
+    assert o["previous_cdse_id"] == CDSE and o["status"] == "loaded"
+
+
+def test_designated_cdse_is_re_read_under_the_dam_lock(k, monkeypatch):
+    """The designated CDSE changing between the route's read and the locked check -> 409 cdse_stale, nothing written."""
+    seq = iter([CDSE, "interim@demo.local"])
+    monkeypatch.setattr(_an(k), "designated_cdse", lambda dam: next(seq))
+    r = change(k)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "cdse_stale"
+    assert _st(k).chain_rows("CRD") == [] and _st(k).rows("dam_cdse_change", "change_id", dam_id="CRD") == []
+    monkeypatch.setattr(_an(k), "designated_cdse", lambda dam: (_ for _ in ()).throw(RuntimeError("down")))
+    assert change(k).json()["detail"]["code"] == "cdse_unverifiable"           # fail closed
+
+
+def test_assign_refused_when_a_designated_cdse_exists_without_authority_rows(k, monkeypatch):
+    monkeypatch.setattr(_an(k), "designated_cdse", lambda dam: "legacy@demo.local")
+    r = assign(k)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "cdse_exists"
+    assert _st(k).chain_rows("NEW") == []
+
+
 def test_change_needs_a_current_cdse_and_a_different_one(k):
     assert change(k, dam="NEW").json()["detail"]["code"] == "cdse_authority_missing"
     assert change(k, cdse_id=CDSE).json()["detail"]["code"] == "cdse_unchanged"
@@ -187,7 +226,7 @@ def test_qa056_sqlite_has_every_unique_guard_and_a_violation_is_a_409(k, monkeyp
     # layer 1 off: the in-transaction check passes, the unique index alone refuses the second pending change
     assert change(k).status_code == 200
     from backend.routers import dam_cdse
-    monkeypatch.setattr(dam_cdse, "_propose_check", lambda dam_id: None)
+    monkeypatch.setattr(dam_cdse, "_propose_check", lambda dam_id, *a: None)
     monkeypatch.setattr(st, "rows", lambda table, order, **w: [] if w.get("status") == "pending" else
                         sm.StateStore.rows(st, table, order, **w))
     r = change(k, cdse_id="other@demo.local")

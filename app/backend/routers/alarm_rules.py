@@ -98,6 +98,11 @@ def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationa
     """Append the apply record + queue version N+1 + close the proposal in ONE chain transaction."""
     dam_id, tid = rule["dam_id"], rule["threshold_id"]
     missing = [k for k in PUBLISH_REQUIRED if rule.get(k) is None or str(rule.get(k)).strip() == ""]
+    if "dssmp_version_id" in missing:  # DA publisher code dssmp_missing (mirrored): the rule must be re-versioned
+        raise HTTPException(409, {"code": "dssmp_missing", "threshold_id": tid,
+                                  "message": f"{tid} v{_version(rule)} has no dssmp_version_id: version "
+                                             f"{_version(rule) + 1} cannot be published; re-version the rule under the "
+                                             "dam's current DSSMP version first"})
     if missing:  # copied from version N, never defaulted: refuse before anything is recorded or queued
         raise HTTPException(409, f"{tid} v{_version(rule)} lacks the NOT NULL ref.threshold column(s) "
                                  f"{', '.join(missing)}; version {_version(rule) + 1} cannot be published without them "
