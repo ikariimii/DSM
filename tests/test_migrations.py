@@ -36,12 +36,14 @@ EXPECTED_COLS = {
         "action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
         "prev_hash", "record_hash", "signature", "sig_alg", "key_id")] + [("ops.alarm_transition", "installation_version")],
     "v1_6_002_chain_head.sql": [],
+    "v1_6_003_alarm_rule_flag.sql": [],
 }
 EXPECTED_CKS = {
     "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
                               "ck_review_record_subject_decision"},
     "v1_6_001_audit_chain.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
     "v1_6_002_chain_head.sql": {"ck_chain_head"},
+    "v1_6_003_alarm_rule_flag.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
 }
 _ADD_CK = r"ALTER TABLE ([\w.]+) ADD CONSTRAINT (\w+)\s+CHECK"
 norm = lambda s: re.sub(r"\s+", " ", s)

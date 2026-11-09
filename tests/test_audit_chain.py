@@ -30,7 +30,8 @@ def test_engine_hash_matches_app_vector():
 def test_chain_fields_and_columns_agree():
     assert set(ac.CHAIN_FIELDS) | {"record_hash", "signature", "sig_alg", "key_id"} == set(VEC["rows"][0])
     assert set(ac.CHAIN_FIELDS) | {"record_hash", "signature", "sig_alg", "key_id", "source"} == set(lx.REVIEW_RECORD_COLS)
-    assert ac.ACTION_TYPES == ("bias_review", "data_correction_review", "alarm_ack", "alarm_close")
+    assert ac.ACTION_TYPES == ("bias_review", "data_correction_review", "alarm_ack", "alarm_close",
+                               "alarm_rule_flag_propose", "alarm_rule_flag_apply", "alarm_rule_flag_reject")
 
 
 def test_uc_copy_reverifies_after_extract():

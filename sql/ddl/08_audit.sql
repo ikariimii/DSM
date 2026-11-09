@@ -41,27 +41,36 @@ CREATE TABLE IF NOT EXISTS audit.review_record (
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
   subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction',
-                   'alarm_event')
+                   'alarm_event', 'alarm_rule')
   AND (subject_type <> 'incl_correction'
        OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
   AND (subject_type <> 'alarm_event'
-       OR (decision IN ('acknowledge', 'close') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
+       OR (decision IN ('acknowledge', 'close') AND comment IS NOT NULL AND length(trim(comment)) > 0))
+  AND (subject_type <> 'alarm_rule'
+       OR (decision IN ('propose', 'apply', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
 
 -- v1.6 (QA-039 v2): a chained reviewer action carries every required chain field (signature, sig_alg, key_id,
 -- reviewer_email and reviewer_sub stay nullable), its action matches its subject and decision, the chain is the
--- dam's, and every alarm_event record is a chained action. Rows with action_type NULL (pre-v1.6 incl_correction
+-- dam's, and every alarm_event record is a chained action. v1.6 §7.13 (app 6f7a1d5): subject_type 'alarm_rule'
+-- (live cdse_ack_required edits: propose | apply | reject, action_type alarm_rule_flag_*) and a non-blank rationale on
+-- EVERY chained record. WHO may propose/apply/reject is NOT a row CHECK (it needs ref.v_dam_reviewer_authority at
+-- signed_ts): dam_safety.rule_flag_authority, run by the verify_review_chain task. Rows with action_type NULL (pre-v1.6 incl_correction
 -- extracts, other subject types) are not affected.
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_chain;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
-  (subject_type <> 'alarm_event' OR action_type IS NOT NULL)
+  (subject_type NOT IN ('alarm_event', 'alarm_rule') OR action_type IS NOT NULL)
   AND (action_type IS NULL OR (
-    action_type IN ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close')
+    action_type IN ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close',
+                    'alarm_rule_flag_propose', 'alarm_rule_flag_apply', 'alarm_rule_flag_reject')
     AND original_value IS NOT NULL AND corrected_value IS NOT NULL AND chain_id IS NOT NULL
     AND chain_seq IS NOT NULL AND chain_seq >= 1 AND prev_hash IS NOT NULL AND record_hash IS NOT NULL
-    AND chain_id = dam_id
+    AND chain_id = dam_id AND comment IS NOT NULL AND length(trim(comment)) > 0
     AND ((action_type IN ('bias_review', 'data_correction_review') AND subject_type = 'incl_correction')
          OR (action_type = 'alarm_ack' AND subject_type = 'alarm_event' AND decision = 'acknowledge')
-         OR (action_type = 'alarm_close' AND subject_type = 'alarm_event' AND decision = 'close')))));
+         OR (action_type = 'alarm_close' AND subject_type = 'alarm_event' AND decision = 'close')
+         OR (action_type = 'alarm_rule_flag_propose' AND subject_type = 'alarm_rule' AND decision = 'propose')
+         OR (action_type = 'alarm_rule_flag_apply' AND subject_type = 'alarm_rule' AND decision = 'apply')
+         OR (action_type = 'alarm_rule_flag_reject' AND subject_type = 'alarm_rule' AND decision = 'reject')))));
 
 -- QA-045d: append-only chain heads. dam_lakebase_extract appends the app's Lakebase review_chain_head per chain
 -- (read in the same REPEATABLE READ snapshot as the review_signoff rows it copies) whenever it changed; the verifier

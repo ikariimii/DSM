@@ -13,6 +13,7 @@ try:
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
 from dam_safety.audit_chain import CHAIN_FIELDS, verify_with_chain_heads
+from dam_safety.rule_flag_authority import rule_flag_authority_problems
 
 
 def verify_all(records, heads, signer=None):
@@ -28,6 +29,12 @@ def verify_all(records, heads, signer=None):
     return out
 
 
+def authority_failures(records, authority, app_roles=None):
+    """§7.13: alarm_rule records re-checked against ref.v_dam_reviewer_authority at signed_ts. Returns (errors, warns)."""
+    probs = rule_flag_authority_problems(records, authority, app_roles)
+    return [p for p in probs if p["severity"] == "error"], [p for p in probs if p["severity"] != "error"]
+
+
 def main():
     a = _common.args()
     spark = _common.spark()
@@ -41,10 +48,17 @@ def main():
     for v in res:
         print(json.dumps({k: v.get(k) for k in ("dam_id", "chain_id", "records", "heads_checked", "ok", "reason",
                                                  "first_broken_seq", "detail")}, default=str))
+    authority = [r.asDict() for r in spark.sql(
+        f"SELECT dam_id, principal, CAST(granted_ts AS STRING) AS granted_ts, CAST(revoked_ts AS STRING) AS revoked_ts "
+        f"FROM {a.catalog}.ref.v_dam_reviewer_authority").collect()]
+    errors, warns = authority_failures(records, authority)     # no app-role source in UC yet (module doc)
+    for p in errors + warns:
+        print(json.dumps(p, default=str))
     bad = [v for v in res if not v["ok"]]
-    if bad:
-        raise SystemExit(f"{len(bad)} reviewer chain(s) failed verification: "
-                         + ", ".join(f"{v['dam_id']}:{v['reason']}@{v['first_broken_seq']}" for v in bad))
+    if bad or errors:
+        raise SystemExit(f"{len(bad)} reviewer chain(s) failed verification, {len(errors)} alarm_rule authority "
+                         "error(s): " + ", ".join([f"{v['dam_id']}:{v['reason']}@{v['first_broken_seq']}" for v in bad]
+                                                  + [f"{p['dam_id']}:{p['code']}@{p['chain_seq']}" for p in errors]))
 
 
 if __name__ == "__main__":

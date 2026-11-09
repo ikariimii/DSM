@@ -29,7 +29,9 @@ import json
 from dam_safety.inclinometer.corrections import canonical_value
 
 GENESIS = "0" * 64
-ACTION_TYPES = ("bias_review", "data_correction_review", "alarm_ack", "alarm_close")
+# v1.6 §7.13 (app 6f7a1d5 RULE_FLAG_ACTION_TYPES): live alarm-rule cdse_ack_required edits, subject_type 'alarm_rule'
+RULE_FLAG_ACTION_TYPES = ("alarm_rule_flag_propose", "alarm_rule_flag_apply", "alarm_rule_flag_reject")
+ACTION_TYPES = ("bias_review", "data_correction_review", "alarm_ack", "alarm_close") + RULE_FLAG_ACTION_TYPES
 CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
                 "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
                 "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",

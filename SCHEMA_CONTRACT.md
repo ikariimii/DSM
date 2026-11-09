@@ -474,6 +474,20 @@ name and fail loudly if it does not resolve.
   (`dam_id`, `chain_id`), never a caller-supplied head; records without any head row are `head_missing` (never ok,
   as in the app); every stored head is a checkpoint, so tail truncation, a rewound head, a forged `head_hash` and a
   head for another chain are `head_mismatch` from the first stored head on.
+- **Upgrade (§7.13):** then run `sql/migrations/v1_6_003_alarm_rule_flag.sql` (idempotent; pre-check in its header)
+  **before** `dam_uc_setup` and before the extract carries any `alarm_rule` row. UNVERIFIED (MIGRATION-2c).
+- **§7.13 live alarm-rule flag edits (app 6f7a1d5).** `audit.review_record` accepts `subject_type = 'alarm_rule'`
+  with `decision` propose | apply | reject and `action_type` `alarm_rule_flag_propose` | `_apply` | `_reject`
+  (engine `audit_chain.RULE_FLAG_ACTION_TYPES`); every chained record needs a non-blank `comment` (rationale). The row
+  CHECKs cover shape only, never who signed (no applier != proposer CHECK). Authority is checked by the engine
+  (`dam_safety.rule_flag_authority`, run in the `verify_review_chain` task, which fails on any error) against
+  `ref.v_dam_reviewer_authority` at `signed_ts`: apply / reject need CDSE authority for that `dam_id`; propose needs
+  the dam's CDSE, dam_admin or admin; dam_admin / admin may never apply or reject; the CDSE may apply directly or apply
+  their own proposal. Codes: apply_not_cdse, apply_by_admin, apply_cdse_of_other_dam, reject_not_cdse,
+  reject_by_admin, reject_cdse_of_other_dam, propose_no_authority, propose_role_unverified (warn),
+  apply_proposal_missing, reject_proposal_missing, cdse_level_without_authority, rationale_missing,
+  decision_action_mismatch. App roles are not in UC (the app records review_level 'engineer' for admins), so admin
+  vs engineer is only distinguishable when an app-role source is passed; the job passes none yet.
 
 ## 9. Sign-off
 | Party | Agent | Status |

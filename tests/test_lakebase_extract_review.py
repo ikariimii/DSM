@@ -124,10 +124,10 @@ def test_v16_subject_decision_check_adds_alarm_event_acknowledge_close():
 
 def test_v16_chain_check():
     import sqlite3
-    cols = ("dam_id", "subject_type", "decision") + REQUIRED_CHAIN
+    cols = ("dam_id", "subject_type", "decision", "comment") + REQUIRED_CHAIN
     db = sqlite3.connect(":memory:")
     db.execute(f"CREATE TABLE t ({', '.join(cols)}, CHECK ({_check('ck_review_record_chain')}))")
-    good = dict(dam_id="D", subject_type="alarm_event", decision="close", action_type="alarm_close",
+    good = dict(dam_id="D", subject_type="alarm_event", decision="close", comment="why", action_type="alarm_close",
                 original_value="{}", corrected_value="{}", chain_id="D", chain_seq=1, prev_hash="0" * 64,
                 record_hash="f" * 64)
     ins = lambda **kw: db.execute(f"INSERT INTO t VALUES ({','.join('?' * len(cols))})",
