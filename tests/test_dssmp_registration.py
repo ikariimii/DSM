@@ -199,7 +199,7 @@ def test_migration_and_down_headers():
     assert "RESTORE" in down and "PRE-CHECK" in down
     code = "\n".join(l for l in down.splitlines() if not l.startswith("--"))
     assert not re.search(r"DROP COLUMN|DROP TABLE|DELETE|UPDATE|TRUNCATE", code)
-    assert code.count("DROP CONSTRAINT IF EXISTS") == 4
+    assert code.count("DROP CONSTRAINT IF EXISTS") == 5   # + ck_dam_cdse_assignment (table and rows stay)
 
 
 # ---------------------------------------------------------------- the MERGE, executed on PostgreSQL (>= 15)

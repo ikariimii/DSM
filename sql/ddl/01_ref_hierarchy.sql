@@ -109,6 +109,35 @@ CREATE TABLE IF NOT EXISTS ref.sensor (
 
 -- Project membership used by the row filter fallback (10_security.sql). This table must
 -- NOT itself carry a row filter (UC: a filter may not reference a filtered table).
+-- v1.7 (Genie 2026-11-09 (B), migration v1_7_003): SCD2 history of each dam's designated CDSE, written only by the
+-- dam_ref_publish task apply_cdse_assignments from signed chain records (dam_safety.cdse_assignment):
+-- dam_cdse_assign (platform admin, first CDSE, dam not live) and dam_cdse_change_propose + dam_cdse_change_approve
+-- (platform admin proposes, the current CDSE approves). ref.v_dam_reviewer_authority (10b) reads it; ref.dam.cdse_id
+-- is kept equal to the open row. One open row (effective_to NULL) per dam.
+CREATE TABLE IF NOT EXISTS ref.dam_cdse_assignment (
+  assignment_id        STRING NOT NULL COMMENT 'approval_record_hash of the applying record; legacy:<dam_id> for a pre-v1.7 ref.dam.cdse_id',
+  dam_id               STRING NOT NULL,
+  cdse_id              STRING NOT NULL COMMENT 'the designated CDSE principal (email)',
+  effective_from       TIMESTAMP COMMENT 'signed_ts of the applying record (NULL only on the legacy row)',
+  effective_to         TIMESTAMP COMMENT 'signed_ts of the record that replaced it; NULL = current',
+  action_type          STRING NOT NULL COMMENT 'dam_cdse_assign | dam_cdse_change_approve | dam_cdse_legacy',
+  reason_code          STRING NOT NULL,
+  assigned_by          STRING COMMENT 'signer of the applying record (platform admin for assign, the previous CDSE for a change)',
+  proposed_by          STRING COMMENT 'signer of the dam_cdse_change_propose record (change only)',
+  proposal_record_hash STRING COMMENT 'record_hash of the dam_cdse_change_propose record (change only)',
+  approval_record_hash STRING COMMENT 'audit.review_record.record_hash of the dam_cdse_assign / dam_cdse_change_approve record',
+  CONSTRAINT pk_dam_cdse_assignment PRIMARY KEY (assignment_id)
+);
+ALTER TABLE ref.dam_cdse_assignment DROP CONSTRAINT IF EXISTS ck_dam_cdse_assignment;
+ALTER TABLE ref.dam_cdse_assignment ADD CONSTRAINT ck_dam_cdse_assignment CHECK (
+  length(trim(cdse_id)) > 0 AND length(trim(reason_code)) > 0
+  AND action_type IN ('dam_cdse_assign', 'dam_cdse_change_approve', 'dam_cdse_legacy')
+  AND (effective_to IS NULL OR effective_from IS NULL OR effective_to > effective_from)
+  AND (action_type = 'dam_cdse_legacy'
+       OR (effective_from IS NOT NULL AND approval_record_hash IS NOT NULL AND assignment_id = approval_record_hash))
+  AND (action_type <> 'dam_cdse_change_approve' OR (proposal_record_hash IS NOT NULL AND proposed_by IS NOT NULL))
+  AND (action_type <> 'dam_cdse_legacy' OR (approval_record_hash IS NULL AND effective_to IS NOT NULL)));
+
 CREATE TABLE IF NOT EXISTS ref.project_membership (
   principal   STRING NOT NULL COMMENT 'user email or account group name',
   dam_id      STRING NOT NULL COMMENT '* = all dams',

@@ -23,6 +23,7 @@ except ImportError:        # executed as a script by spark_python_task
 from dam_safety.audit_chain import (CHAIN_FIELDS_V2, PROD_CATALOGS, SignerConfigError, load_signer,
                                     require_signer_for_catalog, verify_with_chain_heads)
 from dam_safety.catalog import normalize_catalog
+from dam_safety.cdse_assignment import evaluate as cdse_evaluate
 from dam_safety.dssmp_authority import dssmp_authority_problems
 from dam_safety.rule_flag_authority import (SECOND_APPROVER_SETTING, rule_flag_authority_problems,
                                             second_approver_required)
@@ -67,13 +68,21 @@ def verify_all(records, heads, signer=None, catalog=None):
 
 
 def authority_failures(records, authority, app_roles=None, require_second_approver=None, threshold_dssmp=None,
-                       dssmp_versions=None):
+                       dssmp_versions=None, cdse_context=None):
     """§7.13: alarm_rule records re-checked against ref.v_dam_reviewer_authority at signed_ts. Returns (errors, warns).
     require_second_approver None = read CDSE_FLAG_REQUIRE_SECOND_APPROVER from the environment (app parsing).
     threshold_dssmp / dssmp_versions: DSSMP version of each applied rule must be approved and in effect (v1.7)."""
     probs = rule_flag_authority_problems(records, authority, app_roles, require_second_approver,
                                          threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions)
     probs += dssmp_authority_problems(records, authority, app_roles)      # v1.7 dssmp_version propose/approve/reject
+    if any(r.get("subject_type") == "dam" for r in records):              # v1.7 (B) CDSE bootstrap / change
+        if cdse_context is None:
+            probs += [{"review_id": r.get("review_id"), "dam_id": r.get("dam_id"), "chain_seq": r.get("chain_seq"),
+                       "action_type": r.get("action_type"), "code": "dam_cdse_context_missing", "severity": "error",
+                       "detail": "no assignment / admin / dam-state context: dam CDSE records cannot be checked"}
+                      for r in records if r.get("subject_type") == "dam"]
+        else:
+            probs += cdse_evaluate(records, *cdse_context, require_second_approver=require_second_approver)[0]
     return [p for p in probs if p["severity"] == "error"], [p for p in probs if p["severity"] != "error"]
 
 
@@ -110,8 +119,11 @@ def main():
     dssmp_versions = {r.dssmp_version_id: r.asDict() for r in spark.sql(
         f"SELECT dssmp_version_id, dam_id, status, effective_from, effective_to FROM {a.catalog}.ref.dssmp_version"
     ).collect()}
+    from apply_cdse_assignments import load_context
+    cdse_context = load_context(spark, a.catalog)[1:6]   # (assignments, legacy, admins, dam_state, memberships)
     errors, warns = authority_failures(records, authority, require_second_approver=second,
-                                       threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions)
+                                       threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions,
+                                       cdse_context=cdse_context)
     for p in errors + warns:
         print(json.dumps(p, default=str))
     bad = [v for v in res if not v["ok"]]

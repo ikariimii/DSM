@@ -125,7 +125,16 @@ resources:
         pause_status: UNPAUSED
       max_concurrent_runs: 1
       tasks:
+        - task_key: apply_cdse_assignments    # v1.7 (B): signed dam CDSE records -> ref.dam_cdse_assignment first
+          environment_key: pg
+          spark_python_task:
+            python_file: ../src/jobs/apply_cdse_assignments.py
+            parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
+                          "--lb_branch", "production", "--lb_endpoint", "primary", "--job_run_id", "{{job.run_id}}",
+                          "--cdse_flag_require_second_approver", "${var.cdse_flag_require_second_approver}" ]
         - task_key: load_dssmp_registrations
+          depends_on: [ { task_key: apply_cdse_assignments } ]
+          run_if: ALL_DONE
           environment_key: pg
           spark_python_task:
             python_file: ../src/jobs/load_dssmp_registrations.py

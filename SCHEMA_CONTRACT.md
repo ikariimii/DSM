@@ -524,6 +524,32 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   (`dam_safety.dssmp_check`): `dssmp_missing`, `dssmp_not_found`, `dssmp_other_dam`, `dssmp_draft`,
   `dssmp_superseded`, `dssmp_not_yet_effective`, `dssmp_status_unknown`.
 
+### 7.1d CDSE assignment and go-live readiness (v1.7; app SCHEMA_CONTRACT §7 item 20)
+
+- **Records** (audit.review_record, subject_type `dam`, subject_id = dam_id): `dam_cdse_assign` (decision `assign`),
+  `dam_cdse_change_propose` / `_approve` / `_reject` (`propose` / `approve` / `reject`); CHECK `ck_review_record_action`
+  (08 + v1_7_003). Engine `dam_safety.cdse_assignment` (app field names `new_cdse_id`, `change_reason_code`,
+  `proposal_id`, `previous_cdse_id`; reason codes `initial_appointment, resignation, retirement, reassignment,
+  incapacity, regulatory_direction, correction`): assign only by a platform admin (ADMIN on `'*'`), only while the dam
+  has no CDSE (assignment, legacy ref.dam.cdse_id or CDSE membership) and is not live (no ref.dam row = not live; else
+  live from the first threshold effective_from, or by status when unknown); a change is proposed by a platform admin
+  and approved or rejected by a current CDSE; self-approval refused only with CDSE_FLAG_REQUIRE_SECOND_APPROVER.
+- **History** `ref.dam_cdse_assignment` (01 + v1_7_003; `ck_dam_cdse_assignment`), assignment_id = approval
+  record_hash; a dam's pre-existing ref.dam.cdse_id is closed by a `dam_cdse_legacy` row at its first change.
+- **Load** job `dam_ref_publish` task `apply_cdse_assignments` (first task): reads `dam_app.dam_cdse_outbox` pending
+  rows, plans with `dam_safety.cdse_load` and writes the history (one conditional MERGE, stale re-check inside),
+  ref.dam.cdse_id (MERGE from the open assignment), one `audit.event_log` row per outcome (`CDSE_ASSIGNMENT_LOAD`,
+  idempotent) and the outbox outcome. Refusal reason_codes: `cdse_exists`, `cdse_stale`, `approval_record_missing`,
+  `approval_record_wrong_action`, `approval_record_mismatch`, `approval_not_authorized`, `invalid_value`,
+  `missing_required_column`. A row whose approval record is not yet in UC stays pending for 1 h. `cdse_stale`: the
+  designated CDSE now is not among the row's `previous_cdse_id` (the app joins every current authority principal
+  with ","), or the MERGE re-check found the replaced assignment closed.
+- **Authority** `ref.v_dam_reviewer_authority`: source `DAM_CDSE_ASSIGNMENT` (granted/revoked = effective_from/to);
+  `DAM_CDSE_ID` only for a dam without assignment rows; `MEMBERSHIP_CDSE` unchanged.
+- **Readiness** `ref.v_dam_go_live_readiness` (dam_id, ready, has_current_dssmp, blocking_reason
+  `no_cdse_in_reviewer_authority`), one row per dam in ref.dam or ref.dam_cdse_assignment;
+  `ref.assert_dam_go_live_ready(dam_id)` returns true or raises `dam_go_live_not_ready: ...` (any dam_id).
+
 ### 7.2 Ownership of writes (v1.1, app Q11)
 The app writes Lakebase only. `dam_lakebase_extract` is the **only** writer of `ALARM_ACK` rows to `audit.event_log`;
 the alarm evaluator is the **only** writer of `ACK` transitions (dedup tag `lakebase_ack:<event_id>`). `certified`/`submitted`

@@ -53,7 +53,7 @@ EXPECTED_CKS = {
     "v1_6_003_alarm_rule_flag.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
     "v1_7_001_cdse_ack.sql": set(),
     "v1_7_002_canon_v2.sql": {"ck_review_record_canon"},
-    "v1_7_003_dssmp_registration.sql": {"ck_dssmp_version_status", "ck_dssmp_version_approval",
+    "v1_7_003_dssmp_registration.sql": {"ck_dssmp_version_status", "ck_dssmp_version_approval", "ck_dam_cdse_assignment",
                                         "ck_review_record_subject_decision", "ck_review_record_chain"},
 }
 # The only data change any migration may make: backfilling a column the same file just added, marked by a

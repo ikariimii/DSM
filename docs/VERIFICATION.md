@@ -276,3 +276,20 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   (twice), rollback (twice) keeps all rows and removes the publisher grant, re-apply and re-run of 001 converge),
   tests/test_lakebase_publisher_role.py (dam_cdse_outbox added to every outbox case).
 - UNVERIFIED: not run on a Lakebase instance.
+
+## CDSE-ASSIGNMENT (app SCHEMA_CONTRACT §7 item 20; readiness view / function)
+
+- CHECKs (08 + v1_7_003): subject `dam` with the 4 actions; `ck_dam_cdse_assignment`. Engine
+  `dam_safety.cdse_assignment`, planner `dam_safety.cdse_load`, job `src/jobs/apply_cdse_assignments.py` (outbox-driven,
+  audited per outcome in audit.event_log), `verify_review_chain` replays the same engine (`dam_cdse_*` errors).
+  Views `ref.v_dam_reviewer_authority` (rewired), `ref.v_dam_go_live_readiness`, function `ref.assert_dam_go_live_ready`.
+- Rollback: v1_7_003 `_down.sql` drops only `ck_dam_cdse_assignment` (the history table and every row stay; Delta
+  RESTORE is the fallback); the view / function are CREATE OR REPLACE (re-run the previous 10b to roll back).
+- Evidence (local): tests/test_cdse_assignment.py 46 tests: engine (bootstrap, change, reject, membership CDSE,
+  not-live, second-approver switch), every refusal code, load plan (`cdse_exists`, `cdse_stale` incl. MERGE re-check,
+  deferral), audit rows; PG 17.11: the assignment MERGE + dam sync, the audit INSERT run twice -> 1 row, the app's
+  outbox row read and updated by the job's own SQL as the publisher login on a fresh lakebase/001; SQLite renders of
+  the views with the job's SQL.
+- UNVERIFIED: never run on Databricks (Delta MERGE / SQL UDF raise_error / grants for the run_as principal) or a
+  Lakebase instance; the readiness function on a live dam.
+

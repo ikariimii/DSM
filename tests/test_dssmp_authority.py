@@ -119,7 +119,7 @@ def _check(name):
 
 
 COLS = ("subject_type", "decision", "comment", "action_type", "original_value", "corrected_value", "chain_id",
-        "chain_seq", "prev_hash", "record_hash", "dam_id")
+        "chain_seq", "prev_hash", "record_hash", "dam_id", "subject_id")   # subject_id: v1.7 'dam' branch
 
 
 def _db():
@@ -132,7 +132,7 @@ def _db():
 def _row(**kw):
     base = dict(subject_type="dssmp_version", decision="approve", comment="why", action_type="dssmp_version_approve",
                 original_value="{}", corrected_value="{}", chain_id=D, chain_seq=1, prev_hash="0" * 64,
-                record_hash="1" * 64, dam_id=D)
+                record_hash="1" * 64, dam_id=D, subject_id="DS-2")
     base.update(kw)
     return tuple(base[c] for c in COLS)
 

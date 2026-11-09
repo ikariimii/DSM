@@ -35,7 +35,10 @@ def _view_body(src, name):
 def test_view_exposes_only_cdse_authority_columns_and_rows():
     body = _view_body(V10B, "ref.v_dam_reviewer_authority")
     assert "upper(m.role) = 'CDSE'" in body and "m.dam_id <> '*'" in body
-    assert body.count("ref.dam_row_filter(") == 2                     # both branches filtered per dam
+    assert body.count("ref.dam_row_filter(") == 3                     # every branch filtered per dam
+    assert "FROM ref.dam_cdse_assignment a" in body and "a.effective_from AS granted_ts" in body \
+        and "a.effective_to AS revoked_ts" in body                     # v1.7 (B): history decides at decision time
+    assert "NOT EXISTS (SELECT 1 FROM ref.dam_cdse_assignment x WHERE x.dam_id = d.dam_id)" in body
     assert "SELECT *" not in body and "m.granted_by" not in body       # no other columns leak
 
 
@@ -68,6 +71,8 @@ def _sqlite(caller_groups):
                         lambda d: int("dam-portfolio-all" in caller_groups or f"dam-{d}-members" in caller_groups))
     con.executescript("""
       CREATE TABLE dam (dam_id TEXT, cdse_id TEXT);
+      CREATE TABLE dam_cdse_assignment (assignment_id TEXT, dam_id TEXT, cdse_id TEXT, effective_from TEXT,
+                                        effective_to TEXT);
       CREATE TABLE project_membership (principal TEXT, dam_id TEXT, role TEXT, granted_by TEXT,
                                        granted_ts TEXT, revoked_ts TEXT);
       CREATE TABLE review_record (review_id TEXT, dam_id TEXT, subject_type TEXT, subject_id TEXT, review_level TEXT,
@@ -82,7 +87,7 @@ def _sqlite(caller_groups):
         ('d2deputy@x.org', 'D2', 'CDSE', 'a', '2025-01-01 00:00:00', NULL);
     """)
     sub = lambda b: (b.replace("ref.dam_row_filter(", "dam_row_filter(").replace("ref.project_membership", "project_membership")  # noqa: E731
-                     .replace("ref.dam ", "dam ").replace("ref.v_dam_reviewer_authority", "v_dam_reviewer_authority")
+                     .replace("ref.dam_cdse_assignment", "dam_cdse_assignment").replace("ref.dam ", "dam ").replace("ref.v_dam_reviewer_authority", "v_dam_reviewer_authority")
                      .replace("audit.review_record", "review_record").replace("CAST(NULL AS TIMESTAMP)", "NULL"))
     con.execute("CREATE TEMP VIEW v_dam_reviewer_authority AS " + sub(_view_body(V10B, "ref.v_dam_reviewer_authority")))
     con.execute("CREATE TEMP VIEW v_review_level_check AS " + sub(_view_body(V11, "gold.v_review_level_check")))

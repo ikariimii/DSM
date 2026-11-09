@@ -124,7 +124,7 @@ def _check(name):
 
 
 COLS = ("dam_id", "subject_type", "decision", "comment", "action_type", "original_value", "corrected_value",
-        "chain_id", "chain_seq", "prev_hash", "record_hash", "reviewer_id")
+        "chain_id", "chain_seq", "prev_hash", "record_hash", "reviewer_id", "subject_id")
 
 
 @pytest.fixture()
@@ -138,7 +138,7 @@ def db():
 def _ins(db, **kw):
     good = dict(dam_id=D, subject_type="alarm_rule", decision="apply", comment="why", action_type="alarm_rule_flag_apply",
                 original_value="{}", corrected_value="{}", chain_id=D, chain_seq=1, prev_hash="0" * 64,
-                record_hash="f" * 64, reviewer_id=ADMIN)
+                record_hash="f" * 64, reviewer_id=ADMIN, subject_id="TH-1")
     good.update(kw)
     db.execute(f"INSERT INTO t VALUES ({','.join('?' * len(COLS))})", tuple(good[c] for c in COLS))
 

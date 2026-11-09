@@ -7,24 +7,64 @@
 -- Per-dam scope: the explicit ref.dam_row_filter(dam_id) predicate (same function as the table row filter, evaluated
 -- for the querying user, dynamic-view pattern), so a dam-<id>-members user sees only that dam's CDSE rows.
 -- '*' (all-dam) memberships and non-CDSE roles are excluded. Rows include revoked grants (granted_ts / revoked_ts) so
--- authority can be checked AT REVIEW TIME (gold.v_review_level_check). ref.dam.cdse_id has no history: it is the
--- CURRENT CDSE (UNVERIFIED for past reviews; VERIFICATION.md ROLE-LEVEL).
+-- authority can be checked AT REVIEW TIME (gold.v_review_level_check). v1.7 (B): the named CDSE comes from the SCD2
+-- history ref.dam_cdse_assignment (granted_ts / revoked_ts = effective_from / effective_to, so the assignment current
+-- at decision time decides); ref.dam.cdse_id (no history) is used only for a dam that has no assignment row yet
+-- (pre-v1.7 dams; source DAM_CDSE_ID).
 -- ⚠ UNVERIFIED on a workspace: dynamic-view evaluation of is_account_group_member() inside ref.dam_row_filter, and the
 --   interaction with the ref.dam table row filter / ABAC policy when read through a view (view owner = setup SP).
 USE CATALOG IDENTIFIER(:catalog);
 
 CREATE OR REPLACE VIEW ref.v_dam_reviewer_authority
-COMMENT 'CDSE reviewer authority per dam: ref.dam.cdse_id + CDSE memberships only; per-dam filtered (SCHEMA_CONTRACT 2)'
+COMMENT 'CDSE reviewer authority per dam: ref.dam_cdse_assignment history (legacy ref.dam.cdse_id only for a dam with no assignment) + CDSE memberships; per-dam filtered (SCHEMA_CONTRACT 2)'
 AS
+SELECT a.dam_id, a.cdse_id, a.cdse_id AS principal, 'DAM_CDSE_ASSIGNMENT' AS authority_source,
+       a.effective_from AS granted_ts, a.effective_to AS revoked_ts
+FROM ref.dam_cdse_assignment a
+WHERE ref.dam_row_filter(a.dam_id)
+UNION ALL
 SELECT d.dam_id, d.cdse_id, d.cdse_id AS principal, 'DAM_CDSE_ID' AS authority_source,
        CAST(NULL AS TIMESTAMP) AS granted_ts, CAST(NULL AS TIMESTAMP) AS revoked_ts
 FROM ref.dam d
 WHERE d.cdse_id IS NOT NULL AND ref.dam_row_filter(d.dam_id)
+  AND NOT EXISTS (SELECT 1 FROM ref.dam_cdse_assignment x WHERE x.dam_id = d.dam_id)
 UNION ALL
 SELECT m.dam_id, d.cdse_id, m.principal, 'MEMBERSHIP_CDSE' AS authority_source, m.granted_ts, m.revoked_ts
 FROM ref.project_membership m
 JOIN ref.dam d ON d.dam_id = m.dam_id
 WHERE upper(m.role) = 'CDSE' AND m.dam_id <> '*' AND ref.dam_row_filter(m.dam_id);
+
+-- v1.7 (c) go-live readiness (Genie-approved as designed): a dam is ready only when ref.v_dam_reviewer_authority has
+-- a CDSE row for it that is in force now. Read through the authority view, so a caller who cannot see the dam gets
+-- ready = false (fail closed). has_current_dssmp is informational (the app's go-live already requires a DSSMP version).
+-- Rows: every dam in ref.dam plus every dam that only has an assignment (a not-live dam has no ref.dam row yet, app
+-- §7 item 20). assert_dam_go_live_ready works for any dam_id, listed or not (unknown -> raises).
+-- Use: SELECT ref.assert_dam_go_live_ready('<dam_id>') raises dam_go_live_not_ready (UNVERIFIED on a workspace).
+CREATE OR REPLACE VIEW ref.v_dam_go_live_readiness
+COMMENT 'Go-live readiness per dam: ready = a CDSE in force in ref.v_dam_reviewer_authority (v1.7)'
+AS
+SELECT d.dam_id,
+       EXISTS (SELECT 1 FROM ref.v_dam_reviewer_authority v WHERE v.dam_id = d.dam_id
+               AND (v.granted_ts IS NULL OR v.granted_ts <= current_timestamp())
+               AND (v.revoked_ts IS NULL OR v.revoked_ts > current_timestamp())) AS ready,
+       EXISTS (SELECT 1 FROM ref.dssmp_version s WHERE s.dam_id = d.dam_id AND s.status = 'approved'
+               AND s.effective_from <= current_timestamp()
+               AND (s.effective_to IS NULL OR s.effective_to > current_timestamp())) AS has_current_dssmp,
+       CASE WHEN EXISTS (SELECT 1 FROM ref.v_dam_reviewer_authority v WHERE v.dam_id = d.dam_id
+                         AND (v.granted_ts IS NULL OR v.granted_ts <= current_timestamp())
+                         AND (v.revoked_ts IS NULL OR v.revoked_ts > current_timestamp()))
+            THEN NULL ELSE 'no_cdse_in_reviewer_authority' END AS blocking_reason
+FROM (SELECT dam_id FROM ref.dam UNION SELECT dam_id FROM ref.dam_cdse_assignment) d;
+
+CREATE OR REPLACE FUNCTION ref.assert_dam_go_live_ready(p_dam_id STRING)
+RETURNS BOOLEAN
+COMMENT 'true when the dam is go-live ready; otherwise raises dam_go_live_not_ready (v1.7 (c))'
+RETURN CASE WHEN EXISTS (SELECT 1 FROM ref.v_dam_reviewer_authority v WHERE v.dam_id = p_dam_id
+                         AND (v.granted_ts IS NULL OR v.granted_ts <= current_timestamp())
+                         AND (v.revoked_ts IS NULL OR v.revoked_ts > current_timestamp()))
+            THEN true
+            ELSE raise_error(concat('dam_go_live_not_ready: ', coalesce(p_dam_id, '<null>'),
+                                    ' has no CDSE in force in ref.v_dam_reviewer_authority')) END;
 
 -- Grants: USE SCHEMA ref + SELECT on the view + (v1.7) SELECT on ref.dssmp_version (row-filtered per dam, 10a_*), per dam
 -- group only. Bundles/SQL files cannot loop, so the block is
