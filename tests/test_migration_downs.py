@@ -120,8 +120,9 @@ def _strip_comments(sql):
 PG_RAISE_ERROR = """CREATE OR REPLACE FUNCTION pg_temp.raise_error(msg text) RETURNS text LANGUAGE plpgsql AS
 $$ BEGIN RAISE EXCEPTION '%', msg; END $$;
 """
-# Databricks regex [\p{Cf}\s] emulated in PostgreSQL ARE: whitespace + the common format (Cf) code points.
-PG_CF_CLASS = r"'[[:space:]\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]'"
+# Databricks regex [\p{Cf}\p{Z}\s] emulated in PostgreSQL ARE: whitespace + the common format (Cf) code points + every
+# separator (Z: Zs spaces U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000; Zl U+2028; Zp U+2029).
+PG_CF_CLASS = r"'[[:space:]\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]'"
 USE = "USE CATALOG IDENTIFIER(:catalog);"
 
 
@@ -132,7 +133,7 @@ def _lit(v):
 def _bind_guard(code, catalog, session, resolved, break_glass):
     """Bind the QA-057 parameters. current_catalog() is `session` before USE CATALOG and `resolved` after it;
     resolved=None simulates a catalog name that does not exist (USE CATALOG fails)."""
-    code = code.replace("'[\\\\p{Cf}\\\\s]', ''", PG_CF_CLASS + ", '', 'g'")
+    code = code.replace("'[\\\\p{Cf}\\\\p{Z}\\\\s]', ''", PG_CF_CLASS + ", '', 'g'")
     code = code.replace("(:catalog,", f"({_lit(catalog)}::text,").replace(":break_glass", f"{_lit(break_glass)}::text")
     if USE in code:
         before, after = code.split(USE, 1)

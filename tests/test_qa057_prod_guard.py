@@ -274,3 +274,69 @@ def test_runner_always_binds_both_parameters():
     for cat in ("dam_dev", "dam_test"):
         assert set(rm.decide(cat, DOWN)["parameters"]) == {"catalog", "break_glass"}
     assert set(rm.decide("dam_prod", DOWN, REASON)["parameters"]) == {"catalog", "break_glass"}
+
+
+# ---------------------------------------------------------------- QA-058 residual: Zs / separator whitespace, every layer
+ZS = {"nbsp": "\u00a0", "ideographic": "\u3000", "figure": "\u2007", "en_quad": "\u2000", "hair": "\u200a",
+      "narrow_nbsp": "\u202f", "math": "\u205f", "ogham": "\u1680", "line_sep": "\u2028", "para_sep": "\u2029"}
+EDGE = [p + "dam_prod" + s for p, s in [(z, "") for z in ZS.values()] + [("", z) for z in ZS.values()]]
+INTERNAL = ["dam_" + z + "prod" for z in ZS.values()] + ["dam" + z + "_prod" for z in ("\u00a0", "\u3000", "\u2007")]
+
+
+@pytest.mark.parametrize("cat", EDGE, ids=[f"edge{i}" for i in range(len(EDGE))])
+def test_zs_around_prod_normalizes_to_prod_in_python_and_the_runner_refuses(cat):
+    from dam_safety.catalog import normalize_catalog
+    assert normalize_catalog(cat) == "dam_prod"                    # NFKC -> U+0020 (or isspace), then strip()
+    with pytest.raises(rm.Refused) as e:
+        rm.decide(cat, os.path.join(ROOT, DOWN))
+    assert e.value.code == 3 and "QA-057" in str(e.value)
+
+
+@pytest.mark.parametrize("cat", INTERNAL, ids=[f"int{i}" for i in range(len(INTERNAL))])
+def test_zs_inside_the_name_is_refused_in_python_and_by_the_runner(cat):
+    from dam_safety.catalog import normalize_catalog
+    with pytest.raises(ValueError):
+        normalize_catalog(cat)                                     # remaining internal whitespace: not allowlisted
+    assert _main("--catalog", cat, "--file", DOWN) == 2
+    assert _main("--catalog", cat, "--file", DOWN, "--break-glass-prod", REASON) == 2
+
+
+ZS_SQL_CASES = ([(c, "dam_dev", None, "", "QA-057: down script refused on dam_prod") for c in EDGE + INTERNAL]
+                + [(z * 3, "dam_dev", None, "", "QA-057: down script refused: the catalog parameter is missing")
+                   for z in ZS.values()]
+                + [("\u3000dam_dev\u00a0", "dam_dev", "dam_dev", "", None)])
+
+
+@live
+@pytest.mark.parametrize("f", DOWNS)
+def test_every_downs_guard_strips_zs_whitespace(f, tmp_path):
+    """The SQL layer removes \\p{Z} anywhere (Databricks: UNVERIFIED; PG emulation: PG_CF_CLASS), so NBSP / U+3000 /
+    U+2007 ... around or inside 'dam_prod' is refused on the PARAMETER, before USE CATALOG; separators only = missing."""
+    sql = open(os.path.join(MIG, f)).read()
+    guard = tmd._strip_comments(sql[:sql.index("AS qa057_guard_resolved;") + len("AS qa057_guard_resolved;")])
+    for i, (cat, session, resolved, bg, expect) in enumerate(ZS_SQL_CASES):
+        p = tmp_path / f"z{i}.sql"
+        p.write_text(tmd.PG_RAISE_ERROR + tmd._bind_guard(guard, cat, session, resolved, bg)
+                     + "\nSELECT 'reached-the-body';")
+        r = tmd._psql(PG, f=str(p))
+        if expect is None:
+            assert r.returncode == 0 and "reached-the-body" in r.stdout, (f, i, r.stderr)
+        else:
+            assert r.returncode != 0 and f"ERROR:  {expect}" in r.stderr and "reached-the-body" not in r.stdout, \
+                (f, i, ascii(cat), r.stderr)
+
+
+@live
+@pytest.mark.parametrize("cat", ["dam_prod\u00a0", "\u3000dam_prod", "dam\u2007_prod"])
+def test_runbook_probe_refuses_zs_lookalikes(cat, tmp_path):
+    p = tmp_path / "p.sql"
+    p.write_text(tmd.PG_RAISE_ERROR + tmd._bind_guard(tmd._strip_comments(open(PROBE).read()), cat, "dam_dev",
+                                                      "dam_dev", ""))
+    r = tmd._psql(PG, f=str(p))
+    assert r.returncode != 0 and "ERROR:  QA-057" in r.stderr and "reached-the-body" not in r.stdout, r.stderr
+
+
+def test_every_down_and_the_probe_use_the_z_class():
+    for f in [os.path.join(MIG, d) for d in DOWNS] + [PROBE]:
+        s = open(f).read()
+        assert s.count("'[\\\\p{Cf}\\\\p{Z}\\\\s]', ''") == 2 and "'[\\\\p{Cf}\\\\s]'" not in s, f

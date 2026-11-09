@@ -545,3 +545,18 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   and trigger kept), re-up and 001 re-run converge. Note: re-running the older v1_7_005 migration hands the table
   back to the app (it predates v1_7_010); run the later migrations after it (the validator reports it otherwise).
   UNVERIFIED: on Lakebase.
+
+## QA058-ZS (low residual, 2026-11-09: Zs / separator whitespace in the catalog name, every layer)
+
+- Python (src/dam_safety/catalog.normalize_catalog, used by the jobs and tools/run_migration.py): NO change needed,
+  so no tools/patches file for app/backend/catalog.py. NFKC maps U+00A0, U+2000-U+200A (incl. U+2007), U+202F,
+  U+205F, U+3000 to U+0020; str.strip() then removes them at the ends (and U+1680, U+2028, U+2029, which NFKC keeps
+  but str.isspace() covers), so 'dam_prod' with a leading / trailing separator IS dam_prod (guarded as prod: runner
+  exit 3); any separator left inside the name makes it not allowlisted (refused, runner exit 2). Tested for 10 Zs /
+  Zl / Zp characters at either end and inside (tests/test_qa057_prod_guard.py).
+- SQL (first statement of all 7 sql/migrations/*_down.sql + tools/verify/qa057_guard_probe.sql): the class is now
+  `[\p{Cf}\p{Z}\s]` (Java regex `\s` alone does not match Unicode spaces), removed anywhere in :catalog before the
+  prod / empty checks; a name of separators only = "catalog parameter is missing or empty". PG emulation
+  (tests/test_migration_downs.PG_CF_CLASS) adds the same code points; every down is executed with the edge, internal
+  and separator-only cases. UNVERIFIED on Databricks: `\p{Z}` in regexp_replace (Java regex; runbook probe P8 can check
+  it with catalog = 'dam_prod' + U+00A0).

@@ -20,10 +20,11 @@
 -- whose default catalog is dam_prod is refused for ANY catalog value without break_glass. It is checked on the :catalog parameter (format characters and
 -- whitespace removed, lower-cased) and again on current_catalog() right after USE CATALOG (the resolved catalog; a
 -- look-alike name that does not resolve fails USE CATALOG). UNVERIFIED on Databricks: named parameter markers in a
--- sql_task file, raise_error inside SELECT CASE, the \p{Cf} regex class, current_catalog().
-SELECT CASE WHEN coalesce(regexp_replace(:catalog, '[\\p{Cf}\\s]', ''), '') = ''
+-- sql_task file, raise_error inside SELECT CASE, the \p{Cf} / \p{Z} regex classes (Zs spaces such as U+00A0, U+3000,
+-- U+2000-U+200A, U+202F, U+205F are removed like format characters; QA-058 residual), current_catalog().
+SELECT CASE WHEN coalesce(regexp_replace(:catalog, '[\\p{Cf}\\p{Z}\\s]', ''), '') = ''
             THEN raise_error('QA-057: down script refused: the catalog parameter is missing or empty')
-            WHEN (lower(regexp_replace(:catalog, '[\\p{Cf}\\s]', '')) = 'dam_prod' OR current_catalog() = 'dam_prod')
+            WHEN (lower(regexp_replace(:catalog, '[\\p{Cf}\\p{Z}\\s]', '')) = 'dam_prod' OR current_catalog() = 'dam_prod')
                  AND coalesce(:break_glass, '') <> 'BREAK_GLASS_PROD'
             THEN raise_error('QA-057: down script refused on dam_prod without the break_glass parameter') END AS qa057_guard;
 USE CATALOG IDENTIFIER(:catalog);
