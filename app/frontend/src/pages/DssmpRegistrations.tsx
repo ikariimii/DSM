@@ -22,7 +22,9 @@ function Status({ r }: { r: any }) {
       {o && <span className={`badge ${OUTBOX_BADGE[o.status] || "muted"}`}>DA load {o.status}{o.processed_at ? ` ${utc(o.processed_at)}` : ""}</span>}
       {r.status === "approved" && !r.ref && <span className="badge bad">not in ref.dssmp_version yet — go-live blocked</span>}
       {r.ref && <span className={`badge ${r.ref.status === "approved" && !r.ref.effective_to ? "ok" : "bad"}`}>ref {r.ref.status}{r.ref.effective_to ? ` until ${utc(r.ref.effective_to)}` : ""}</span>}
-      {o && (o.reason_code || o.message) && <div className="error">Load job rejected it: <b>{o.reason_code || "no reason_code"}</b> {o.message}</div>}
+      {(o?.volume_uri || r.ref?.volume_uri) && <div className="muted">volume: {o?.volume_uri || r.ref?.volume_uri}</div>}
+      {o && o.reason_code === "dssmp_document_hash_mismatch" && <div className="error">Load job rejected it: <b>dssmp_document_hash_mismatch</b> — the document does not match its sha256 ({r.document_sha256?.slice(0, 12)}…). Register the version again with the correct document or hash.{o.message ? ` (${o.message})` : ""}</div>}
+      {o && o.reason_code !== "dssmp_document_hash_mismatch" && (o.reason_code || o.message) && <div className="error">Load job rejected it: <b>{o.reason_code || "no reason_code"}</b> {o.message}</div>}
     </span>
   );
 }
@@ -86,7 +88,7 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
   const [msg, setMsg] = useState<string | null>(null);
   if (!damId) return <div className="muted">Enter the dam id in step 1 first.</div>;
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
-  const submit = async () => {
+  const submit = async (direct = false) => {
     setErr(null); setMsg(null);
     try {
       const b: any = { ...f, version_no: Number(f.version_no) };
@@ -95,7 +97,7 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
         b.document_id = up.document_id; delete b.document_uri; delete b.document_sha256;
         setMsg(`uploaded ${up.filename} (${up.size_bytes} bytes, sha256 ${up.sha256})`);
       }
-      await api(`/api/dams/${damId}/dssmp-registrations`, { method: "POST", body: b });
+      await api(`/api/dams/${damId}/dssmp-registrations${direct ? "/direct" : ""}`, { method: "POST", body: b });
       setF({ version_no: 1 }); setFile(null); reload();
     } catch (e: any) { setErr(e.message); }
   };
@@ -104,7 +106,7 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
       <p className="muted">Register the DSSMP version this dam's thresholds are set under. The dam's CDSE must approve it; the data layer then loads it into ref.dssmp_version. <b>Go-live is blocked</b> until it is loaded there as approved and not superseded.</p>
       <Loading error={error} loading={loading} />
       {data && <ProvisionalNote policy={data.approval_policy} />}
-      {data && data.can_propose && !disabled && (
+      {data && (data.can_propose || data.can_decide) && !disabled && (
         <div className="form">
           <label>DSSMP version id * <input value={f.dssmp_version_id || ""} onChange={set("dssmp_version_id")} placeholder={`DSSMP-${damId}-2026`} /></label>
           <label>Version no. * (integer ≥ 1) <input type="number" min={1} step={1} value={f.version_no} onChange={set("version_no")} /></label>
@@ -115,9 +117,11 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
           <label>Document sha256 * (64 hex, required with a URI) <input value={f.document_sha256 || ""} onChange={set("document_sha256")} disabled={!!file} /></label>
           <label>…or upload the document (max 20 MB; sha256 computed by the server) <input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
           <label>Rationale * <input value={f.rationale || ""} onChange={set("rationale")} /></label>
-          <button onClick={submit}>Submit for CDSE approval</button>
+          {data.can_propose && <button onClick={() => submit(false)}>Submit for CDSE approval</button>}
+          {data.can_register_directly && <button onClick={() => submit(true)}>Register directly (CDSE: approve now)</button>}
+          {data.can_decide && !data.can_register_directly && <div className="muted"><span className="badge warn">provisional</span> A second approver is required: the CDSE cannot register directly; a dam_admin or admin must propose it.</div>}
         </div>)}
-      {data && !data.can_propose && <div className="muted">Only a dam_admin of {damId} or a platform admin can register a version (for a dam that is not live yet: a platform admin).</div>}
+      {data && !data.can_propose && !data.can_decide && <div className="muted">Only a dam_admin of {damId} or a platform admin can register a version (for a dam that is not live yet: a platform admin).</div>}
       {msg && <div className="muted">{msg}</div>}
       {err && <div className="error">{err}</div>}
       {data && <RegistrationList damId={damId} rows={data.registrations} canDecide={data.can_decide} policy={{ ...data.approval_policy, me: me?.email }} onDone={reload} />}

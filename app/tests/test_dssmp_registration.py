@@ -238,7 +238,7 @@ def test_golive_blocked_by_ref_state(k, row, code):
 
 def test_golive_new_dam_end_to_end_and_not_loaded_fails_closed(k, monkeypatch):
     did = _new_draft(k)
-    assert _codes(k, did) == (422, {"dssmp_not_found"})                     # missing
+    assert _codes(k, did) == (422, {"dssmp_not_found", "cdse_authority_missing"})  # missing, no CDSE yet
     _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE                                   # DA exposes the new dam's CDSE
     rid = propose(k, dam="NEW", user=ADMIN, vid="DSSMP-NEW-2026", version_no=1).json()["registration_id"]
     v = k.post(f"/api/onboarding/drafts/{did}/validate").json()
@@ -257,11 +257,81 @@ def test_golive_new_dam_end_to_end_and_not_loaded_fails_closed(k, monkeypatch):
     assert k.post(f"/api/onboarding/drafts/{did}/golive").status_code == 200
 
 
-def test_superseded_dssmp_blocks_flag_apply(k):
+def test_superseded_dssmp_blocks_flag_apply_naming_version_and_rules(k):
+    on_old = sorted(t["threshold_id"] for t in _an(k).thresholds("CRD") if t["dssmp_version_id"] == "DSSMP-CRD-2026")
+    assert "CRD-PZ-2-T1" in on_old and len(on_old) > 1
     decide(k, propose(k).json()["registration_id"])                          # CRD-2026 now superseded
     r = k.post("/api/dams/CRD/alarm-rules/CRD-PZ-2-T1/cdse-flag", user=CDSE,
                json={"cdse_ack_required": True, "rationale": "x"})
-    assert r.status_code == 409 and "dssmp_superseded" in r.text
+    assert r.status_code == 409, r.text
+    d = r.json()["detail"]
+    assert d["code"] == "dssmp_superseded" and d["superseded_dssmp_version_id"] == "DSSMP-CRD-2026"
+    assert d["affected_rules"] == on_old and d["threshold_id"] == "CRD-PZ-2-T1"
+    assert "must be re-versioned" in d["message"] and "DSSMP-CRD-2026" in d["message"]
+    assert _st(k).chain_rows("CRD")[-1]["action_type"] == "dssmp_version_approve"   # nothing recorded for the flag
+    # no grace path: a proposal approval hits the same 409
+    pid = k.post("/api/dams/CRD/alarm-rules/CRD-PZ-2-T1/cdse-flag/proposals", user=DAMADMIN,
+                 json={"cdse_ack_required": True, "rationale": "x"}).json()["proposal_id"]
+    r = k.post(f"/api/dams/CRD/alarm-rules/proposals/{pid}/approve", user=CDSE, json={"rationale": "ok"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "dssmp_superseded"
+
+
+# ------------------------------------------------------------------ CDSE direct registration (Genie)
+@pytest.mark.parametrize("user", [DAMADMIN, ADMIN, ENG, VIEWER, OTHER_CDSE])
+def test_only_the_dams_cdse_registers_directly(k, user):
+    assert k.post(REGS.format(d="CRD") + "/direct", user=user, json=body()).status_code in (401, 403)
+    assert _st(k).dssmp_registrations("CRD") == [] and _st(k).chain_rows("CRD") == []
+
+
+def test_cdse_direct_registration(k, monkeypatch):
+    assert k.post(REGS.format(d="CRD") + "/direct", user=CDSE, json=body(rationale=" ")).status_code == 422
+    monkeypatch.setattr(_an(k), "load_dssmp_outbox", lambda row: ("pending", None, None))
+    assert k.get(REGS.format(d="CRD"), user=CDSE).json()["can_register_directly"] is True
+    r = k.post(REGS.format(d="CRD") + "/direct", user=CDSE, json=body())
+    assert r.status_code == 200, r.text
+    (rec,) = _st(k).chain_rows("CRD")                                        # ONE approve record, no proposal
+    assert (rec["action_type"], rec["decision"], rec[ac.ACTOR_ROLE_FIELD]) == (
+        "dssmp_version_approve", "approve", "cdse,engineer")
+    reg = _st(k).dssmp_registration(r.json()["registration_id"])
+    assert reg["status"] == "approved" and reg["proposed_by"] == reg["decided_by"] == CDSE
+    (o,) = _st(k).dssmp_outbox("CRD")
+    assert (o["status"], o["approval_record_hash"], o["approved_at"], o["proposed_by"]) == (
+        "pending", rec["record_hash"], rec["signed_ts"], CDSE)
+    import sys
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[2] / "src"
+    if (src / "dam_safety" / "dssmp_authority.py").is_file():
+        sys.path.insert(0, str(src))
+        try:
+            from dam_safety.dssmp_authority import dssmp_authority_problems
+        finally:
+            sys.path.remove(str(src))
+        assert dssmp_authority_problems([rec], [{"principal": CDSE, "dam_id": "CRD"}]) == []
+    assert k.post(REGS.format(d="CRD") + "/direct", user=CDSE, json=body()).status_code == 409   # already registered
+
+
+def test_direct_registration_refused_with_second_approver(demo_settings):
+    c = _client(demo_settings, True)
+    r = c.post(REGS.format(d="CRD") + "/direct", user=CDSE, json=body())
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "second_approver_required"
+    assert c.get(REGS.format(d="CRD"), user=CDSE).json()["can_register_directly"] is False
+    assert _st(c).chain_rows("CRD") == []
+    assert propose(c).status_code == 200                                     # dam_admin proposal still works
+
+
+# ------------------------------------------------------------------ go-live readiness: CDSE authority row
+def test_golive_needs_the_new_dams_cdse_in_the_authority_view(k, monkeypatch):
+    did = _new_draft(k)
+    _ref(k)                                                                  # DSSMP loaded, approved
+    status, codes = _codes(k, did)
+    assert status == 422 and codes == {"cdse_authority_missing"}
+    def boom(dam_id):
+        raise RuntimeError("view unreadable")
+    _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE
+    monkeypatch.setattr(_an(k), "cdse_principals", boom)                     # fail closed on a lookup error
+    assert _codes(k, did) == (422, {"cdse_authority_missing"})
+    monkeypatch.undo()
+    assert k.post(f"/api/onboarding/drafts/{did}/golive").status_code == 200
 
 
 # ------------------------------------------------------------------ cross-check with the DA engine (86993d0)
@@ -291,3 +361,16 @@ def test_records_pass_the_engine_dssmp_authority_check(k):
     # engine view of a forged approve by the dam_admin: refused
     bad = dict(rows[1], reviewer_id="demo:" + DAMADMIN, reviewer_email=DAMADMIN, actor_app_role="dam_admin")
     assert {p["code"] for p in dssmp_authority_problems([rows[0], bad], authority)} == {"dssmp_approve_by_admin"}
+
+
+def test_document_hash_mismatch_rejection_is_explained(k, monkeypatch):
+    did = _new_draft(k)
+    _an(k).d["dam_cdse"]["NEW"] = NEW_CDSE
+    monkeypatch.setattr(_an(k), "load_dssmp_outbox",
+                        lambda row: ("rejected_invalid", "dssmp_document_hash_mismatch", "sha256 differs"))
+    r = k.post(REGS.format(d="NEW") + "/direct", user=NEW_CDSE,
+               json=body(vid="DSSMP-NEW-2026", version_no=1))
+    assert r.json()["outbox"]["reason_code"] == "dssmp_document_hash_mismatch"
+    v = k.post(f"/api/onboarding/drafts/{did}/validate").json()
+    assert any("dssmp_document_hash_mismatch" in i["message"] and "register the version again" in i["message"]
+               for i in v["issues"])

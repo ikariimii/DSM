@@ -205,6 +205,8 @@ def register_dssmp(c, dam_id="NEW", dssmp_version_id="DSSMP-NEW-2026", status="a
     an = c.tc.app.state.analytics_factory(None)
     an.d.setdefault("dssmp_versions", []).append({"dssmp_version_id": dssmp_version_id, "dam_id": dam_id,
                                                   "version_no": 1, "status": status})
+    # go-live readiness also needs the dam's CDSE in ref.v_dam_reviewer_authority (cdse_authority_missing)
+    an.d.setdefault("dam_cdse", {}).setdefault(dam_id, f"cdse.{dam_id.lower()}@demo.local")
 
 
 def _fill(c, did, d, user=ADMIN, dssmp=True):

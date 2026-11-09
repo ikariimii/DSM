@@ -469,6 +469,25 @@ def dssmp_problems(lookup, dam_id: str, ids, now: datetime | None = None) -> dic
     return {i: f"{f['code']}: {f['message']}" for i, f in dssmp_findings(lookup, dam_id, ids, now).items()}
 
 
+def cdse_authority_issues(lookup, dam_id: str | None) -> list[dict]:
+    """Go-live readiness: the dam must have a CDSE row in ref.v_dam_reviewer_authority (fail closed: an empty result,
+    a missing lookup or a lookup error all block, code cdse_authority_missing). `lookup(dam_id)` is
+    analytics.cdse_principals (live mode: the view). App-side stand-in until the DA's ref go-live readiness object
+    lands (SCHEMA_CONTRACT §7 item 19) - then switch this one function to it."""
+    if not dam_id:
+        return []
+    try:
+        found = [p for p in (lookup(dam_id) or []) if p and str(p).strip()] if lookup else []
+        why = "" if lookup else " (no lookup available)"
+    except Exception as e:  # noqa: BLE001 - never treat an unreadable view as 'has a CDSE'
+        found, why = [], f" (ref.v_dam_reviewer_authority unreadable: {type(e).__name__})"
+    if found:
+        return []
+    return [issue("users", "error", f"cdse_authority_missing: dam {dam_id} has no CDSE row in "
+                  f"ref.v_dam_reviewer_authority{why}; the data layer must register the dam's CDSE before go-live",
+                  dam_id, "cdse_authority_missing")]
+
+
 def _pending_note(dam_id: str, i: str | None, registrations, outbox) -> str:
     """Why an id is not (yet) in ref.dssmp_version, from the app's own registration / outbox state."""
     regs = [r for r in registrations or [] if r.get("dam_id") == dam_id and (i is None or r["dssmp_version_id"] == i)]
@@ -483,6 +502,9 @@ def _pending_note(dam_id: str, i: str | None, registrations, outbox) -> str:
     if ob is None or ob["status"] == "pending":
         return (f" - registration {r['dssmp_version_id']} is approved and waiting for the DA load job "
                 "(approved-but-not-loaded fails closed)")
+    if ob["status"].startswith("rejected") and ob.get("reason_code") == "dssmp_document_hash_mismatch":
+        return (f" - the DA load job rejected outbox {ob['outbox_id']}: dssmp_document_hash_mismatch (the document "
+                "does not match its document_sha256); register the version again with the correct document")
     if ob["status"].startswith("rejected"):
         return (f" - the DA load job rejected outbox {ob['outbox_id']}: {ob.get('reason_code') or 'no reason_code'}"
                 f" {ob.get('message') or ''}".rstrip())

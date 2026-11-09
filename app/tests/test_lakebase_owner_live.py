@@ -159,3 +159,39 @@ def test_init_fails_closed_when_owner_table_is_not_provisioned(lakebase, sabotag
     with pytest.raises(RuntimeError, match="re-run lakebase/001_app_schema.sql") as e:
         _store(app)
     assert needle in str(e.value)
+
+
+# ------------------------------------------------------------------ DSSMP outbox (agreed contract) vs the DA table
+@pytest.mark.xfail(strict=True, raises=RuntimeError, reason="DA 86993d0 lakebase/001 dssmp_registration_outbox uses requested_by/"
+                   "applied_at/no reason_code; Genie: the agreed contract wins and the DA is migrating. Remove this "
+                   "marker when lakebase/001 matches (SCHEMA_CONTRACT §7 item 19)")
+def test_app_role_inserts_a_contract_outbox_row_with_the_approve_record(lakebase):
+    from backend import audit_chain as ac
+    _, app = lakebase
+    st, pool = _store(app)
+    try:
+        base = {"review_id": "RS-live-dssmp", "dam_id": "CRD", "subject_type": "dssmp_version", "subject_id": "D-LIVE",
+                "review_level": "cdse", "decision": "approve", "comment": "ok", "reviewer_id": "u",
+                "reviewer_pe_license": None, "signed_ts": "2026-11-09T17:00:00.000000+00:00",
+                "signature_hash": "c" * 64, "action_type": "dssmp_version_approve", "reviewer_email": "cdse@x",
+                "reviewer_sub": None, "original_value": "{}", "corrected_value": "{}",
+                ac.ACTOR_ROLE_FIELD: "cdse", ac.CANON_FIELD: 2}
+
+        def outbox(q, rec):
+            st.insert_dssmp_outbox(q, {
+                "outbox_id": "DSO-live", "dam_id": "CRD", "dssmp_version_id": "D-LIVE", "version_no": 2,
+                "effective_from": "2026-11-01T00:00:00Z", "change_reason": "r", "source_ref": "s",
+                "document_uri": "u", "document_sha256": "ab" * 32, "proposed_by": "p@x", "approved_by": "cdse@x",
+                "approved_at": rec["signed_ts"], "approval_record_hash": rec["record_hash"], "status": "pending",
+                "reason_code": None, "message": None, "processed_at": None})
+        try:
+            rec = st.append_chained("CRD", ac.GENESIS, ac.finalizer(base, ac.NoopSigner()), also_row=outbox)
+        except Exception as e:  # only the known column mismatch is the expected failure
+            if type(e).__name__ == "UndefinedColumn":
+                assert st.chain_rows("CRD") == []          # rolled back with the chain record: nothing half-written
+                raise RuntimeError(f"outbox columns differ from the agreed contract: {e}") from e
+            raise
+        (o,) = st.dssmp_outbox(outbox_id="DSO-live")
+        assert o["approval_record_hash"] == rec["record_hash"] and o["status"] == "pending"
+    finally:
+        pool.close()

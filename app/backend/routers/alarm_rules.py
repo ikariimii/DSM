@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from .. import audit_chain as ac
 from ..config import approval_policy
 from ..deps import Ctx, analytics, ctx, require, store
-from ..onboarding import PUBLISH_REQUIRED, dssmp_problems  # ref.threshold NOT NULL columns carried from version N into N+1
+from ..onboarding import PUBLISH_REQUIRED, dssmp_findings  # ref.threshold NOT NULL columns carried from version N into N+1
 from . import alarms as alarms_router
 from . import signoffs as sg
 
@@ -102,10 +102,22 @@ def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationa
         raise HTTPException(409, f"{tid} v{_version(rule)} lacks the NOT NULL ref.threshold column(s) "
                                  f"{', '.join(missing)}; version {_version(rule) + 1} cannot be published without them "
                                  "(no defaults are invented) - the DA must backfill the current version first")
-    bad = dssmp_problems(an.dssmp_versions, dam_id, [rule["dssmp_version_id"]])
-    if bad:  # copied unchanged into N+1, so it must still be a ref.dssmp_version row of this dam (fail closed)
-        raise HTTPException(409, f"{tid} v{_version(rule)}: {'; '.join(bad.values())}; version "
-                                 f"{_version(rule) + 1} cannot be published")
+    found = dssmp_findings(an.dssmp_versions, dam_id, [rule["dssmp_version_id"]])
+    if found:  # copied unchanged into N+1, so it must still be a usable ref.dssmp_version row of this dam (fail closed)
+        f = next(iter(found.values()))
+        msg = (f"{tid} v{_version(rule)}: {f['code']}: {f['message']}; version {_version(rule) + 1} cannot be "
+               "published")
+        if f["code"] != "dssmp_superseded":
+            raise HTTPException(409, msg)
+        old = str(rule["dssmp_version_id"]).strip()
+        affected = sorted(t["threshold_id"] for t in an.thresholds(dam_id)
+                          if str(t.get("dssmp_version_id") or "").strip() == old)
+        # No grace path (Genie): the rules set under a superseded DSSMP version must be re-versioned first.
+        raise HTTPException(409, {"code": "dssmp_superseded", "superseded_dssmp_version_id": old,
+                                  "threshold_id": tid, "affected_rules": affected,
+                                  "message": f"{msg}. DSSMP version {old} is superseded: the {len(affected)} rule(s) of "
+                                             f"{dam_id} set under it ({', '.join(affected)}) must be re-versioned under "
+                                             "the dam's current DSSMP version before this flag can change"})
     now = sg.now_utc()
     new_version = _version(rule) + 1
     insert = {k: v for k, v in rule.items() if k not in DERIVED}

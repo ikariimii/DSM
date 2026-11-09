@@ -736,4 +736,32 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Proposer rule:** the engine (86993d0) lets the dam's CDSE propose or approve directly, with no proposal.
       The app requires a dam_admin/admin proposal followed by a CDSE decision; that is a subset the engine accepts.
       Genie: should the app also let the CDSE register directly? That would also give new dams a path without the
-      platform admin.
+      platform admin. **Decided (Genie): yes, see below.**
+    - **Outbox decision (Genie): the AGREED contract wins.** The app keeps its INSERT on the contract columns
+      (`proposed_by`, `reason_code`, `processed_at`; status pending|loaded|rejected). The DA migrates
+      `lakebase/001` / `dssmp_registration.OUTBOX_COLS` to it. Until then the live-PG approve INSERT fails against
+      86993d0's table (expected).
+    - **CDSE direct registration (Genie):** `POST /api/dams/{dam}/dssmp-registrations/direct`, the dam's CDSE only
+      (fail closed), same body as propose, rationale required. In ONE transaction it writes ONE
+      `dssmp_version_approve` record with NO prior proposal (the engine's "CDSE may approve directly";
+      `corrected_value.proposed_by` = the CDSE, `direct: true`), the registration (approved) and ONE pending outbox
+      row. It mirrors the cdse_ack_required direct apply. With `CDSE_FLAG_REQUIRE_SECOND_APPROVER` on it returns
+      403 `second_approver_required` (PROVISIONAL), same as the flag edits. dam_admin / admin still only propose.
+      The CDSE may also upload the document.
+    - **Go-live readiness: CDSE authority (fail closed).** Go-live (and validate) returns 422 `cdse_authority_missing`
+      (step `users`) when the dam has no CDSE row in `ref.v_dam_reviewer_authority`: empty result, missing lookup or
+      lookup error. It is implemented app-side against the view in ONE function, `onboarding.cdse_authority_issues`.
+      **DA: switch it to your ref go-live readiness object once it lands** (send its name and shape).
+    - **Flag-apply 409 `dssmp_superseded`:** the body is `{code, superseded_dssmp_version_id, threshold_id,
+      affected_rules: [threshold_id of every current rule of the dam on that version], message}` and states that
+      the rules must be re-versioned. There is no grace path. Other codes keep the plain 409 text.
+    - **Load results shown in the UI:** `volume_uri` is shown when the DA's load adds it (outbox or `ref.dssmp_version`;
+      the app does not SELECT it from UC until the DA confirms which table carries it). `reason_code
+      dssmp_document_hash_mismatch` is a load rejection with its own message: re-register with the correct
+      document.
+
+## 8. Contract items for v1.8 (logged, not implemented)
+
+1. **DSSMP title and revision date columns (Genie).** `ref.dssmp_version` / the outbox carry no title or
+   revision-date column in v1.7 (`version_no` and `effective_from` stand in). v1.8: the DA adds `title TEXT` and
+   `revision_date DATE` to `ref.dssmp_version` and the outbox contract; the app then collects them in wizard step 2.
