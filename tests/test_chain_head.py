@@ -122,7 +122,7 @@ def test_extract_reads_heads_in_the_same_snapshot_and_after_records():
     src = open(os.path.join(ROOT, "src", "jobs", "lakebase_extract.py")).read()
     assert "conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ" in src
     main = src[src.index("def main"):]
-    assert main.index("audit.review_record\")") < main.index("FROM review_chain_head")
+    assert main.index("audit.review_record\")") < main.index("cur.execute(LEGACY_HEAD_SQL)") < main.index("cur.execute(HEAD_LOG_SQL)")
     jobs = open(os.path.join(ROOT, "resources", "jobs.yml")).read()
     assert '"--job_run_id", "{{job.run_id}}"' in jobs and "python_file: ../src/jobs/verify_review_chain.py" in jobs
 

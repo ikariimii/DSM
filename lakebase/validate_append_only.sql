@@ -21,7 +21,7 @@
 -- or no default ACL giving it SELECT on future tables of dam_lakebase_owner.
 WITH cfg AS (SELECT nullif(current_setting('dam.app_role', true), '') AS app,
                     'dam_lakebase_owner'::text AS own),
-guarded(t) AS (VALUES ('exceedance_status'), ('review_signoff'), ('manual_reading')),
+guarded(t) AS (VALUES ('exceedance_status'), ('review_signoff'), ('manual_reading'), ('review_chain_head_log')),
 gt AS (SELECT g.t, c.oid, c.relowner FROM guarded g
        LEFT JOIN pg_class c ON c.relname = g.t AND c.relnamespace = to_regnamespace('dam_app')),
 want(t, tg, kind) AS (SELECT t, 't_noupd_' || t, 'row' FROM guarded UNION ALL SELECT t, 't_notrunc_' || t, 'truncate' FROM guarded),

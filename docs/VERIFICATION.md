@@ -307,3 +307,25 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   the CHECKs, the reversion row through the publisher's MERGE (twice), the affected-rules view.
 - UNVERIFIED: Databricks SQL table function syntax for `ref.dssmp_affected_rules`; never run on a workspace.
 
+## LB-HEAD-LOG (residual a: tamper-resistant Lakebase chain head, v1.7)
+
+- `lakebase/001_app_schema.sql`: `review_chain_head_log (chain_id, chain_seq, head_hash, updated_ts, PK (chain_id,
+  chain_seq))`, owned by `dam_lakebase_owner`, guard triggers t_noupd_/t_notrunc_ ENABLE ALWAYS, app role SELECT +
+  INSERT only, seeded once from the legacy `review_chain_head`. The validator treats it like review_signoff.
+- Extract (`src/jobs/lakebase_extract.py`): current head per chain = highest chain_seq over the log and the legacy
+  table (log wins at equal seq), so a rewound / deleted legacy head cannot lower what audit.chain_head records.
+- App change for App Dev (NOT applied): `tools/patches/v17_chain_head_log_state.patch` (state.py: per-chain advisory
+  lock instead of SELECT ... FOR UPDATE, append a head row per record, read the latest head from the log, keep the
+  legacy row in step; app/tests/test_audit_chain.py updated for the new behaviour). Re-based on the app at 9000bf7
+  (append_chained now has also_row; OUTBOX_GUARDED): with the patch, a copy of the app suite passes (725) and the app
+  live test passes on the new 001.
+- Migration for an existing Lakebase: `lakebase/migrations/v1_7_006_chain_head_log.sql` (block byte-identical to 001,
+  owner, ENABLE ALWAYS guards, app SELECT + INSERT, extract SELECT); rollback `_down.sql` drops nothing (table, rows
+  and guards stay) and only revokes the app role's INSERT. Roll back the app patch first.
+- Evidence: tests/test_chain_head_log.py on local PostgreSQL 17.11 (also: 001@ea66581 + migration twice -> validator
+  0 rows, rollback twice keeps every head row and refuses app INSERT, re-apply restores it): the app role cannot UPDATE (rewind / forge),
+  DELETE, TRUNCATE, disable triggers, drop the table or use session_replication_role; even dam_lakebase_owner is
+  stopped by the guard; the patched StateStore, run as the app role, appends 0,1,2,3 and its chain verifies.
+- UNVERIFIED: Lakebase (advisory locks and hashtext() on Lakebase, the role model); an UNPATCHED app keeps working
+  (it only updates the legacy table) but its new heads are then not tamper-resistant until App Dev applies the patch;
+  a privileged actor who can drop the guard can still rewrite the log (same limit as review_signoff).

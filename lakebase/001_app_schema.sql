@@ -205,6 +205,26 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS review_signoff_chain_seq ON review_signoff (chain_id, chain_seq);
 CREATE TABLE IF NOT EXISTS review_chain_head (
   chain_id TEXT PRIMARY KEY, chain_seq INTEGER NOT NULL, head_hash TEXT NOT NULL, updated_ts TEXT NOT NULL);
+-- BEGIN v1_7_006 block (residual (a); identical in lakebase/migrations/v1_7_006_chain_head_log.sql)
+-- v1.7 residual (a): tamper-resistant chain head. review_chain_head above is app-owned and UPDATEd in place, so the
+-- app role could rewind it. review_chain_head_log is append-only like review_signoff (owner dam_lakebase_owner,
+-- guard triggers ENABLE ALWAYS, app SELECT + INSERT only): one row per advance, the current head of a chain is its
+-- highest chain_seq, PK (chain_id, chain_seq) forbids two heads at the same position. The patched app
+-- (tools/patches/v17_chain_head_log_state.patch) appends here instead of updating review_chain_head; the extract
+-- takes the highest chain_seq per chain over both tables (transition), preferring this table at equal seq.
+CREATE TABLE IF NOT EXISTS review_chain_head_log (
+  chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL CHECK (chain_seq >= 0),
+  head_hash TEXT NOT NULL CHECK (head_hash ~ '^[0-9a-f]{64}$'), updated_ts TEXT NOT NULL,
+  PRIMARY KEY (chain_id, chain_seq));
+-- seed from the legacy head once (idempotent): the deployer, not the app, writes this
+INSERT INTO review_chain_head_log (chain_id, chain_seq, head_hash, updated_ts)
+  SELECT chain_id, chain_seq, head_hash, updated_ts FROM review_chain_head WHERE head_hash ~ '^[0-9a-f]{64}$'
+  ON CONFLICT (chain_id, chain_seq) DO NOTHING;
+CREATE OR REPLACE TRIGGER t_noupd_review_chain_head_log BEFORE UPDATE OR DELETE ON review_chain_head_log
+  FOR EACH ROW EXECUTE FUNCTION forbid_mutation();
+CREATE OR REPLACE TRIGGER t_notrunc_review_chain_head_log BEFORE TRUNCATE ON review_chain_head_log
+  FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
+-- END v1_7_006 block
 ALTER TABLE app_user ADD COLUMN IF NOT EXISTS user_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
 
@@ -254,6 +274,7 @@ ALTER SCHEMA dam_app OWNER TO dam_lakebase_owner;
 ALTER TABLE exceedance_status OWNER TO dam_lakebase_owner;
 ALTER TABLE review_signoff OWNER TO dam_lakebase_owner;
 ALTER TABLE manual_reading OWNER TO dam_lakebase_owner;
+ALTER TABLE review_chain_head_log OWNER TO dam_lakebase_owner;
 ALTER TABLE extract_watermark OWNER TO dam_lakebase_owner;
 ALTER TABLE ref_change_publication OWNER TO dam_lakebase_owner;
 ALTER TABLE onboarding_publication OWNER TO dam_lakebase_owner;
@@ -295,6 +316,8 @@ ALTER TABLE review_signoff ENABLE ALWAYS TRIGGER t_noupd_review_signoff,
   ENABLE ALWAYS TRIGGER t_notrunc_review_signoff;
 ALTER TABLE manual_reading ENABLE ALWAYS TRIGGER t_noupd_manual_reading,
   ENABLE ALWAYS TRIGGER t_notrunc_manual_reading;
+ALTER TABLE review_chain_head_log ENABLE ALWAYS TRIGGER t_noupd_review_chain_head_log,
+  ENABLE ALWAYS TRIGGER t_notrunc_review_chain_head_log;
 DO $$
 DECLARE
   r TEXT := nullif(current_setting('dam.app_role', true), '');
@@ -322,15 +345,16 @@ BEGIN
     FOR o IN SELECT c.oid::regclass AS rel FROM pg_class c
              WHERE c.relnamespace = 'dam_app'::regnamespace AND c.relkind IN ('r', 'p')
                AND c.relname NOT IN ('exceedance_status', 'review_signoff', 'manual_reading', 'extract_watermark',
+                                     'review_chain_head_log',
                                      'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
                                      'dam_cdse_outbox')
                AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = r) LOOP
       EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, r);
     END LOOP;
     EXECUTE format('GRANT USAGE, CREATE ON SCHEMA dam_app TO %I', r);
-    EXECUTE format('REVOKE ALL ON exceedance_status, review_signoff, manual_reading FROM %I', r);
-    EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I', r);
-    EXECUTE format('GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading TO %I', r);
+    EXECUTE format('REVOKE ALL ON exceedance_status, review_signoff, manual_reading, review_chain_head_log FROM %I', r);
+    EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading, review_chain_head_log FROM %I', r);
+    EXECUTE format('GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading, review_chain_head_log TO %I', r);
     EXECUTE format('GRANT USAGE ON SEQUENCE exceedance_status_id_seq, manual_reading_id_seq TO %I', r);
     EXECUTE format('REVOKE ALL ON ref_change_publication, onboarding_publication, dssmp_registration_outbox, '
                    'dam_cdse_outbox FROM %I', r);

@@ -37,7 +37,7 @@ def test_owner_role_owns_schema_guarded_tables_and_trigger_functions():
         assert f"ALTER TABLE {t} OWNER TO dam_lakebase_owner;" in code
         assert re.search(rf"ALTER TABLE {t} ENABLE ALWAYS TRIGGER t_noupd_{t},\s+ENABLE ALWAYS TRIGGER t_notrunc_{t};", code)
     assert "p.proname IN ('forbid_mutation', 'app_forbid_mutation')" in code
-    assert "GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading TO %I" in code
+    assert "GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading, review_chain_head_log TO %I" in code
     assert not re.search(r"GRANT [^;]*(UPDATE|DELETE|TRUNCATE|TRIGGER)[^;]*ON exceedance_status, review_signoff", code)
     # ownership work sits inside the single locked transaction
     assert code.index("pg_advisory_xact_lock(4702045)") < code.index("dam_lakebase_owner") < code.rindex("COMMIT;")

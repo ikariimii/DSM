@@ -49,7 +49,7 @@ def test_guard_function_is_idempotent_and_raises():
     code = _code(DDL)
     assert "CREATE OR REPLACE FUNCTION forbid_mutation() RETURNS trigger" in code
     assert re.search(r"RAISE EXCEPTION '% is append-only \(% refused\)', TG_TABLE_NAME, TG_OP", code)
-    assert "REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I" in code
+    assert "REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading, review_chain_head_log FROM %I" in code
 
 
 # ---------------------------------------------------------------- live PostgreSQL

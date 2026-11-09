@@ -203,6 +203,31 @@ CHAIN_HEAD_SOURCE = "APP:lakebase:review_chain_head"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
+# v1.7 residual (a): append-only head log (lakebase/001, owner-owned, app INSERT only). Current head per chain = the
+# highest chain_seq over the log and the legacy app-owned review_chain_head (transition: an unpatched app still
+# updates only the legacy table); at equal chain_seq the log wins. The app can no longer rewind what the log holds.
+HEAD_LOG_EXISTS_SQL = "SELECT to_regclass('review_chain_head_log') IS NOT NULL AS has_log"
+HEAD_LOG_SQL = ("SELECT DISTINCT ON (chain_id) chain_id, chain_seq, head_hash FROM review_chain_head_log "
+                "ORDER BY chain_id, chain_seq DESC")
+LEGACY_HEAD_SQL = "SELECT chain_id, chain_seq, head_hash FROM review_chain_head ORDER BY chain_id"
+
+
+def current_heads(legacy, log):
+    """Merge the two head sources: per chain the highest chain_seq; the log row wins at equal seq (a legacy row with
+    the same seq but a different hash is reported, and the log value is used)."""
+    best = {}
+    for src, rows in (("log", log or ()), ("legacy", legacy or ())):
+        for h in rows:
+            cid, seq = h["chain_id"], int(h["chain_seq"])
+            cur = best.get(cid)
+            if cur is None or seq > int(cur[1]["chain_seq"]):
+                best[cid] = (src, h)
+            elif seq == int(cur[1]["chain_seq"]) and str(h["head_hash"]) != str(cur[1]["head_hash"]):
+                print(f"WARN chain {cid} seq {seq}: legacy review_chain_head hash differs from review_chain_head_log; "
+                      "using the log")
+    return [h for _, (_, h) in sorted(best.items())]
+
+
 def chain_head_rows(lb_heads, uc_latest, computed_utc, job_run_id):
     """lb_heads: Lakebase review_chain_head rows {chain_id, chain_seq, head_hash}, read in the SAME REPEATABLE READ
     snapshot as the review_signoff rows of this run. uc_latest: {chain_id: (chain_seq, head_hash)} of the latest
@@ -287,14 +312,20 @@ def main():
         save("review_signoff", last_ts=next_watermark(rs, "signed_ts", wr["last_ts"]))
         # QA-045d: chain heads, appended AFTER the records (a failure in between leaves the head behind, which the
         # verifier reports until the next run; it never lets a head get ahead of its records)
-        cur.execute("SELECT chain_id, chain_seq, head_hash FROM review_chain_head ORDER BY chain_id")
+        cur.execute(LEGACY_HEAD_SQL)
+        legacy_heads = cur.fetchall()
+        cur.execute(HEAD_LOG_EXISTS_SQL)
+        log_heads = []
+        if cur.fetchone()["has_log"]:
+            cur.execute(HEAD_LOG_SQL)
+            log_heads = cur.fetchall()
         ch_tbl = f"{a.catalog}.audit.chain_head"
         latest = {}
         for x in spark.sql(f"SELECT chain_id, chain_seq, head_hash FROM (SELECT *, row_number() OVER (PARTITION BY "
                            f"dam_id, chain_id ORDER BY computed_utc DESC, chain_seq DESC, head_hash DESC) AS rn "
                            f"FROM {ch_tbl}) WHERE rn = 1").collect():
             latest[x.chain_id] = (int(x.chain_seq), x.head_hash)
-        heads = chain_head_rows(cur.fetchall(), latest, now, a.job_run_id)
+        heads = chain_head_rows(current_heads(legacy_heads, log_heads), latest, now, a.job_run_id)
         for h in heads:
             if h["chain_id"] in latest and h["chain_seq"] < latest[h["chain_id"]][0]:
                 print(f"WARN chain head of {h['chain_id']} moved backwards in Lakebase "

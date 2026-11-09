@@ -17,6 +17,8 @@ DDL_PATH = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 VALIDATOR = os.path.join(ROOT, "lakebase", "validate_append_only.sql")
 MIG = os.path.join(ROOT, "lakebase", "migrations", "v1_7_005_cdse_reversion_tables.sql")
 DOWN = os.path.join(ROOT, "lakebase", "migrations", "v1_7_005_cdse_reversion_tables_down.sql")
+# residual (a): the head log (v1_7_006) is part of the current 001, so the validator needs it too on an upgrade path
+MIG006 = os.path.join(ROOT, "lakebase", "migrations", "v1_7_006_chain_head_log.sql")
 STATE = os.path.join(ROOT, "app", "backend", "repos", "state.py")
 TABLES = ("dam_cdse_change", "dam_cdse_outbox", "rule_reversion_proposal")
 
@@ -131,7 +133,7 @@ def test_fresh_001_validates_and_the_app_writes_all_three_tables(env):
 def test_upgrade_by_migration_then_rollback_keeps_every_row_and_reapply_restores(env):
     r = _psql(env["conn"], "-f", env["old"], env_extra=env["opts"])
     assert r.returncode == 0, r.stderr
-    for m in (MIG, MIG):                                                    # idempotent
+    for m in (MIG, MIG, MIG006):                                            # idempotent
         r = _psql(env["conn"], "-f", m, env_extra=env["opts"])
         assert r.returncode == 0, r.stderr
     assert _valid(env) == ""
