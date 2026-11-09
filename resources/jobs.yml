@@ -147,7 +147,8 @@ resources:
           spark_python_task:
             python_file: ../src/jobs/publish_ref_changes.py
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
-                          "--lb_branch", "production", "--lb_endpoint", "primary" ]
+                          "--lb_branch", "production", "--lb_endpoint", "primary",
+                          "--cdse_flag_require_second_approver", "${var.cdse_flag_require_second_approver}" ]
       environments:
         - environment_key: pg
           spec:

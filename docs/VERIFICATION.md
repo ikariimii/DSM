@@ -293,3 +293,17 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - UNVERIFIED: never run on Databricks (Delta MERGE / SQL UDF raise_error / grants for the run_as principal) or a
   Lakebase instance; the readiness function on a live dam.
 
+## RULE-REVERSION (app SCHEMA_CONTRACT §7 item 21; (C) DSSMP re-versioning)
+
+- CHECKs (08 + v1_7_003, identical bodies): subject `rule_reversion`, the 3 actions. Engine
+  `dam_safety.rule_reversion_authority` (chain + publication checks), wired into `verify_review_chain` and
+  `ref_change_publish.plan` (job `publish_ref_changes` loads approval records and authority only when a re-version row
+  is pending). `ref.v_dssmp_affected_rules`, `ref.dssmp_affected_rules` (10b).
+- Rollback: v1_7_003 `_down.sql` restores the v1_6_003 CHECKs (pre-check now also lists `rule_reversion` records; it
+  never deletes them); the view / function are CREATE OR REPLACE objects without data (drop or re-run the previous
+  10b); Delta RESTORE is the data fallback. Publisher code rollback: pause dam_ref_publish first.
+- Evidence (local): tests/test_rule_reversion.py 25 tests: applied path, every refusal code, deferral, fail-closed
+  without context, flag rows unchanged, re-run idempotent, chain codes, verify job wiring, CHECKs in SQLite; PG 17.11:
+  the CHECKs, the reversion row through the publisher's MERGE (twice), the affected-rules view.
+- UNVERIFIED: Databricks SQL table function syntax for `ref.dssmp_affected_rules`; never run on a workspace.
+

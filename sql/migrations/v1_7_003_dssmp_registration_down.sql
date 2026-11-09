@@ -6,7 +6,7 @@
 -- and its files. PRE-CHECK before running it: restoring the v1_6_003
 -- review_record CHECKs fails (and changes nothing further) if any dssmp_version record exists, because
 -- audit.review_record is append-only and such records must never be deleted:
---   SELECT review_id FROM audit.review_record WHERE subject_type IN ('dssmp_version', 'dam');   -- must be empty, else stop
+--   SELECT review_id FROM audit.review_record WHERE subject_type IN ('dssmp_version', 'dam', 'rule_reversion');   -- must be empty, else stop
 -- ref.dam_cdse_assignment and its rows stay (only ck_dam_cdse_assignment is dropped); to point
 -- ref.v_dam_reviewer_authority back at ref.dam.cdse_id, re-run the previous sql/ddl/10b (git) - never drop the table.
 -- Code rollback caveat: pause dam_ref_publish first (a pre-v1.7.003 job does not know the new columns).

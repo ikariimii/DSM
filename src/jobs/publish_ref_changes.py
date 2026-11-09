@@ -9,6 +9,9 @@ existing version changed a rule field in place; then write each row's outcome ba
 rejected_stale | rejected_invalid, message, applied_at). Rows deferred behind an older pending row of the same rule stay
 pending. A crash between the MERGE and the outbox update is safe: the next run sees the version already current
 (already_applied -> applied) instead of a stale reject.
+§7 item 21: a row whose payload has cause 'dssmp_reversion' is authorised by its rule_reversion_approve record
+(audit.review_record, payload approval_record_hash) checked against ref.v_dam_reviewer_authority at signed_ts
+(dam_safety.rule_reversion_authority); the approval context is read only when such rows are pending.
 
 Job dam_ref_publish (resources/jobs.yml; its own job so it can get its own run_as). Runs as the job's run_as principal
 (the setup service principal; signed-in users never write ref.*). Lakebase: its login must be a member of the NOLOGIN
@@ -24,6 +27,8 @@ try:
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
 from dam_safety.ref_change_publish import KIND, merge_source_rows, merge_sql, payload_of, plan
+from dam_safety.rule_flag_authority import second_approver_required
+from dam_safety.rule_reversion_authority import CAUSE, SUBJECT
 from dam_safety.threshold_publish import assert_versions_immutable
 
 OUTBOX_SQL = ("SELECT pub_id, kind, dam_id, proposal_id, payload, requested_by, requested_at, status "
@@ -45,8 +50,27 @@ def outbox_updates(decisions, now_iso):
             for d in decisions if d["status"] is not None]
 
 
+SECOND_APPROVER_ARG = "cdse_flag_require_second_approver"
+
+
+def reversion_context(spark, catalog, pending, second):
+    """None unless a pending row is a DSSMP re-version; else the approval records (by record_hash) and authority."""
+    if not any(payload_of(r).get("cause") == CAUSE for r in pending):
+        return None
+    rr = spark.table(f"{catalog}.audit.review_record")
+    recs = [r.asDict() for r in rr.where((rr.subject_type == SUBJECT) & rr.record_hash.isNotNull()).collect()]
+    authority = [r.asDict() for r in spark.sql(
+        f"SELECT dam_id, principal, CAST(granted_ts AS STRING) AS granted_ts, CAST(revoked_ts AS STRING) AS revoked_ts "
+        f"FROM {catalog}.ref.v_dam_reviewer_authority").collect()]
+    return {"records_by_hash": {r["record_hash"]: r for r in recs}, "authority": authority,
+            "now": dt.datetime.now(dt.timezone.utc), "require_second_approver": second}
+
+
 def main():
-    a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"))
+    a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"),
+                     (SECOND_APPROVER_ARG, None))
+    second = second_approver_required({"CDSE_FLAG_REQUIRE_SECOND_APPROVER": getattr(a, SECOND_APPROVER_ARG)}
+                                      if getattr(a, SECOND_APPROVER_ARG) is not None else None)
     spark = _common.spark()
     from lakebase_extract import _connect          # same OAuth connection helper as the extract task
     from psycopg.rows import dict_row
@@ -62,7 +86,7 @@ def main():
         before = [r.asDict() for r in th.where(th.threshold_id.isin(tids)).collect()]
         current = [r for r in before if r.get("is_current")]
         dssmp = dssmp_index(spark, a.catalog)
-        decisions = plan(pending, current, dssmp)
+        decisions = plan(pending, current, dssmp, reversion_context(spark, a.catalog, pending, second))
         src = merge_source_rows(decisions)
         if src:
             schema = th.schema

@@ -9,7 +9,8 @@
 -- CDSE bootstrap / change (Genie (B)): the same CHECKs also accept subject_type 'dam' with action_type
 -- dam_cdse_assign (decision assign) | dam_cdse_change_propose (propose) | dam_cdse_change_approve (approve) |
 -- dam_cdse_change_reject (reject) (names: app SCHEMA_CONTRACT §7 item 20), subject_id
--- = dam_id; new table ref.dam_cdse_assignment (same DDL as sql/ddl/01) + ck_dam_cdse_assignment, written by the
+-- = dam_id; and (§7 item 21) subject_type 'rule_reversion' with rule_reversion_propose | _approve | _reject (decision
+-- propose | approve | reject, subject_id = proposal_id); new table ref.dam_cdse_assignment (same DDL as sql/ddl/01) + ck_dam_cdse_assignment, written by the
 -- dam_ref_publish task apply_cdse_assignments (dam_safety.cdse_assignment). Re-run dam_uc_setup afterwards so
 -- sql/ddl/10b re-creates ref.v_dam_reviewer_authority on the assignment history and ref.v_dam_go_live_readiness.
 -- ORDER: after v1_5_001 .. v1_7_002; before the first dam_ref_publish run and before any app dssmp_version record.
@@ -65,7 +66,7 @@ ALTER TABLE ref.dssmp_version ADD CONSTRAINT ck_dssmp_version_approval CHECK (
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
   subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction',
-                   'alarm_event', 'alarm_rule', 'dssmp_version', 'dam')
+                   'alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion')
   AND (subject_type <> 'incl_correction'
        OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
   AND (subject_type <> 'alarm_event'
@@ -76,16 +77,20 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
        OR (decision IN ('propose', 'approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
   AND (subject_type <> 'dam'
        OR (decision IN ('assign', 'propose', 'approve', 'reject') AND comment IS NOT NULL
-           AND length(trim(comment)) > 0)));
+           AND length(trim(comment)) > 0))
+  AND (subject_type <> 'rule_reversion'
+       OR (decision IN ('propose', 'approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_chain;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
-  (subject_type NOT IN ('alarm_event', 'alarm_rule', 'dssmp_version', 'dam') OR action_type IS NOT NULL)
+  (subject_type NOT IN ('alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion')
+   OR action_type IS NOT NULL)
   AND (action_type IS NULL OR (
     action_type IN ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close',
                     'alarm_rule_flag_propose', 'alarm_rule_flag_apply', 'alarm_rule_flag_reject',
                     'dssmp_version_propose', 'dssmp_version_approve', 'dssmp_version_reject',
                     'dam_cdse_assign', 'dam_cdse_change_propose', 'dam_cdse_change_approve',
-                    'dam_cdse_change_reject')
+                    'dam_cdse_change_reject',
+                    'rule_reversion_propose', 'rule_reversion_approve', 'rule_reversion_reject')
     AND original_value IS NOT NULL AND corrected_value IS NOT NULL AND chain_id IS NOT NULL
     AND chain_seq IS NOT NULL AND chain_seq >= 1 AND prev_hash IS NOT NULL AND record_hash IS NOT NULL
     AND chain_id = dam_id AND comment IS NOT NULL AND length(trim(comment)) > 0
@@ -105,7 +110,10 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
          OR (action_type = 'dam_cdse_change_approve' AND subject_type = 'dam' AND decision = 'approve'
              AND subject_id = dam_id)
          OR (action_type = 'dam_cdse_change_reject' AND subject_type = 'dam' AND decision = 'reject'
-             AND subject_id = dam_id)))));
+             AND subject_id = dam_id)
+         OR (action_type = 'rule_reversion_propose' AND subject_type = 'rule_reversion' AND decision = 'propose')
+         OR (action_type = 'rule_reversion_approve' AND subject_type = 'rule_reversion' AND decision = 'approve')
+         OR (action_type = 'rule_reversion_reject' AND subject_type = 'rule_reversion' AND decision = 'reject')))));
 
 -- v1.7 (b): approved DSSMP documents are copied here by dam_ref_publish (dam_safety.dssmp_documents). Same statement as
 -- sql/ddl/00. The down script leaves the volume and its files in place (no data dropped).

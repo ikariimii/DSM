@@ -550,6 +550,27 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   `no_cdse_in_reviewer_authority`), one row per dam in ref.dam or ref.dam_cdse_assignment;
   `ref.assert_dam_go_live_ready(dam_id)` returns true or raises `dam_go_live_not_ready: ...` (any dam_id).
 
+### 7.1e DSSMP re-versioning (v1.7; app SCHEMA_CONTRACT §7 item 21)
+
+- Rules stay on the DSSMP version they were set under; a newer approved version moves nothing. Flag edits on a rule of
+  a superseded version keep failing with `dssmp_superseded`. Candidates: `ref.v_dssmp_affected_rules` (dam_id,
+  threshold_id, threshold_version, dssmp_version_id, current_dssmp_version_id, cdse_ack_required, reason
+  `dssmp_superseded` | `dssmp_missing`) and `ref.dssmp_affected_rules(dam_id, to_dssmp_version_id)` (sql/ddl/10b).
+- **Records** subject_type `rule_reversion` (subject_id = proposal_id): `rule_reversion_propose` / `_approve` /
+  `_reject` (decision propose / approve / reject); CHECKs in 08 + v1_7_003. Engine
+  `dam_safety.rule_reversion_authority.chain_problems` (verify_review_chain): approve / reject need CDSE authority at
+  signed_ts and a recorded, undecided proposal; propose by the CDSE or dam_admin / admin (actor_app_role evidence).
+  Codes: `rule_reversion_propose_no_authority`, `rule_reversion_propose_role_unverified` (warn),
+  `rule_reversion_approve_not_cdse`, `rule_reversion_reject_not_cdse`, `rule_reversion_proposal_missing`,
+  `rule_reversion_self_approval` (only with CDSE_FLAG_REQUIRE_SECOND_APPROVER), `rule_reversion_subject_mismatch`.
+- **Publisher** (dam_ref_publish / publish_ref_changes): a `ref.threshold.new_version` row whose payload has `cause:
+  "dssmp_reversion"` is authorised by the `rule_reversion_approve` record named by payload `approval_record_hash`
+  (same dam and proposal, target = the new dssmp_version_id, the publication listed in corrected_value.publications,
+  set_by = the approver, approver a CDSE at signed_ts) and may change only dssmp_version_id, threshold_version,
+  effective_from and set_by. Refusals (status rejected_invalid): `reversion_approval_missing` (after 1 h; before that
+  the row stays pending), `reversion_approval_wrong_action`, `reversion_approval_mismatch`,
+  `reversion_not_authorized`, `reversion_fields_changed`; any other cause is `payload_invalid`.
+
 ### 7.2 Ownership of writes (v1.1, app Q11)
 The app writes Lakebase only. `dam_lakebase_extract` is the **only** writer of `ALARM_ACK` rows to `audit.event_log`;
 the alarm evaluator is the **only** writer of `ACK` transitions (dedup tag `lakebase_ack:<event_id>`). `certified`/`submitted`

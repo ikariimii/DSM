@@ -66,6 +66,37 @@ RETURN CASE WHEN EXISTS (SELECT 1 FROM ref.v_dam_reviewer_authority v WHERE v.da
             ELSE raise_error(concat('dam_go_live_not_ready: ', coalesce(p_dam_id, '<null>'),
                                     ' has no CDSE in force in ref.v_dam_reviewer_authority')) END;
 
+-- v1.7 (C) DSSMP re-versioning (app SCHEMA_CONTRACT §7 item 21). Thresholds stay on the DSSMP version they were set
+-- under; a newer approved version does NOT move them. ref.v_dssmp_affected_rules lists every current rule whose
+-- dssmp_version_id is not the dam's DSSMP version in force now (reason: dssmp_missing = no version on the rule,
+-- dssmp_superseded = the rule's version is not the one in force; current_dssmp_version_id NULL = none in force).
+-- ref.dssmp_affected_rules(dam, to) = the rules a re-version to `to` must cover (the app's affected_rules: the dam's
+-- current rules whose dssmp_version_id is not `to`). The re-version itself is the app's rule_reversion workflow
+-- (one CDSE rule_reversion_approve record, per-rule N+1 publications with cause 'dssmp_reversion', published by
+-- dam_ref_publish); flag edits on rules of a superseded version keep failing with dssmp_superseded.
+CREATE OR REPLACE VIEW ref.v_dssmp_affected_rules
+COMMENT 'v1.7 (C): current rules not on the dam''s DSSMP version in force (re-version candidates)'
+AS
+SELECT t.dam_id, t.threshold_id, t.threshold_version, t.dssmp_version_id, cur.dssmp_version_id AS current_dssmp_version_id,
+       t.cdse_ack_required,
+       CASE WHEN t.dssmp_version_id IS NULL THEN 'dssmp_missing' ELSE 'dssmp_superseded' END AS reason
+FROM ref.threshold t
+LEFT JOIN (SELECT v.dam_id, max(v.dssmp_version_id) AS dssmp_version_id FROM ref.dssmp_version v
+           WHERE v.status = 'approved' AND v.effective_from <= current_timestamp()
+             AND (v.effective_to IS NULL OR v.effective_to > current_timestamp())
+           GROUP BY v.dam_id) cur ON cur.dam_id = t.dam_id
+WHERE t.is_current = true
+  AND (t.dssmp_version_id IS NULL OR cur.dssmp_version_id IS NULL OR t.dssmp_version_id <> cur.dssmp_version_id);
+
+CREATE OR REPLACE FUNCTION ref.dssmp_affected_rules(p_dam_id STRING, p_to_dssmp_version_id STRING)
+RETURNS TABLE (dam_id STRING, threshold_id STRING, threshold_version INT, dssmp_version_id STRING,
+               cdse_ack_required BOOLEAN)
+COMMENT 'v1.7 (C): the current rules of p_dam_id a re-version to p_to_dssmp_version_id must cover'
+RETURN SELECT t.dam_id, t.threshold_id, t.threshold_version, t.dssmp_version_id, t.cdse_ack_required
+       FROM ref.threshold t
+       WHERE t.is_current = true AND t.dam_id = p_dam_id
+         AND (t.dssmp_version_id IS NULL OR t.dssmp_version_id <> p_to_dssmp_version_id);
+
 -- Grants: USE SCHEMA ref + SELECT on the view + (v1.7) SELECT on ref.dssmp_version (row-filtered per dam, 10a_*), per dam
 -- group only. Bundles/SQL files cannot loop, so the block is
 -- GENERATED from the dam list by tools/render_uc_reviewer_grants.py; CI runs --check. USE CATALOG for the dam groups is

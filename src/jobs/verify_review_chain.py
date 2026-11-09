@@ -25,6 +25,7 @@ from dam_safety.audit_chain import (CHAIN_FIELDS_V2, PROD_CATALOGS, SignerConfig
 from dam_safety.catalog import normalize_catalog
 from dam_safety.cdse_assignment import evaluate as cdse_evaluate
 from dam_safety.dssmp_authority import dssmp_authority_problems
+from dam_safety.rule_reversion_authority import chain_problems as rule_reversion_problems
 from dam_safety.rule_flag_authority import (SECOND_APPROVER_SETTING, rule_flag_authority_problems,
                                             second_approver_required)
 
@@ -75,6 +76,7 @@ def authority_failures(records, authority, app_roles=None, require_second_approv
     probs = rule_flag_authority_problems(records, authority, app_roles, require_second_approver,
                                          threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions)
     probs += dssmp_authority_problems(records, authority, app_roles)      # v1.7 dssmp_version propose/approve/reject
+    probs += rule_reversion_problems(records, authority, app_roles, require_second_approver)   # v1.7 §7 item 21
     if any(r.get("subject_type") == "dam" for r in records):              # v1.7 (B) CDSE bootstrap / change
         if cdse_context is None:
             probs += [{"review_id": r.get("review_id"), "dam_id": r.get("dam_id"), "chain_seq": r.get("chain_seq"),

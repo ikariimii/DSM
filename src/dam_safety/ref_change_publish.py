@@ -16,7 +16,10 @@ Per row the plan is one of:
                        version not N+1), missing_required_column (the five the app must carry, PUBLISH_REQUIRED),
                        missing_not_null_column, unknown_columns, invalid_value, and the DSSMP codes of
                        dam_safety.dssmp_check (dssmp_not_found, dssmp_other_dam, dssmp_draft, dssmp_superseded,
-                       dssmp_not_yet_effective, dssmp_status_unknown; Delta FKs are informational only).
+                       dssmp_not_yet_effective, dssmp_status_unknown; Delta FKs are informational only), and for
+                       cause 'dssmp_reversion' (§7 item 21) the codes of dam_safety.rule_reversion_authority
+                       (reversion_approval_missing / _wrong_action / _mismatch, reversion_not_authorized,
+                       reversion_fields_changed).
   * deferred         - another pending row for the same threshold_id is older; left pending for the next run.
 Nothing is defaulted or repaired: a row lacking a column is rejected with the reason, never filled in.
 """
@@ -27,6 +30,7 @@ import json
 import re
 from typing import Iterable, List, Mapping
 
+from dam_safety import rule_reversion_authority as rra
 from dam_safety.dssmp_check import dssmp_problem
 from dam_safety.threshold_publish import BOOKKEEPING, RULE_FIELDS, ThresholdVersionError, ack_flag
 
@@ -165,8 +169,12 @@ def normalise(ins: Mapping) -> dict:
     return r
 
 
-def plan(pending: Iterable[Mapping], current: Iterable[Mapping], dssmp: Mapping[str, str]) -> List[dict]:
-    """pending: outbox rows (pub_id, kind, dam_id, payload, requested_at, status='pending').
+def plan(pending: Iterable[Mapping], current: Iterable[Mapping], dssmp: Mapping[str, str],
+         reversion: Mapping | None = None) -> List[dict]:
+    """pending: outbox rows (pub_id, kind, dam_id, proposal_id, payload, requested_at, status='pending').
+    reversion (§7 item 21): {records_by_hash, authority, now, require_second_approver} for rows whose payload carries
+    cause 'dssmp_reversion' (dam_safety.rule_reversion_authority.publication_problems); without it such rows are
+    refused (fail closed). A payload with any other cause is payload_invalid; no cause = a flag change (§7.13).
     current: ref.threshold rows with is_current = true for the thresholds concerned (threshold_id, threshold_version,
     effective_from, set_by, cdse_ack_required). dssmp: dssmp_version_id -> ref.dssmp_version row.
     Returns one decision per row, oldest first: {pub_id, decision, status, message, insert, close}. `insert` /
@@ -208,6 +216,22 @@ def plan(pending: Iterable[Mapping], current: Iterable[Mapping], dssmp: Mapping[
             if sup is not None and _int(ins.get("threshold_version")) != sup + 1:
                 probs.append(f"payload_invalid: insert threshold_version {ins.get('threshold_version')!r} != supersedes_version + 1 "
                              f"({sup + 1})")
+        cause = p.get("cause")
+        if cause is not None and cause != rra.CAUSE:
+            probs.append(f"payload_invalid: unknown cause {cause!r} (expected none or {rra.CAUSE!r})")
+        elif cause == rra.CAUSE and ins is not None:
+            if reversion is None:
+                probs.append("reversion_approval_missing: no approval context supplied (fail closed)")
+            else:
+                rp = rra.publication_problems(r, p, ins, cur.get(tid), reversion.get("records_by_hash") or {},
+                                              reversion.get("authority") or (), reversion.get("now")
+                                              or dt.datetime.now(dt.timezone.utc), normalise,
+                                              reversion.get("require_second_approver"))
+                if rp == "defer":
+                    decide(r, "deferred", None, f"approval record {p.get('approval_record_hash')!r} not yet in "
+                           "audit.review_record; retried next run")
+                    continue
+                probs += rp
         if probs:
             decide(r, "rejected_invalid", "rejected_invalid", "; ".join(probs))
             continue

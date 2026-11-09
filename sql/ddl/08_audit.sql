@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS audit.review_record (
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
   subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction',
-                   'alarm_event', 'alarm_rule', 'dssmp_version', 'dam')
+                   'alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion')
   AND (subject_type <> 'incl_correction'
        OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
   AND (subject_type <> 'alarm_event'
@@ -55,7 +55,9 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
        OR (decision IN ('propose', 'approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
   AND (subject_type <> 'dam'
        OR (decision IN ('assign', 'propose', 'approve', 'reject') AND comment IS NOT NULL
-           AND length(trim(comment)) > 0)));
+           AND length(trim(comment)) > 0))
+  AND (subject_type <> 'rule_reversion'
+       OR (decision IN ('propose', 'approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
 
 -- v1.6 (QA-039 v2): a chained reviewer action carries every required chain field (signature, sig_alg, key_id,
 -- reviewer_email and reviewer_sub stay nullable), its action matches its subject and decision, the chain is the
@@ -66,13 +68,15 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
 -- extracts, other subject types) are not affected.
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_chain;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
-  (subject_type NOT IN ('alarm_event', 'alarm_rule', 'dssmp_version', 'dam') OR action_type IS NOT NULL)
+  (subject_type NOT IN ('alarm_event', 'alarm_rule', 'dssmp_version', 'dam', 'rule_reversion')
+   OR action_type IS NOT NULL)
   AND (action_type IS NULL OR (
     action_type IN ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close',
                     'alarm_rule_flag_propose', 'alarm_rule_flag_apply', 'alarm_rule_flag_reject',
                     'dssmp_version_propose', 'dssmp_version_approve', 'dssmp_version_reject',
                     'dam_cdse_assign', 'dam_cdse_change_propose', 'dam_cdse_change_approve',
-                    'dam_cdse_change_reject')
+                    'dam_cdse_change_reject',
+                    'rule_reversion_propose', 'rule_reversion_approve', 'rule_reversion_reject')
     AND original_value IS NOT NULL AND corrected_value IS NOT NULL AND chain_id IS NOT NULL
     AND chain_seq IS NOT NULL AND chain_seq >= 1 AND prev_hash IS NOT NULL AND record_hash IS NOT NULL
     AND chain_id = dam_id AND comment IS NOT NULL AND length(trim(comment)) > 0
@@ -92,7 +96,10 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
          OR (action_type = 'dam_cdse_change_approve' AND subject_type = 'dam' AND decision = 'approve'
              AND subject_id = dam_id)
          OR (action_type = 'dam_cdse_change_reject' AND subject_type = 'dam' AND decision = 'reject'
-             AND subject_id = dam_id)))));
+             AND subject_id = dam_id)
+         OR (action_type = 'rule_reversion_propose' AND subject_type = 'rule_reversion' AND decision = 'propose')
+         OR (action_type = 'rule_reversion_approve' AND subject_type = 'rule_reversion' AND decision = 'approve')
+         OR (action_type = 'rule_reversion_reject' AND subject_type = 'rule_reversion' AND decision = 'reject')))));
 
 -- v1.7 canon v2 (migration v1_7_002_canon_v2): a canon-2 record names its actor's app role. Shape only; the token
 -- vocabulary and ordering are checked by the verifier (dam_safety.audit_chain.actor_role_problem: actor_role_invalid).
