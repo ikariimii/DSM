@@ -19,6 +19,9 @@
 -- REFERENCES), a member of the owner, or named in a default ACL; the app role a member of the publisher role. With
 -- SET dam.extract_role: the extract role holding anything beyond SELECT (plus INSERT / UPDATE on extract_watermark),
 -- or no default ACL giving it SELECT on future tables of dam_lakebase_owner.
+-- v1_7_009: t_status_<table> missing on dam_cdse_outbox / dssmp_registration_outbox / rule_reversion_proposal, not
+-- BEFORE UPDATE FOR EACH ROW on dam_app.status_transition_guard() with its terminal-state arguments, not ENABLE ALWAYS,
+-- or the function not owned by dam_lakebase_owner.
 WITH cfg AS (SELECT nullif(current_setting('dam.app_role', true), '') AS app,
                     'dam_lakebase_owner'::text AS own),
 guarded(t) AS (VALUES ('exceedance_status'), ('review_signoff'), ('manual_reading'), ('review_chain_head_log')),
@@ -95,6 +98,18 @@ SELECT * FROM (
   UNION ALL SELECT 'app_preset_replication_role', 'pg_db_role_setting presets session_replication_role'
     FROM app, pg_db_role_setting s WHERE s.setrole IN (app.oid, 0)
      AND array_to_string(s.setconfig, ',') ILIKE '%session_replication_role%'
+  UNION ALL SELECT 'status_guard_missing', 't_status_' || sg.t || ' on dam_app.' || sg.t || ' (v1_7_009)'
+    FROM (VALUES ('dam_cdse_outbox', 'loaded,rejected'), ('dssmp_registration_outbox', 'loaded,rejected'),
+                 ('rule_reversion_proposal', 'applied,rejected')) sg(t, args)
+    WHERE to_regclass('dam_app.' || sg.t) IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM pg_trigger tr WHERE tr.tgrelid = to_regclass('dam_app.' || sg.t) AND tr.tgname = 't_status_' || sg.t
+        AND NOT tr.tgisinternal AND tr.tgfoid = to_regprocedure('dam_app.status_transition_guard()')
+        AND (tr.tgtype & 31) = 19 AND tr.tgenabled = 'A'          -- ROW + BEFORE + UPDATE only (no INSERT / DELETE)
+        AND tr.tgnargs = 2 AND encode(tr.tgargs, 'escape') = replace(sg.args, ',', '\000') || '\000')
+  UNION ALL SELECT 'status_guard_function_owner', 'dam_app.status_transition_guard() owned by '
+      || p.proowner::regrole::text
+    FROM pg_proc p WHERE p.pronamespace = to_regnamespace('dam_app') AND p.proname = 'status_transition_guard'
+     AND p.proowner::regrole::text <> 'dam_lakebase_owner'
   UNION ALL SELECT 'outbox_missing', 'dam_app.' || t FROM ot WHERE oid IS NULL
   UNION ALL SELECT 'outbox_owner', 'dam_app.' || t || ' owned by ' || relowner::regrole::text
     FROM ot WHERE oid IS NOT NULL AND relowner::regrole::text <> 'dam_lakebase_owner'

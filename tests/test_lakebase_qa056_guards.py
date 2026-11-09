@@ -9,6 +9,7 @@ import uuid
 
 import pytest
 
+from lbmig import later_than  # noqa: E402
 from gitrev import git_show_or_skip  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,6 +100,9 @@ def test_upgrade_from_the_previous_001_by_migration_passes_the_validator(tmp_pat
         for _ in range(2):
             r = _psql(su, "-f", MIG, env_extra=opts)
             assert r.returncode == 0, r.stderr
+        for m in later_than("v1_7_007"):                       # the validator checks the CURRENT schema
+            r = _psql(su, "-f", m, env_extra=opts)
+            assert r.returncode == 0, (m, r.stderr)
         have = set(_psql(su, "-c", "SELECT indexname FROM pg_indexes WHERE schemaname = 'dam_app'").stdout.split())
         assert set(NAMES) | set(APP_OWNED) <= have
         v = _psql(su, "-f", os.path.join(ROOT, "lakebase", "validate_append_only.sql"), env_extra=opts)

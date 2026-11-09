@@ -15,6 +15,7 @@ import re
 
 import pytest
 
+from lbmig import later_than  # noqa: E402
 from gitrev import git_show_or_skip, require_git  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -201,6 +202,9 @@ def test_upgrade_by_migration_rollback_keeps_rows_and_reapply(tmp_path):
         for _ in range(2):
             r = _psql(conn, "-f", MIG, env_extra=opts)
             assert r.returncode == 0, r.stderr
+        for m in later_than("v1_7_006"):                       # the validator checks the CURRENT schema
+            r = _psql(conn, "-f", m, env_extra=opts)
+            assert r.returncode == 0, (m, r.stderr)
         v = _psql(conn, "-f", VAL_PATH, env_extra=opts)
         assert v.returncode == 0 and v.stdout.strip() == "", v.stdout + v.stderr
         ins = f"INSERT INTO dam_app.review_chain_head_log VALUES ('OLD', 5, '{H('5')}', 't')"

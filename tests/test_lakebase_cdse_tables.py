@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from lbmig import later_than  # noqa: E402
 from gitrev import git_show_or_skip  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -137,7 +138,7 @@ def test_fresh_001_validates_and_the_app_writes_all_three_tables(env):
 def test_upgrade_by_migration_then_rollback_keeps_every_row_and_reapply_restores(env):
     r = _psql(env["conn"], "-f", env["old"], env_extra=env["opts"])
     assert r.returncode == 0, r.stderr
-    for m in (MIG, MIG, MIG006):                                            # idempotent
+    for m in (MIG, MIG, MIG006, *later_than("v1_7_006")):                   # idempotent; then up to date
         r = _psql(env["conn"], "-f", m, env_extra=env["opts"])
         assert r.returncode == 0, r.stderr
     assert _valid(env) == ""

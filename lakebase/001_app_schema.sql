@@ -333,7 +333,7 @@ DO $$
 DECLARE o RECORD;
 BEGIN
   FOR o IN SELECT p.oid::regprocedure AS fn FROM pg_proc p
-           WHERE p.pronamespace = 'dam_app'::regnamespace AND p.proname IN ('forbid_mutation', 'app_forbid_mutation')
+           WHERE p.pronamespace = 'dam_app'::regnamespace AND p.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard')
              AND p.proowner <> 'dam_lakebase_owner'::regrole LOOP
     EXECUTE format('ALTER ROUTINE %s OWNER TO dam_lakebase_owner', o.fn);
   END LOOP;
@@ -349,6 +349,42 @@ ALTER TABLE manual_reading ENABLE ALWAYS TRIGGER t_noupd_manual_reading,
   ENABLE ALWAYS TRIGGER t_notrunc_manual_reading;
 ALTER TABLE review_chain_head_log ENABLE ALWAYS TRIGGER t_noupd_review_chain_head_log,
   ENABLE ALWAYS TRIGGER t_notrunc_review_chain_head_log;
+-- BEGIN v1_7_009 block (residual 1: status transitions. On the two publication outboxes and the app's
+-- rule_reversion_proposal a row leaves 'pending' once, to one of its terminal states, and never comes back: allowed
+-- moves are pending -> loaded | rejected (outboxes) and pending -> applied | rejected (rule_reversion_proposal);
+-- a same-status UPDATE is fine on a pending row; a terminal row is frozen (only an UPDATE that changes nothing passes);
+-- a legacy value of an older contract may only be normalized to a terminal state (so v1_7_004 / v1_7_008 still run).
+-- Function owned by dam_lakebase_owner, triggers ENABLE ALWAYS (fire under session_replication_role = replica too).
+-- The outboxes are owner-owned, so neither the app nor the publisher can drop / disable the trigger or replace the
+-- function. rule_reversion_proposal is APP-owned (state.py manages it): the app role, as table owner, could still
+-- drop or disable its trigger; lakebase/validate_append_only.sql reports that (status_guard_*).)
+CREATE OR REPLACE FUNCTION dam_app.status_transition_guard() RETURNS trigger LANGUAGE plpgsql AS
+$$ BEGIN
+  IF NEW.status IS NOT DISTINCT FROM OLD.status THEN
+    IF OLD.status = 'pending' OR to_jsonb(NEW) IS NOT DISTINCT FROM to_jsonb(OLD) THEN RETURN NEW; END IF;
+    RAISE EXCEPTION '%: row is final (status %); it cannot be changed', TG_TABLE_NAME, OLD.status
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF OLD.status = 'pending' AND NEW.status = ANY (TG_ARGV) THEN RETURN NEW; END IF;
+  -- a LEGACY value (not pending and not a current terminal state, e.g. 'applied' / 'rejected_invalid' left by an
+  -- older contract) may only be normalized to a terminal state (the v1_7_004 / v1_7_008 mappings); never to pending
+  IF OLD.status <> 'pending' AND NOT (OLD.status = ANY (TG_ARGV)) AND NEW.status = ANY (TG_ARGV) THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION '%: status transition % -> % refused (only pending -> %)', TG_TABLE_NAME, OLD.status,
+    NEW.status, array_to_string(TG_ARGV, ' | ') USING ERRCODE = 'check_violation';
+END $$;
+ALTER FUNCTION dam_app.status_transition_guard() OWNER TO dam_lakebase_owner;
+CREATE OR REPLACE TRIGGER t_status_dam_cdse_outbox BEFORE UPDATE ON dam_app.dam_cdse_outbox
+  FOR EACH ROW EXECUTE FUNCTION dam_app.status_transition_guard('loaded', 'rejected');
+CREATE OR REPLACE TRIGGER t_status_dssmp_registration_outbox BEFORE UPDATE ON dam_app.dssmp_registration_outbox
+  FOR EACH ROW EXECUTE FUNCTION dam_app.status_transition_guard('loaded', 'rejected');
+CREATE OR REPLACE TRIGGER t_status_rule_reversion_proposal BEFORE UPDATE ON dam_app.rule_reversion_proposal
+  FOR EACH ROW EXECUTE FUNCTION dam_app.status_transition_guard('applied', 'rejected');
+ALTER TABLE dam_app.dam_cdse_outbox ENABLE ALWAYS TRIGGER t_status_dam_cdse_outbox;
+ALTER TABLE dam_app.dssmp_registration_outbox ENABLE ALWAYS TRIGGER t_status_dssmp_registration_outbox;
+ALTER TABLE dam_app.rule_reversion_proposal ENABLE ALWAYS TRIGGER t_status_rule_reversion_proposal;
+-- END v1_7_009 block
 DO $$
 DECLARE
   r TEXT := nullif(current_setting('dam.app_role', true), '');

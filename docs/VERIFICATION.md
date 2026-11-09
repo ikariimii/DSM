@@ -442,3 +442,24 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - Evidence (PG 17.11): fresh 001 -> one 3-value CHECK, rejected_invalid refused; 001@6709371 + a rejected_invalid row
   -> migration twice -> row rejected with its reason, one CHECK; down twice -> 4-value CHECK, 4 rows kept; up and
   001 re-run converge. UNVERIFIED: on Lakebase.
+
+## STATUS-TRANSITION-GUARD (residual 1, 2026-11-09: no status change out of a terminal state)
+
+- lakebase/001 block v1_7_009 = lakebase/migrations/v1_7_009_status_transition_guard.sql: function
+  `dam_app.status_transition_guard()` owned by `dam_lakebase_owner` (added to the routine-owner loop), BEFORE UPDATE
+  FOR EACH ROW triggers, ENABLE ALWAYS: `t_status_dam_cdse_outbox` / `t_status_dssmp_registration_outbox`
+  (pending -> loaded | rejected) and `t_status_rule_reversion_proposal` (it has a status: pending -> applied |
+  rejected). Refused (check_violation): any move back to pending, terminal -> other terminal, any change of a terminal
+  row (an UPDATE that changes nothing passes); same-status UPDATE of a pending row allowed. A legacy value of an older
+  contract (`rejected_invalid`, `applied` on the outbox) may only be normalized to a terminal state, so v1_7_004 /
+  v1_7_008 still run in any order. Down drops the 3 triggers and the function only (no data).
+- Validator: `status_guard_missing` (trigger absent, wrong function / timing / args, or not ENABLE ALWAYS) and
+  `status_guard_function_owner`.
+- Limitation: rule_reversion_proposal is owned by the app role (state.py), so the app can disable / drop its trigger;
+  the validator reports that (tested). The outboxes are owner-owned: neither the app nor the publisher can.
+- Evidence (PG 17.11, tests/test_lakebase_status_transition.py): every move above for the publisher on both outboxes
+  and for the app on rule_reversion_proposal; publisher bypass refused (DISABLE TRIGGER / ALL, DROP TRIGGER, CREATE OR
+  REPLACE / ALTER the function, SET session_replication_role, CREATE TRIGGER); under replica (superuser) the trigger
+  still fires; the app has no UPDATE on the outboxes; down twice keeps rows, validator lists the 3 triggers; re-apply
+  twice -> 0 rows; 001@d6d3c9c + migration -> guard active, v1_7_004 / v1_7_008 re-run OK. The upgrade tests now bring
+  the database fully up to date (tests/lbmig.py) before the current validator. UNVERIFIED: on Lakebase.

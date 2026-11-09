@@ -136,6 +136,7 @@ psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_005_cdse_reversion_tables
 psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_006_chain_head_log.sql
 psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_007_qa056_unique_guards.sql   # run its PRE-CHECK first
 psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_008_cdse_outbox_status.sql
+psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_009_status_transition_guard.sql
 ```
 
 Validator (read only):
@@ -390,7 +391,8 @@ Pause `dam_ref_publish` and `dam_lakebase_extract` first. Nothing below drops a 
   a PRE-CHECK; if it returns rows (newer audit records exist), STOP: those records are never deleted and that
   migration stays. Data-level fallback: `DESCRIBE HISTORY <table>` then `RESTORE TABLE <table> TO VERSION AS OF <n>`.
   Views / functions in 10b: re-run the previous `sql/ddl/10b_reviewer_authority.sql` from git.
-* Lakebase, newest first: `lakebase/migrations/v1_7_008_cdse_outbox_status_down.sql`,
+* Lakebase, newest first: `lakebase/migrations/v1_7_009_status_transition_guard_down.sql` (triggers + function
+  only), `v1_7_008_cdse_outbox_status_down.sql`,
   `v1_7_007_qa056_unique_guards_down.sql`,
   `v1_7_006_chain_head_log_down.sql` (roll back the app patch first),
   `v1_7_005_cdse_reversion_tables_down.sql`, `v1_7_004_dssmp_outbox_contract_down.sql`. Data-level fallback: a
