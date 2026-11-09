@@ -3,13 +3,17 @@
 Workflow: open -> acknowledged (rationale required) -> closed (dso+, reason required). Acknowledging an alarm at
 level >= CDSE_ACK_MIN_LEVEL (Evaluate/ACTION = HIGH, Act = CRITICAL) is the CDSE acknowledgement: only the dam's named
 CDSE may do it (signoffs.is_cdse; FERC Ch.14 App K 14-K-4) - no app role (dso, dam_admin, platform admin) substitutes.
-Level-1 (Verify/ALERT) alarms stay engineer+. Ack and close
+Level-1 (Verify/ALERT) alarms stay engineer+, unless the alarm rule is flagged cdse_ack_required (ref.threshold, per dam
+and rule, DA-owned column): then the CDSE is needed at any level. The flag counts if the episode snapshot
+(ops.alarm_episode.cdse_ack_required_at_open) OR the episode view's rule flag OR the current rule row is true, so
+un-flagging a rule never weakens an open episode; an absent column is false (logged once). Ack and close
 are reviewer actions: each appends one record to the dam's hash chain (audit_chain.py) atomically with the state change.
 Comments: engineer+. Every action is written to the audit log by the app service
 principal with the acting user's email (shared writes via SP)."""
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,6 +27,7 @@ from ..common import gate_for, merge_ack
 from ..deps import Ctx, analytics, ctx, require, store
 
 router = APIRouter(prefix="/api/alarms")
+log = logging.getLogger(__name__)
 
 
 class CloseBody(BaseModel):
@@ -44,14 +49,61 @@ class AckBody(BaseModel):
 CDSE_ACK_MIN_LEVEL = 2
 
 
-def needs_cdse_ack(ev: dict) -> bool:
-    return (ev.get("level") or 0) >= CDSE_ACK_MIN_LEVEL
+# cdse_ack_required sources, all OR-ed: the episode's snapshot taken when it opened, the rule flag the DA exposes on the
+# ops.alarm_episode view, and the current ref.threshold row of the rule (is_current, same threshold_id).
+CDSE_FLAG_EPISODE_COLS = ("cdse_ack_required_at_open", "cdse_ack_required")
+CDSE_FLAG_RULE_COL = "cdse_ack_required"
+_absent_logged: set[str] = set()
+
+
+def _truthy(v) -> bool:
+    return v is True or (isinstance(v, (int, float)) and not isinstance(v, bool) and v == 1) or \
+        (isinstance(v, str) and v.strip().lower() in ("true", "t", "1"))
+
+
+def _log_absent_once(what: str) -> None:
+    if what not in _absent_logged:
+        _absent_logged.add(what)
+        log.warning("%s is absent (older schema): treating cdse_ack_required as false there "
+                    "(level-based CDSE rule still applies)", what)
+
+
+def rule_flag(an, ev: dict, rules: dict | None = None) -> bool:
+    """True when the alarm's rule demands the CDSE acknowledgement at any level. rules: optional cache
+    {(dam_id, instrument_id): an.thresholds(...)} shared across a list request."""
+    flagged = False
+    for col in CDSE_FLAG_EPISODE_COLS:
+        if col in ev:
+            flagged = flagged or _truthy(ev[col])
+    if not any(col in ev for col in CDSE_FLAG_EPISODE_COLS):
+        _log_absent_once("ops.alarm_episode.cdse_ack_required_at_open / cdse_ack_required")
+    tid = ev.get("threshold_id")
+    if tid:
+        key = (ev["dam_id"], ev.get("instrument_id"))
+        if rules is None or key not in rules:
+            rows = an.thresholds(*key)
+            if rules is not None:
+                rules[key] = rows
+        else:
+            rows = rules[key]
+        mine = [t for t in rows if t.get("threshold_id") == tid]
+        if mine and not any(CDSE_FLAG_RULE_COL in t for t in mine):
+            _log_absent_once("ref.threshold.cdse_ack_required")
+        flagged = flagged or any(_truthy(t.get(CDSE_FLAG_RULE_COL)) for t in mine)
+    return flagged
+
+
+def needs_cdse_ack(ev: dict, flagged: bool | None = None) -> bool:
+    """CDSE acknowledgement needed: level >= CDSE_ACK_MIN_LEVEL, or a flagged rule (any level).
+    flagged=None reads ev['cdse_ack_required'] as already resolved by rule_flag()."""
+    f = ev.get("cdse_ack_required") if flagged is None else flagged
+    return (ev.get("level") or 0) >= CDSE_ACK_MIN_LEVEL or _truthy(f)
 
 
 def _can_ack(c: Ctx, ev: dict, an, cdse: bool | None = None) -> bool:
     if ev.get("state", "open") != "open":
         return False
-    if needs_cdse_ack(ev):
+    if ev.get("requires_cdse", needs_cdse_ack(ev)):
         return sg.is_cdse(c, ev["dam_id"], an) if cdse is None else cdse
     return c.can(ev["dam_id"], "engineer")
 
@@ -98,6 +150,8 @@ def list_alarms(dam_id: str | None = None, state: str | None = None, min_level: 
         require(c, dam_id)
         dams = [dam_id]
     events = an.alarm_events(dams)
+    rules: dict = {}
+    flags = {e["event_id"]: rule_flag(an, e, rules) for e in events}
     gates = {d: gate_for(an, d) for d in {e["dam_id"] for e in events}}
     events = [gates[e["dam_id"]].apply_event(e) for e in events]
     events = merge_ack(events, st.ack_states([e["event_id"] for e in events]))
@@ -106,7 +160,8 @@ def list_alarms(dam_id: str | None = None, state: str | None = None, min_level: 
     events = [e for e in events if (e.get("level") or 0) >= min_level]
     cdse = {d: sg.is_cdse(c, d, an) for d in {e["dam_id"] for e in events}}
     for e in events:
-        e["requires_cdse"] = needs_cdse_ack(e)
+        e["cdse_ack_required"] = flags.get(e["event_id"], False)
+        e["requires_cdse"] = needs_cdse_ack(e, e["cdse_ack_required"])
         e["is_cdse"] = cdse[e["dam_id"]]
         e["can_ack"] = _can_ack(c, e, an, cdse[e["dam_id"]])
         e["can_close"] = c.can(e["dam_id"], "dso") and e["state"] == "acknowledged"
@@ -118,9 +173,11 @@ def list_alarms(dam_id: str | None = None, state: str | None = None, min_level: 
 @router.get("/{event_id}")
 def get_alarm(event_id: str, c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
     ev = _event(an, c, event_id, "viewer")
+    flagged = rule_flag(an, ev)
     ev = merge_ack([gate_for(an, ev["dam_id"]).apply_event(ev)], st.ack_states([event_id]))[0]
     ev["comments"] = st.comments(event_id)
-    ev["requires_cdse"] = needs_cdse_ack(ev)
+    ev["cdse_ack_required"] = flagged
+    ev["requires_cdse"] = needs_cdse_ack(ev, flagged)
     ev["is_cdse"] = sg.is_cdse(c, ev["dam_id"], an)
     ev["can_ack"] = _can_ack(c, ev, an, ev["is_cdse"])
     ev["can_close"] = c.can(ev["dam_id"], "dso") and ev["state"] == "acknowledged"
@@ -130,12 +187,17 @@ def get_alarm(event_id: str, c: Ctx = Depends(ctx), an=Depends(analytics), st=De
 @router.post("/{event_id}/ack")
 def ack(event_id: str, request: Request, body: AckBody | None = None, c: Ctx = Depends(ctx), an=Depends(analytics),
         st=Depends(store)):
-    if needs_cdse_ack(an.alarm_event(event_id) or {}):
+    raw = an.alarm_event(event_id)
+    flagged = rule_flag(an, raw) if raw else False
+    if raw and needs_cdse_ack(raw, flagged):
         # CDSE acknowledgement: the dam ACL (viewer+) still applies, then only the dam's named CDSE may act.
         ev = _event(an, c, event_id, "viewer")
         if not sg.is_cdse(c, ev["dam_id"], an):
-            raise HTTPException(403, f"Level {ev.get('level')} alarm: only the CDSE of dam {ev['dam_id']} (ref.dam.cdse_id) "
-                                     "may acknowledge it; app roles (dso, dam_admin, admin) do not confer CDSE")
+            why = ("its rule is flagged cdse_ack_required" if flagged and (ev.get("level") or 0) < CDSE_ACK_MIN_LEVEL
+                   else f"level {ev.get('level')} alarm")
+            raise HTTPException(403, f"CDSE acknowledgement ({why}): only the CDSE of dam {ev['dam_id']} "
+                                     "(ref.dam.cdse_id) may acknowledge it; app roles (dso, dam_admin, admin) do not "
+                                     "confer CDSE")
     else:
         ev = _event(an, c, event_id, "engineer")
     rationale = sg.rationale_of((body.rationale or body.comment) if body else None)

@@ -503,7 +503,7 @@ def test_token_is_never_logged_stored_or_returned(c, caplog):
     tok = _jwt({"sub": "sso-sub-777", "email": ENG})
     h = {"x-forwarded-user": f"uid-{ENG}", "x-forwarded-email": ENG, "x-forwarded-access-token": tok}
     # ENG's own (level-1, engineer-ackable) alarm on CRD
-    eid = next(a for a in c.get("/api/alarms?dam_id=CRD", user=ENG).json()["alarms"] if a["level"] == 1)["event_id"]
+    eid = next(a for a in c.get("/api/alarms?dam_id=CRD", user=ENG).json()["alarms"] if a["level"] == 1 and not a["requires_cdse"])["event_id"]
     r = c.tc.post(f"/api/alarms/{eid}/ack", headers=h, json={"rationale": "checking"})
     assert r.status_code == 200
     v = c.tc.get("/api/dams/CRD/audit/signoffs/verify", headers=h)

@@ -315,14 +315,18 @@ def build() -> dict:
                                        limit_type="magnitude", direction="upper", value=round(lim, 3),
                                        unit=inst["eng_unit"], effective_from=_iso(START - timedelta(days=365)),
                                        effective_to=None, is_current=True, pfm_id=pfm[0],
-                                       required_actions=responses[lvl - 1]))
+                                       required_actions=responses[lvl - 1],
+                                       # ref.threshold.cdse_ack_required (DA-owned column, default false): the demo
+                                       # flags CRD-IN-1's Verify rule so a level-1 alarm needs CRD's CDSE
+                                       cdse_ack_required=f"{iid}-T{lvl}" in CDSE_FLAGGED_RULES))
         if did == "BFK":
             # a cyclic limit: the alarm machine does not evaluate cyclic limits (§10 Q7), shown as "not evaluated"
             thresholds.append(dict(threshold_id=f"{did}-CM-1-TC", threshold_version=1, instrument_id=f"{did}-CM-1",
                                    dam_id=did, output_name="displacement_mm", level=1, limit_type="cyclic",
                                    direction="abs", value=0.8, unit="mm", effective_from=_iso(START - timedelta(days=365)),
                                    effective_to=None, is_current=True, pfm_id=pfm_slide,
-                                   required_actions="Review seasonal amplitude at the annual DSSMR"))
+                                   required_actions="Review seasonal amplitude at the annual DSSMR",
+                                   cdse_ack_required=False))
 
     # --- alarm events from value thresholds (one event per level episode)
     by_inst: dict[str, list[dict]] = {}
@@ -337,6 +341,8 @@ def build() -> dict:
                     rule=t["rule"], rule_label=t["rule_label"], evaluated=t["evaluated"], limit=t["value"],
                     unit=t["unit"], pfm_id=t["pfm_id"], pfm_ids=t["pfm_ids"], required_actions=t["required_actions"],
                     machine_state="ACTION_UNACK" if t["level"] >= 2 else "ALERT_UNACK", raise_reading_id=kw["reading_id"],
+                    # ops.alarm_episode.cdse_ack_required_at_open: the rule flag snapshotted when the episode opened
+                    cdse_ack_required_at_open=bool(t.get("cdse_ack_required")),
                     raise_cal_version=kw["cal_version"], mixed_calibration=False, lineage_issue=None,
                     level=t["level"])
 
@@ -394,6 +400,7 @@ def build() -> dict:
     n += 1
     alarm_events.append(dict(event_id=f"EV-{n:05d}", dam_id="PHR", instrument_id="PHR-PZ-3", sensor_id="PHR-PZ-3",
                              threshold_id=None, threshold_version=None, level=1, limit_type=None, direction=None,
+                             cdse_ack_required_at_open=False,
                              # app-display-only watchdog (no reading, so no metric_value/reading_id): an episode,
                              # not a state transition, so QA-035 (contract.check_transition) does not apply to it
                              rule="no_data", rule_label="no data > 48 h", evaluated=True, value=None,
@@ -416,6 +423,9 @@ def build() -> dict:
                 incl_surveys=incl_surveys, incl_installations=incl_installations, formulas=formulas,
                 dam_cdse=dict(DAM_CDSE), project_membership=[dict(m) for m in CDSE_MEMBERSHIP])
 
+
+# ref.threshold rules flagged cdse_ack_required in the demo (CDSE acknowledgement at any level)
+CDSE_FLAGGED_RULES = frozenset({"CRD-IN-1-T1"})
 
 # ref.dam.cdse_id per demo dam (the named Chief Dam Safety Engineer; FERC Ch.14 App K 14-K-4). Only CRD's CDSE is a
 # demo persona; the others are named principals with no app login, so nobody in the demo can CDSE-ack them.

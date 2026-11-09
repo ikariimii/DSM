@@ -86,8 +86,13 @@ async def put_step(draft_id: str, step: str, request: Request, c: Ctx = Depends(
     if not isinstance(body, expect):
         raise HTTPException(422, f"Step {step} expects a JSON {expect.__name__}")
     data = d["data"]
+    changes = ob.cdse_flag_changes(data.get("thresholds"), body) if step == "thresholds" else []
     data[step] = body
-    return st.update_draft(draft_id, data)
+    out = st.update_draft(draft_id, data)
+    dam = (data.get("details") or {}).get("dam_id")
+    for ch in changes:   # changing the CDSE-acknowledgement flag of an alarm rule is itself an audited admin action
+        st.audit(c.email, "alarm_rule_cdse_ack_required", dam, draft_id, ch)
+    return out
 
 
 @router.post("/parse-csv")
@@ -149,5 +154,6 @@ def golive(draft_id: str, request: Request, c: Ctx = Depends(ctx), st=Depends(st
     st.update_draft(draft_id, d["data"], status="published")
     st.audit(c.email, "onboarding_golive", dam_id, draft_id,
              {"publication_id": pub["pub_id"], "status": pub["status"],
+              "cdse_ack_required_rules": [t["threshold_id"] for t in payload["thresholds"] if t["cdse_ack_required"]],
               "warnings": [i["message"] for i in issues if i["severity"] == "warning"][:50]})
     return {"publication": pub, "warnings": [i for i in issues if i["severity"] == "warning"]}

@@ -91,7 +91,7 @@ function AlarmDetail({ id, onChange }: { id: string; onChange: () => void }) {
       <textarea rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="comment / ack rationale (required) / close reason (≥3 chars)" />
       <div className="muted">Acknowledge and Close are reviewer actions: each is appended, with your SSO identity, a server UTC timestamp, your rationale and the alarm's original value, to this dam's hash-chained audit (append-only).</div>
       {err && <div className="error">{err}</div>}
-      {data.requires_cdse && !data.is_cdse && data.state === "open" && <div className="muted">Level {data.level} alarm: acknowledgement is the CDSE sign-off for this dam (FERC Ch.14 App K 14-K-4); only the dam's named Chief Dam Safety Engineer can give it.</div>}
+      {data.requires_cdse && !data.is_cdse && data.state === "open" && <div className="muted">{data.level >= 2 ? `Level ${data.level} alarm` : "This alarm rule is flagged \"CDSE ack required\""}: acknowledgement is the CDSE sign-off for this dam (FERC Ch.14 App K 14-K-4); only the dam's named Chief Dam Safety Engineer can give it.</div>}
       <div className="row">
         <button disabled={!text.trim()} onClick={() => act("comment", { body: text })}>Comment</button>
         {/* HIGH/CRITICAL (level >= 2): the CDSE acknowledgement is shown only to this dam's named CDSE (ref.dam.cdse_id);

@@ -253,6 +253,8 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
             out.append(issue("thresholds", "error", "abs limit must be >= 0", ref))
         if not t.get("required_actions"):
             out.append(issue("thresholds", "warning", f"L{t.get('level')} has no required actions", ref))
+        if t.get("cdse_ack_required") not in (None, True, False):
+            out.append(issue("thresholds", "error", "cdse_ack_required must be true or false", ref))
         by_inst.setdefault(ref, []).append(t)
     for ref, lst in by_inst.items():
         for lt in ("magnitude", "rate"):
@@ -340,11 +342,37 @@ def golive_payload(draft: dict) -> dict:
                            "unit": t["unit"],
                            "effective_from": t.get("effective_from") or datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z"),
                            "effective_to": None, "is_current": True, "pfm_id": t.get("pfm_id"),
-                           "required_actions": t.get("required_actions")})
+                           "required_actions": t.get("required_actions"),
+                           # ref.threshold.cdse_ack_required (DA-owned, NOT NULL DEFAULT false)
+                           "cdse_ack_required": t.get("cdse_ack_required") is True})
     return {"dam_id": did, "sites": [site], "structures": structures, "instruments": instruments,
             "calibrations": calibrations, "thresholds": thresholds, "pfms": [],
             "data_source_map": [{**m, "dam_id": did} for m in draft.get("data_sources") or []],
             "users": draft.get("users") or []}
+
+
+def rule_key(t: dict) -> str:
+    """Stable key of a draft alarm rule: its threshold_id, else instrument/level/limit_type/direction."""
+    t = _canonical_threshold(t)
+    return t.get("threshold_id") or f"{t.get('instrument_id')}/L{t.get('level')}/{t.get('limit_type')}/{t.get('direction')}"
+
+
+def cdse_flag_changes(old_rules: list[dict] | None, new_rules: list[dict] | None) -> list[dict]:
+    """cdse_ack_required changes between two saves of the thresholds step (audited as an admin action).
+    A new rule counts as a change only when it is flagged (default off)."""
+    old = {rule_key(t): t.get("cdse_ack_required") is True for t in old_rules or [] if isinstance(t, dict)}
+    out = []
+    for t in new_rules or []:
+        if not isinstance(t, dict):
+            continue
+        k, now = rule_key(t), t.get("cdse_ack_required") is True
+        if old.get(k, False) != now:
+            out.append({"rule": k, "instrument_id": t.get("instrument_id"), "level": t.get("level"),
+                        "from": old.get(k, False), "to": now})
+    for k, was in old.items():
+        if was and k not in {rule_key(t) for t in new_rules or [] if isinstance(t, dict)}:
+            out.append({"rule": k, "from": True, "to": None})   # flagged rule removed from the draft
+    return out
 
 
 def _canonical_threshold(t: dict) -> dict:

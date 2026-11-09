@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
 
-type Col = { key: string; label?: string; type?: "text" | "number" | "select" | "json" | "date"; options?: string[] };
+type Col = { key: string; label?: string; type?: "text" | "number" | "select" | "json" | "date" | "checkbox"; options?: string[] };
 
 const TITLES: Record<string, string> = {
   details: "1. Dam details", structures: "2. Structures", instruments: "3. Instruments", calibrations: "4. Calibrations",
@@ -98,7 +98,9 @@ function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit:
           { key: "instrument_id", type: "select", options: instIds }, { key: "level", type: "select", options: ["1", "2", "3"] },
           { key: "limit_type", type: "select", options: ["magnitude", "rate", "cyclic"] },
           { key: "direction", type: "select", options: ["upper", "lower", "abs"] }, { key: "value", type: "number" },
-          { key: "unit" }, { key: "pfm_id" }, { key: "required_actions" }]} />}
+          { key: "unit" }, { key: "pfm_id" }, { key: "required_actions" },
+          { key: "cdse_ack_required", label: "CDSE ack required", type: "checkbox" }]} />}
+        {name === "thresholds" && <div className="muted">"CDSE ack required" (default off): acknowledging any alarm from this rule, at any level, needs the dam's named CDSE (ref.dam.cdse_id). Levels 2 and 3 always need the CDSE. Changing it is recorded in the audit log.</div>}
         {name === "thresholds" && <div className="muted">Cyclic limits are stored but not evaluated by the alarm machine; abs limits are evaluated as |value| &gt; limit.</div>}
         {name === "data_sources" && <Rows value={data.data_sources || []} onSave={save} disabled={readOnly} cols={[
           { key: "instrument_id", type: "select", options: instIds }, { key: "source_type", type: "select", options: meta.source_types },
@@ -171,7 +173,10 @@ function Rows({ value, cols, onSave, disabled }: { value: any[]; cols: Col[]; on
                 const val = c.type === "json" && typeof r[c.key] !== "string" ? (r[c.key] == null ? "" : JSON.stringify(r[c.key])) : r[c.key] ?? "";
                 return (
                   <td key={c.key}>
-                    {c.type === "select" ? (
+                    {c.type === "checkbox" ? (
+                      <input type="checkbox" checked={r[c.key] === true} disabled={disabled}
+                             onChange={(e) => { const nr = [...rows]; nr[n] = { ...nr[n], [c.key]: e.target.checked }; setRows(nr); }} />
+                    ) : c.type === "select" ? (
                       <select value={String(val)} disabled={disabled} onChange={(e) => set(n, c.key, e.target.value, c)}>
                         <option value="">—</option>{c.options?.map((o) => <option key={o}>{o}</option>)}
                       </select>

@@ -113,13 +113,32 @@ advisory locks.
 |---|---|---|---|
 | `bias_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/bias-proposals/{record_id}/review` (engineer+) | `incl_correction` / `approve\|reject` | `{parameter_name, before_value}` → `{parameter_name, auto_value, override_value, after_value, applied_by_app:false}` (units as stored in ref.incl_correction) |
 | `data_correction_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/corrections/{record_id}/review` (engineer+; any proposed ref.incl_correction record; a bias record is typed `bias_review`) | `incl_correction` / `approve\|reject` | as above |
-| `alarm_ack` (CDSE acknowledgement at level ≥ 2) | `POST /api/alarms/{event_id}/ack` (level 2 Evaluate = HIGH and level 3 Act = CRITICAL: **the dam's CDSE only**, see below; level 1 Verify: engineer+) | `alarm_event` / `acknowledge` | `{event_id, dam_id, instrument_id, level, value, unit, event_ts, state:"open"}` → `{state:"acknowledged", measured_value_changed:false}` |
+| `alarm_ack` (CDSE acknowledgement at level ≥ 2, or on a rule flagged `cdse_ack_required`) | `POST /api/alarms/{event_id}/ack` (level 2 Evaluate and level 3 Act: **the dam's CDSE only**; level 1 Verify: engineer+, unless the rule is flagged `cdse_ack_required`, then the dam's CDSE only; see below) | `alarm_event` / `acknowledge` | `{event_id, dam_id, instrument_id, level, value, unit, event_ts, state:"open"}` → `{state:"acknowledged", measured_value_changed:false}` |
 | `alarm_close` | `POST /api/alarms/{event_id}/close` (dso+) | `alarm_event` / `close` | same alarm snapshot with `state:"acknowledged"` → `{state:"closed", measured_value_changed:false}` |
 
 Review bodies: `{decision, rationale, reviewer_pe_license?}`; ack: `{rationale}` (`comment` accepted as the older name);
 close: `{reason}`. **The rationale is required and must be non-empty after trimming** (422 otherwise; DB CHECK
 `length(trim(comment)) > 0` as backstop); it is stored in `comment`. original_value / corrected_value are canonical
 JSON text; the original is stored next to the corrected value and never overwritten (Ch.14 §14.4.1).
+
+**Alarm levels vs FERC "high/critical" (Genie decision, v1.6).** FERC Ch.14 speaks of high/critical conditions;
+the app's alarm levels are 1 Verify (ALERT), 2 Evaluate (ACTION) and 3 Act. **Our mapping: levels 2 Evaluate and 3 Act
+are FERC "high/critical"** and their acknowledgement is the CDSE acknowledgement (`CDSE_ACK_MIN_LEVEL = 2`,
+`app/backend/routers/alarms.py`). **Level 1 Verify is engineer and above.**
+
+**Per-rule `cdse_ack_required` (Genie decision, v1.6).** A per-dam, per-alarm-rule boolean on `ref.threshold` (the
+alarm-rule table: one row per dam / instrument / level / limit, SCD2 by `threshold_version`), default false, DA-owned
+(§7 item 12). When a rule is flagged, acknowledging its alarms needs that dam's CDSE at **any** level, level 1
+included; unflagged rules keep the level rule above. The app ORs three sources, so un-flagging a rule never weakens an
+episode that is already open: `ops.alarm_episode.cdse_ack_required_at_open` (snapshot when the episode opened),
+`ops.alarm_episode.cdse_ack_required` (the rule flag the DA exposes on the view) and the current
+(`is_current`) `ref.threshold` row of the same `threshold_id`. A column that is absent (older schema) counts as false
+and is logged once per column. API: `GET /api/alarms[/{id}]` returns `cdse_ack_required` (resolved flag), and
+`requires_cdse` = level ≥ 2 OR `cdse_ack_required`. The onboarding wizard's thresholds step has a "CDSE ack required"
+checkbox (default off), saved through `PUT /api/onboarding/drafts/{id}/steps/thresholds` and published as
+`ref.threshold.cdse_ack_required` at go-live. Every change of the flag in a draft is an audited admin action
+(`audit_log.action = alarm_rule_cdse_ack_required`, detail `{rule, instrument_id, level, from, to}`), and go-live logs
+the flagged rules. Demo: `CRD-IN-1-T1` (level 1) is flagged.
 
 **CDSE identity (v1.6 ROLE-LEVEL, FERC Ch.14 App K 14-K-4).** The CDSE is a named person, not an app role. A caller is
 the CDSE of dam D when their X-Forwarded-User id or X-Forwarded-Email equals (case-insensitive, trimmed)
@@ -364,3 +383,16 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       missing or UNVERIFIED interpretations and off-grid converted tops are rejected. The stored-depth
       `contract` profile is separate. See root `docs/INCL_IMPORTERS.md` for the field contract, elevation/AT
       handling and citations to `procedures/inclinometer_depth_semantics.md` §§2–7. Parser stubs remain disabled.
+12. **`cdse_ack_required` (Genie decision, v1.6; agreed with the DA, who writes the DDL; the app writes none).**
+    The app relies on these DA-owned columns and reads them only when present:
+    - `ref.threshold.cdse_ack_required BOOLEAN NOT NULL DEFAULT false` (per dam, per alarm rule);
+    - `ops.alarm_episode.cdse_ack_required`: the rule flag, exposed on the view;
+    - `ops.alarm_episode.cdse_ack_required_at_open`: the flag snapshotted by `alarm_evaluator` when the episode opens.
+
+    The app reads `e.*` from `ops.alarm_episode` and `t.*` from `ref.threshold`, so no app SQL names these columns
+    and an older schema keeps working (flag false, logged once). The onboarding publication outbox carries
+    `cdse_ack_required` (bool) in each `thresholds` row. Asks for the DA:
+    - the publish job writes the column;
+    - the Lakebase/UC extract carries it;
+    - document whether a new `threshold_version` is required when the flag changes (the app treats the flag as a
+      property of the current rule plus the episode snapshot, so either choice is safe).

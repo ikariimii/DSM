@@ -47,6 +47,11 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
   button. Level 1 (Verify) alarms are still engineer+. All other reviews are recorded at `engineer` level. Admin powers
   (users, roles) are unchanged. Old chain records keep their stored level and still verify. Demo persona:
   `cdse.crd@demo.local` (CDSE of CRD, engineer on CRD and HLD).
+- **Per-rule CDSE acknowledgement (`cdse_ack_required`).** An alarm rule (`ref.threshold` row) can be flagged so that its
+  alarms need the dam's CDSE at any level, level 1 included (wizard thresholds step, "CDSE ack required" checkbox,
+  default off; every change is audited). Levels 2 Evaluate and 3 Act are our mapping of FERC high/critical and
+  always need the CDSE. The episode snapshot `cdse_ack_required_at_open` keeps an open episode strict even if the rule is
+  un-flagged later. Older schemas without the columns behave as unflagged. Demo: rule `CRD-IN-1-T1` is flagged.
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
   `config.env` **for the first prod deploy only, then remove it from prod config** and redeploy once the first
   admin has signed in and granted roles in the Admin UI. Rules (`backend/bootstrap.py`):

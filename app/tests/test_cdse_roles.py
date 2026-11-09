@@ -90,13 +90,17 @@ def test_cdse_user_acks_high_and_critical_with_cdse_level(crd, level):
 
 
 def test_level1_ack_stays_engineer_plus_without_elevation(crd):
-    l1 = [a["event_id"] for a in _events(crd, ENG) if a["level"] == 1 and a["state"] == "open"]
-    assert len(l1) >= 2
-    assert crd.post(f"/api/alarms/{l1[0]}/ack", user=VIEWER, json={"rationale": "x"}).status_code == 403
-    for eid, user in ((l1[0], DAMADMIN), (l1[1], ADMIN)):
-        assert next(a for a in _events(crd, user) if a["event_id"] == eid)["can_ack"]
+    """Unflagged level-1 rules: engineer+ (dam_admin on CRD, platform admin on HLD), recorded at engineer level."""
+    crd_l1 = [a["event_id"] for a in _events(crd, ENG) if a["level"] == 1 and a["state"] == "open"
+              and not a["requires_cdse"]]
+    hld_l1 = [a["event_id"] for a in _events(crd, ADMIN, "HLD") if a["level"] == 1 and not a["requires_cdse"]]
+    assert crd_l1 and hld_l1
+    assert crd.post(f"/api/alarms/{crd_l1[0]}/ack", user=VIEWER, json={"rationale": "x"}).status_code == 403
+    for eid, user, dam in ((crd_l1[0], DAMADMIN, "CRD"), (hld_l1[0], ADMIN, "HLD")):
+        assert next(a for a in _events(crd, user, dam) if a["event_id"] == eid)["can_ack"]
         assert crd.post(f"/api/alarms/{eid}/ack", user=user, json={"rationale": "verified"}).status_code == 200
-    assert [r["review_level"] for r in _chain(crd)] == ["engineer", "engineer"]
+    assert [r["review_level"] for r in _chain(crd)] == ["engineer"]
+    assert [r["review_level"] for r in _chain(crd, "HLD")] == ["engineer"]
 
 
 def test_cdse_of_dam_a_is_refused_on_dam_b(crd):
@@ -176,8 +180,8 @@ def test_pre_change_chain_still_verifies_and_only_new_records_change(crd, monkey
     the chain still verifies (hash recomputed from stored content); new records use the confirmed mapping."""
     old_map = {"engineer": "engineer", "dso": "CDSE", "dam_admin": "CDSE", "admin": "CDSE"}
     monkeypatch.setattr(sg, "review_level", lambda c, dam_id, an=None: old_map["admin" if c.is_admin else c.role(dam_id)])
-    monkeypatch.setattr(alarms_router, "needs_cdse_ack", lambda ev: False)          # pre-change: engineer+ acks
-    l1 = [a["event_id"] for a in _events(crd, ENG) if a["level"] == 1]
+    monkeypatch.setattr(alarms_router, "needs_cdse_ack", lambda ev, flagged=None: False)          # pre-change: engineer+ acks
+    l1 = [a["event_id"] for a in _events(crd, ENG) if a["level"] == 1 and not a["requires_cdse"]]
     hi = _at_level(crd, 2)["event_id"]
     for eid, user in ((l1[0], ADMIN), (hi, DAMADMIN)):
         assert crd.post(f"/api/alarms/{eid}/ack", user=user, json={"rationale": "pre-change ack"}).status_code == 200
