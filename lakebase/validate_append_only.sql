@@ -28,6 +28,9 @@
 -- trigger checks, so an ownership regression fails CI even while the triggers are still enabled.
 -- v1_7_010: the app role holding anything beyond SELECT,
 -- INSERT and UPDATE (status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids), or lacking one of them.
+-- QA-059 / v1_7_011: dam_app.schema_migration_ledger (when it exists) is in the owner_not_dam_lakebase_owner list;
+-- ledger_guard_missing = its t_noupd_ / t_notrunc_ forbid_mutation() trigger missing or not ENABLE ALWAYS;
+-- ledger_privilege = PUBLIC or the app role holding ANY table or column privilege on it.
 WITH cfg AS (SELECT nullif(current_setting('dam.app_role', true), '') AS app,
                     'dam_lakebase_owner'::text AS own),
 guarded(t) AS (VALUES ('exceedance_status'), ('review_signoff'), ('manual_reading'), ('review_chain_head_log')),
@@ -122,11 +125,27 @@ SELECT * FROM (
       AND c.relowner <> coalesce((SELECT oid FROM pg_roles WHERE rolname = 'dam_lakebase_owner'), 0)
       AND (c.relname IN ('exceedance_status', 'review_signoff', 'manual_reading', 'review_chain_head_log',
                          'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
-                         'dam_cdse_outbox', 'rule_reversion_proposal')
+                         'dam_cdse_outbox', 'rule_reversion_proposal', 'schema_migration_ledger')
            OR EXISTS (SELECT 1 FROM pg_trigger tr JOIN pg_proc fp ON fp.oid = tr.tgfoid
                       WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal
                         AND fp.pronamespace = to_regnamespace('dam_app')
                         AND fp.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard')))
+  UNION ALL SELECT 'ledger_guard_missing', lg.tg || ' on dam_app.schema_migration_ledger (QA-059)'
+    FROM (VALUES ('t_noupd_schema_migration_ledger', 'row'), ('t_notrunc_schema_migration_ledger', 'truncate')) lg(tg, kind)
+    WHERE to_regclass('dam_app.schema_migration_ledger') IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM pg_trigger tr WHERE tr.tgrelid = to_regclass('dam_app.schema_migration_ledger') AND tr.tgname = lg.tg
+        AND NOT tr.tgisinternal AND tr.tgfoid = to_regprocedure('dam_app.forbid_mutation()') AND tr.tgenabled = 'A'
+        AND ((lg.kind = 'row' AND (tr.tgtype & 1) = 1 AND (tr.tgtype & 24) = 24)
+          OR (lg.kind = 'truncate' AND (tr.tgtype & 1) = 0 AND (tr.tgtype & 32) = 32)))
+  UNION ALL SELECT 'ledger_privilege', g.who || ' has ' || allp.p || ' on dam_app.schema_migration_ledger'
+    FROM (SELECT app.rolname AS who, app.oid FROM app UNION ALL SELECT 'PUBLIC', 0::oid) g, allp
+    WHERE to_regclass('dam_app.schema_migration_ledger') IS NOT NULL
+      AND CASE WHEN g.oid = 0 THEN has_table_privilege('public', to_regclass('dam_app.schema_migration_ledger'), allp.p)
+               ELSE has_table_privilege(g.oid, to_regclass('dam_app.schema_migration_ledger'), allp.p) END
+  UNION ALL SELECT 'ledger_privilege', app.rolname || ' has a column privilege on dam_app.schema_migration_ledger'
+    FROM app, allp WHERE to_regclass('dam_app.schema_migration_ledger') IS NOT NULL AND allp.p IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+      AND NOT has_table_privilege(app.oid, to_regclass('dam_app.schema_migration_ledger'), allp.p)
+      AND has_any_column_privilege(app.oid, to_regclass('dam_app.schema_migration_ledger'), allp.p)
   UNION ALL SELECT 'app_workflow_privilege', app.rolname || ' has ' || allp.p || ' on dam_app.rule_reversion_proposal'
     FROM app, allp WHERE to_regclass('dam_app.rule_reversion_proposal') IS NOT NULL
      AND allp.p NOT IN ('SELECT', 'INSERT')

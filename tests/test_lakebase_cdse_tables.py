@@ -143,13 +143,18 @@ def test_upgrade_by_migration_then_rollback_keeps_every_row_and_reapply_restores
         assert r.returncode == 0, r.stderr
     assert _valid(env) == ""
     _app_writes(env)
+    r = _psql(env["conn"], "-f", DOWN, env_extra=env["opts"])               # QA-059: refused while v1_7_009 guards it
+    assert r.returncode != 0 and "run the v1_7_009 down" in r.stderr
+    for m in reversed(later_than("v1_7_005")):                             # roll back in reverse order first
+        r = _psql(env["conn"], "-f", m[:-4] + "_down.sql", env_extra=env["opts"])
+        assert r.returncode == 0, (m, r.stderr)
     for _ in range(2):
         r = _psql(env["conn"], "-f", DOWN, env_extra=env["opts"])
         assert r.returncode == 0, r.stderr
     assert _counts(env) == ["1", "1", "1"]                                  # nothing dropped
     assert _pub_update(env).returncode != 0                                 # publisher grants reverted
     assert _psql(env["conn"], "-f", MIG, env_extra=env["opts"]).returncode == 0
-    for m in later_than("v1_7_005"):        # v1_7_005 hands rule_reversion_proposal to the app; v1_7_010 takes it back
+    for m in later_than("v1_7_005"):        # v1_7_010 takes rule_reversion_proposal back from the app (its down gave it)
         assert _psql(env["conn"], "-f", m, env_extra=env["opts"]).returncode == 0, m
     assert _valid(env) == "" and _pub_update(env).returncode == 0 and _counts(env) == ["1", "1", "1"]
     # re-running the full current 001 on top converges to the same state

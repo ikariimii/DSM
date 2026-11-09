@@ -542,8 +542,8 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   are refused; status stays guarded (applied -> pending refused, terminal row frozen); the app's real
   init_schema + insert_row + decide_pending (approve with pub_ids, reject, a second decision -> "no longer pending")
   work and leave the validator at 0 rows; upgrade from 001@c7bca54 (app-owned) twice, down twice (owner back, row
-  and trigger kept), re-up and 001 re-run converge. Note: re-running the older v1_7_005 migration hands the table
-  back to the app (it predates v1_7_010); run the later migrations after it (the validator reports it otherwise).
+  and trigger kept), re-up and 001 re-run converge. Superseded by QA-059: re-running the older v1_7_005 migration
+  no longer hands the table back (and tools/run_migration.py --lakebase refuses it once v1_7_010 is applied).
   UNVERIFIED: on Lakebase.
 
 ## QA058-ZS (low residual, 2026-11-09: Zs / separator whitespace in the catalog name, every layer)
@@ -560,3 +560,39 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   (tests/test_migration_downs.PG_CF_CLASS) adds the same code points; every down is executed with the edge, internal
   and separator-only cases. UNVERIFIED on Databricks: `\p{Z}` in regexp_replace (Java regex; runbook probe P8 can check
   it with catalog = 'dam_prod' + U+00A0).
+
+## QA-059 (push blocker, 2026-11-09: re-running an older Lakebase migration undid a later hardening)
+
+- Repro (QA): v1_7_005 re-run after v1_7_010 handed dam_app.rule_reversion_proposal back to the app role, which could
+  then DISABLE t_status_rule_reversion_proposal. Reproduced here on the pre-fix file (git 0e11d01) as a sensitivity
+  test (tests/test_qa059_lakebase_rerun.py::test_the_qa_repro_on_the_old_005_is_caught_by_these_checks).
+- Fix, layer 1 (files): the v1_7_005 block (byte-identical in lakebase/001 and the migration) never re-owns
+  rule_reversion_proposal and hands dam_cdse_change (the app's workflow table) to the app only while it is neither
+  owned by dam_lakebase_owner nor guard-triggered. lakebase/001's app-ownership loop now skips EVERY table owned by
+  dam_lakebase_owner or carrying a forbid_mutation / app_forbid_mutation / status_transition_guard trigger (so a future
+  guarded table missing from its exclusion list is safe too). The v1_7_005 down refuses while v1_7_009's status guard
+  exists on the outbox (roll back in reverse order).
+- Audit (2): every `OWNER TO <app role>` in lakebase/ is on an explicit list in the test (001 loop + 005 block, 005
+  down, 010 down); v1_7_004 / 006 / 007 / 008 / 009 / 010 grant or own only in the hardening direction. Live: after
+  001 + 010, EVERY Lakebase up file re-run by direct psql (and 001 re-run twice) leaves all 10 guarded tables owned by
+  dam_lakebase_owner, the app unable to DISABLE TRIGGER ALL / re-own any of them, and the validator at 0 rows.
+- Fix, layer 2 (tools/run_migration.py --lakebase, Genie's binding spec): ledger dam_app.schema_migration_ledger
+  (Lakebase migration v1_7_011 + identical block in 001; owned by dam_lakebase_owner; forbid_mutation row + TRUNCATE
+  triggers ENABLE ALWAYS; no PUBLIC / app privilege; the validator checks owner, triggers and privileges). Refused
+  (exit 3): an applied or older up file, or a down that is not of the newest applied migration, unless --rerun
+  "<reason >= 10 chars>" (recorded in the ledger); v1_7_005 once v1_7_010 is applied, ALWAYS (SUPERSEDED, flag or
+  not; also when only the probe sees 010 on a pre-ledger database). --baseline records a hand-migrated database.
+- Fix, layer 3: the validator runs after every runner-applied file; any violation = exit 5. Choice: both, because
+  the ledger blocks the unsafe file before it runs (the validator alone would only report after the app could
+  already have used the window), and the validator catches what no ledger rule anticipated.
+- CI: tests/test_qa059_lakebase_rerun.py::test_no_lakebase_or_postgres_file_uses_unicode_property_escapes (no
+  `\p{...}` in lakebase/ or any runtime file except the UC downs + UC probe); PG 17.11 rejects it live ("invalid
+  escape \ sequence").
+- Evidence (PG 17.11): 13 tests in tests/test_qa059_lakebase_rerun.py (010 -> direct psql 005 twice -> validator
+  clean and app cannot DISABLE; 001 re-run after 010 and every up re-run, all guarded tables; runner: 005 refused
+  without and with --rerun, re-run / older / out-of-order-down refusals, --rerun accepted and recorded, ledger
+  append-only even for a superuser and unreadable by the app, exit 5 on an injected privilege, --baseline).
+  tests/test_lakebase_cdse_tables.py now rolls back in reverse order.
+- UNVERIFIED: on Lakebase (deployer membership in dam_lakebase_owner for the ledger INSERT; the runner's
+  --lb-endpoint path, same as tools/validate_lakebase.py).
+

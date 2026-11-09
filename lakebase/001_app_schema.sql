@@ -76,6 +76,21 @@ CREATE TABLE IF NOT EXISTS rule_reversion_proposal (
         rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0),
         status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'rejected')),
         decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, pub_ids TEXT);
+-- QA-059: ownership is only ever handed to the app for dam_cdse_change (the app's workflow table), and only while it
+-- is NOT owned by dam_lakebase_owner; rule_reversion_proposal is never re-owned here (v1_7_010 owns it), so re-running
+-- this block (or lakebase/001, or this migration) after a later hardening cannot give a guarded table back to the app.
+DO $$
+DECLARE r TEXT := nullif(current_setting('dam.app_role', true), '');
+BEGIN
+  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) AND NOT EXISTS (
+       SELECT 1 FROM pg_class c JOIN pg_roles o ON o.oid = c.relowner
+       WHERE c.oid = 'dam_app.dam_cdse_change'::regclass AND o.rolname = 'dam_lakebase_owner') AND NOT EXISTS (
+       SELECT 1 FROM pg_trigger tr JOIN pg_proc fp ON fp.oid = tr.tgfoid
+       WHERE tr.tgrelid = 'dam_app.dam_cdse_change'::regclass AND NOT tr.tgisinternal
+         AND fp.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard')) THEN
+    EXECUTE format('ALTER TABLE dam_app.dam_cdse_change OWNER TO %I', r);
+  END IF;
+END $$;
 -- END v1_7_005 block
 -- BEGIN v1_7_008 block (app SCHEMA_CONTRACT §7 item 20: dam_cdse_outbox status pending | loaded | rejected; the same
 -- 3 values as dssmp_registration_outbox. Replaces every earlier status CHECK on the table (the inline
@@ -415,6 +430,12 @@ BEGIN
                                      'review_chain_head_log',
                                      'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox',
                                      'dam_cdse_outbox', 'rule_reversion_proposal')
+               -- QA-059: never re-own a table that a hardening gave to dam_lakebase_owner or that carries a guard
+               -- trigger, even when it is missing from the list above (a later guarded table)
+               AND c.relowner <> 'dam_lakebase_owner'::regrole
+               AND NOT EXISTS (SELECT 1 FROM pg_trigger tr JOIN pg_proc fp ON fp.oid = tr.tgfoid
+                               WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal
+                                 AND fp.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard'))
                AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = r) LOOP
       EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, r);
     END LOOP;
@@ -482,4 +503,34 @@ BEGIN
   END IF;
 END $$;
 -- END v1_7_010 block
+-- BEGIN v1_7_011 block (QA-059: applied-migrations ledger for tools/run_migration.py --lakebase. One row per applied
+-- Lakebase migration file (direction up | down | baseline), append-only like the other guarded tables: owned by
+-- dam_lakebase_owner, forbid_mutation() row + TRUNCATE triggers ENABLE ALWAYS, no privilege for PUBLIC or the app
+-- role (the deployer, a member of dam_lakebase_owner, inserts). The runner refuses a re-run of an applied migration
+-- unless --rerun "<reason>" is given, refuses an older migration than the newest applied one the same way, and
+-- ALWAYS refuses v1_7_005 once v1_7_010 is applied (flag or not).)
+CREATE TABLE IF NOT EXISTS dam_app.schema_migration_ledger (
+        ledger_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        migration TEXT NOT NULL CHECK (migration ~ '^v[0-9]+_[0-9]+_[0-9]{3}_[a-z0-9_]+[.]sql$'),
+        direction TEXT NOT NULL CHECK (direction IN ('up', 'down', 'baseline')),
+        sha256 TEXT NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+        rerun_reason TEXT CHECK (rerun_reason IS NULL OR length(trim(rerun_reason)) >= 10),
+        applied_by TEXT NOT NULL DEFAULT session_user,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());
+ALTER TABLE dam_app.schema_migration_ledger OWNER TO dam_lakebase_owner;
+REVOKE ALL ON dam_app.schema_migration_ledger FROM PUBLIC;
+CREATE OR REPLACE TRIGGER t_noupd_schema_migration_ledger BEFORE UPDATE OR DELETE ON dam_app.schema_migration_ledger
+  FOR EACH ROW EXECUTE FUNCTION dam_app.forbid_mutation();
+CREATE OR REPLACE TRIGGER t_notrunc_schema_migration_ledger BEFORE TRUNCATE ON dam_app.schema_migration_ledger
+  FOR EACH STATEMENT EXECUTE FUNCTION dam_app.forbid_mutation();
+ALTER TABLE dam_app.schema_migration_ledger ENABLE ALWAYS TRIGGER t_noupd_schema_migration_ledger,
+  ENABLE ALWAYS TRIGGER t_notrunc_schema_migration_ledger;
+DO $$
+DECLARE r TEXT := nullif(current_setting('dam.app_role', true), '');
+BEGIN
+  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('REVOKE ALL ON dam_app.schema_migration_ledger FROM %I', r);
+  END IF;
+END $$;
+-- END v1_7_011 block
 COMMIT;

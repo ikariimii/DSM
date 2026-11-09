@@ -9,6 +9,10 @@
 -- If the app already created any of the tables itself, CREATE IF NOT EXISTS keeps it and its rows; the outbox is
 -- moved to dam_lakebase_owner (the app's guard triggers stay; the DA validator checks the grants).
 -- DOWN: v1_7_005_cdse_reversion_tables_down.sql (no table, column or row is dropped).
+-- QA-059: this file never hands rule_reversion_proposal to the app and never re-owns a table owned by
+-- dam_lakebase_owner, so a (mistaken) re-run after v1_7_010 changes no ownership. tools/run_migration.py refuses it
+-- outright once v1_7_010 is applied (SUPERSEDED rule, no flag overrides it). On a database where this file CREATES
+-- rule_reversion_proposal, the table is the deployer's until v1_7_010 runs: apply v1_7_005..v1_7_010 in one deploy.
 -- UNVERIFIED: not run on a Lakebase instance.
 SET search_path TO dam_app;
 BEGIN;
@@ -32,6 +36,21 @@ CREATE TABLE IF NOT EXISTS rule_reversion_proposal (
         rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0),
         status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'rejected')),
         decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, pub_ids TEXT);
+-- QA-059: ownership is only ever handed to the app for dam_cdse_change (the app's workflow table), and only while it
+-- is NOT owned by dam_lakebase_owner; rule_reversion_proposal is never re-owned here (v1_7_010 owns it), so re-running
+-- this block (or lakebase/001, or this migration) after a later hardening cannot give a guarded table back to the app.
+DO $$
+DECLARE r TEXT := nullif(current_setting('dam.app_role', true), '');
+BEGIN
+  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) AND NOT EXISTS (
+       SELECT 1 FROM pg_class c JOIN pg_roles o ON o.oid = c.relowner
+       WHERE c.oid = 'dam_app.dam_cdse_change'::regclass AND o.rolname = 'dam_lakebase_owner') AND NOT EXISTS (
+       SELECT 1 FROM pg_trigger tr JOIN pg_proc fp ON fp.oid = tr.tgfoid
+       WHERE tr.tgrelid = 'dam_app.dam_cdse_change'::regclass AND NOT tr.tgisinternal
+         AND fp.proname IN ('forbid_mutation', 'app_forbid_mutation', 'status_transition_guard')) THEN
+    EXECUTE format('ALTER TABLE dam_app.dam_cdse_change OWNER TO %I', r);
+  END IF;
+END $$;
 -- END v1_7_005 block
 
 ALTER TABLE dam_cdse_outbox OWNER TO dam_lakebase_owner;
@@ -41,8 +60,6 @@ DO $$
 DECLARE r TEXT := nullif(current_setting('dam.app_role', true), '');
 BEGIN
   IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-    EXECUTE format('ALTER TABLE dam_cdse_change OWNER TO %I', r);
-    EXECUTE format('ALTER TABLE rule_reversion_proposal OWNER TO %I', r);
     EXECUTE format('REVOKE ALL ON dam_cdse_outbox FROM %I', r);
     EXECUTE format('GRANT SELECT, INSERT ON dam_cdse_outbox TO %I', r);
   END IF;

@@ -128,17 +128,34 @@ Fresh database, or simply converge any database to the current schema (idempoten
 psql -X -v ON_ERROR_STOP=1 -f lakebase/001_app_schema.sql
 ```
 
-Existing database at the v1_7_003-era 001, step by step instead (same end state):
+Existing database at the v1_7_003-era 001, step by step instead (same end state). QA-059: Lakebase migration files
+go through `tools/run_migration.py --lakebase` ONLY (not bare psql). It records each file in the ledger
+`dam_app.schema_migration_ledger` (v1_7_011, owned by dam_lakebase_owner, append-only), refuses a file that is
+already applied or older than the newest applied one unless `--rerun "<reason>"` is given, ALWAYS refuses
+`v1_7_005` once `v1_7_010` is applied (no flag overrides it: 005 predates the rule_reversion_proposal hardening), and
+runs the validator after every file (exit 5 on any violation). Do NOT re-run v1_7_005 after v1_7_010 by any route.
 
 ```bash
-psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql
-psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_005_cdse_reversion_tables.sql
-psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_006_chain_head_log.sql
-psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_007_qa056_unique_guards.sql   # run its PRE-CHECK first
-psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_008_cdse_outbox_status.sql
-psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_009_status_transition_guard.sql
-PGOPTIONS='-c dam.app_role=<app role>' psql -X -v ON_ERROR_STOP=1 -f lakebase/migrations/v1_7_010_rule_reversion_owner.sql
+lb() { python tools/run_migration.py --lakebase --app-role "$APP_ROLE" --publisher-login "$PUBLISH_LOGIN" \
+        --extract-role "$EXTRACT_ROLE" "$@"; }     # connects with the PG* variables above (or --dsn)
+lb --file lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql
+lb --file lakebase/migrations/v1_7_005_cdse_reversion_tables.sql
+lb --file lakebase/migrations/v1_7_006_chain_head_log.sql
+lb --file lakebase/migrations/v1_7_007_qa056_unique_guards.sql   # run its PRE-CHECK first
+lb --file lakebase/migrations/v1_7_008_cdse_outbox_status.sql
+lb --file lakebase/migrations/v1_7_009_status_transition_guard.sql
+lb --file lakebase/migrations/v1_7_010_rule_reversion_owner.sql
+lb --file lakebase/migrations/v1_7_011_migration_ledger.sql
 ```
+
+A database migrated by hand before the ledger existed: record what is already applied first (writes `baseline`
+rows for that file and every older one; runs nothing), e.g. `lb --file lakebase/migrations/v1_7_010_rule_reversion_owner.sql --baseline`.
+The runner also probes for the v1_7_006 / v1_7_009 / v1_7_010 effects, so 005 stays refused on such a database
+even before the baseline. Exit codes: 0 applied (validator OK), 2 bad file / arguments, 3 refused (ledger rules),
+4 the file failed (nothing recorded), 5 applied but the validator reports violations (fix forward).
+Re-running `lakebase/001_app_schema.sql` stays safe after any migration (it never hands an owner-owned or
+guard-triggered table to the app; tested). Rollbacks: reverse order only (the runner refuses a down that is not the
+newest applied migration; the v1_7_005 down also refuses by itself while v1_7_009's status guard exists).
 
 Validator (read only):
 
