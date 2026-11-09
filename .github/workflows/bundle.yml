@@ -36,6 +36,8 @@ jobs:
       - run: python tools/generate_sample_data.py && git diff --exit-code -- sample_data
       # App CAN_USE grants are generated from the dam list (bundles cannot loop): fail if resources/app.yml drifted.
       - run: python tools/render_app_permissions.py --check
+      # UC SELECT on ref.v_dam_reviewer_authority per dam group, generated from the same dam list (v1.6 ROLE-LEVEL).
+      - run: python tools/render_uc_reviewer_grants.py --check
 
   validate:
     needs: test
