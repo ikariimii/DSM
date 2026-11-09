@@ -295,9 +295,12 @@ class FakeCursor:
             e = self.conn.fail.pop(0)
             raise e
         self.description = [("x",)] if sql.startswith("SELECT") else None
+        # QA-058: answer the startup probe like a provisioned Lakebase (owner-owned table, ENABLE ALWAYS trigger)
+        self._rows = ([{"owner": "dam_lakebase_owner"}] if "pg_get_userbyid(c.relowner)" in sql else
+                      [{"tgenabled": "A"}] if "tgenabled" in sql else [{"x": 1}])
 
     def fetchall(self):
-        return [{"x": 1}]
+        return self._rows
 
 
 class FakeConn:
@@ -335,6 +338,9 @@ def test_state_postgres_path(monkeypatch):
     assert log[2] == 'CREATE SCHEMA IF NOT EXISTS "dam_app"'
     assert not any(x.startswith("DROP TRIGGER") for x in log)    # CREATE OR REPLACE TRIGGER, no unguarded window
     assert any('"dam_app".app_user' in s for s in log) and any("BIGSERIAL" in s for s in log)
+    # QA-058: no DDL on the owner's rule_reversion_proposal; its owner and transition trigger are verified instead
+    assert not any("rule_reversion_proposal" in s for s in log if not s.startswith("SELECT"))
+    assert any("pg_get_userbyid(c.relowner)" in s for s in log) and any("tgenabled" in s for s in log)
     assert st.execute("SELECT 1") == [{"x": 1}]
     # scale-to-zero wake-up / HA failover: retried with backoff on a fresh pooled connection
     fail.extend([OperationalError("server closed the connection"), OperationalError("terminating connection")])

@@ -11,6 +11,7 @@ import pytest
 
 from backend import audit_chain as ac
 from backend.repos.state import APPEND_ONLY, StateStore
+from reversion_owner_stub import provision as provision_owner_tables   # QA-058: the owner's table, pre-provisioned
 
 PG = os.environ.get("DAM_TEST_PG")
 pytestmark = pytest.mark.skipif(not PG, reason="set DAM_TEST_PG (libpq conninfo) to run against a real PostgreSQL")
@@ -23,6 +24,7 @@ def pg_store():
     from psycopg_pool import ConnectionPool
 
     schema = f"qa045b_{uuid.uuid4().hex[:10]}"
+    provision_owner_tables(PG, schema)
     pool = ConnectionPool(PG, min_size=1, max_size=2, kwargs={"row_factory": dict_row}, open=True)
     st = StateStore("postgres", schema=schema, pg_pool=pool, retries=1)
     try:
@@ -131,6 +133,7 @@ def test_qa045c_concurrent_inits_on_fresh_db_have_no_errors():
     pytest.importorskip("psycopg")
     schema = f"qa045c_{uuid.uuid4().hex[:10]}"
     try:
+        provision_owner_tables(PG, schema)    # QA-058: the owner provisions first; the app's tables are created fresh
         errors, _ = _concurrent_inits(schema, 8)
         assert errors == []
         import psycopg
