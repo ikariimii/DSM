@@ -2,9 +2,10 @@
 -- item 19, App Dev e988454). Replaces the DA 86993d0 shape IN PLACE (rename, never drop and recreate):
 --   requested_by -> proposed_by, applied_at -> processed_at, + reason_code; requested_at and
 --   supersedes_dssmp_version_id are removed ONLY if they hold no value (else the script raises and changes nothing:
---   rows written in the old shape need a human decision); status CHECK = pending | loaded | rejected |
---   rejected_invalid (§7 item 19; the DA load job writes 'rejected'), old values mapped applied -> loaded,
---   rejected_stale -> rejected.
+--   rows written in the old shape need a human decision); status CHECK = pending | loaded | rejected
+--   (§7 item 19, v1.7 steering 2026-11-09: 'rejected_invalid' dropped, neither the app nor the DA load job writes
+--   it), old values mapped applied -> loaded, rejected_stale / rejected_invalid -> rejected (reason_code / message
+--   kept). Re-running this file on a database that ran an earlier version converges to the 3-value CHECK.
 -- The same block is inlined in lakebase/001_app_schema.sql (tests/test_dssmp_outbox_contract.py checks they are
 -- identical), so a normal 001 re-run applies it; this file is for running it on its own. Run as the deployer (member
 -- of dam_lakebase_owner), inside a transaction. IDEMPOTENT: a table already in the contract shape is left as is.
@@ -48,8 +49,8 @@ BEGIN
   ALTER TABLE dam_app.dssmp_registration_outbox ALTER COLUMN status DROP DEFAULT;
   ALTER TABLE dam_app.dssmp_registration_outbox DROP CONSTRAINT IF EXISTS ck_dssmp_outbox_status;
   UPDATE dam_app.dssmp_registration_outbox SET status = 'loaded' WHERE status = 'applied';
-  UPDATE dam_app.dssmp_registration_outbox SET status = 'rejected' WHERE status = 'rejected_stale';
+  UPDATE dam_app.dssmp_registration_outbox SET status = 'rejected' WHERE status IN ('rejected_stale', 'rejected_invalid');
   ALTER TABLE dam_app.dssmp_registration_outbox ADD CONSTRAINT ck_dssmp_outbox_status
-    CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid'));
+    CHECK (status IN ('pending', 'loaded', 'rejected'));
 END $$;
 -- END v1_7_004 block

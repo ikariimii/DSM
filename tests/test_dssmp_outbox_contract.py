@@ -40,9 +40,13 @@ def test_columns_match_the_app_ddl_the_app_insert_and_001():
     ins = router[router.index("st.insert_dssmp_outbox(q, {"):]
     ins = ins[:ins.index("})")]
     assert tuple(re.findall(r'"(\w+)":', ins)) == dr.OUTBOX_COLS
-    assert "status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')" in lb
-    assert re.search(r"status TEXT NOT NULL CHECK \(status IN \('pending', 'loaded', 'rejected', 'rejected_invalid'\)\)",
-                     st)
+    # v1.7 steering 2026-11-09: status pending | loaded | rejected only ('rejected_invalid' dropped in 001 and v1_7_004)
+    assert "CONSTRAINT ck_dssmp_outbox_status CHECK (status IN ('pending', 'loaded', 'rejected')));" in lb_ddl + ");"
+    assert "rejected_invalid" not in lb_ddl
+    app_vals = set(re.findall(r"'(\w+)'", re.search(r"status TEXT NOT NULL CHECK \(status IN \(([^)]*)\)\)",
+                                                     app_ddl).group(1)))
+    # the app drops 'rejected_invalid' in step (its CHECK may still list it until then; never anything else)
+    assert {"pending", "loaded", "rejected"} <= app_vals <= {"pending", "loaded", "rejected", "rejected_invalid"}
     assert "document_sha256 TEXT NOT NULL" in lb_ddl
 
 
@@ -164,3 +168,31 @@ def test_old_rows_with_values_are_never_dropped_and_rollback_keeps_data(env):
     out = _psql(env["conn"], "-c", "SELECT status || ':' || requested_by || ':' || requested_at || ':' || reason_code "
                                    "FROM dam_app.dssmp_registration_outbox").stdout
     assert out.split() == ["applied:r:t:kept"]                             # nothing lost, reason_code kept
+
+
+@live
+def test_status_check_is_pending_loaded_rejected_only_and_the_migration_converges(env):
+    """v1.7 steering 2026-11-09: 'rejected_invalid' is no longer an outbox status. Fresh 001 refuses it; a database
+    whose CHECK still allowed it (and holds such a row) is converged by v1_7_004 (row -> 'rejected', reason kept)."""
+    assert _psql(env["conn"], "-f", DDL_PATH, env_extra=env["opts"]).returncode == 0
+    ins = ("INSERT INTO dam_app.dssmp_registration_outbox (outbox_id, dam_id, dssmp_version_id, version_no, "
+           "effective_from, document_sha256, proposed_by, approved_by, approved_at, approval_record_hash, status, "
+           "reason_code) VALUES ('{}', 'D1', 'DS-1', 1, 't', 'h', 'p', 'c', 't', 'h', '{}', 'x_code')")
+    r = _psql(env["conn"], "-c", ins.format("OB-RI", "rejected_invalid"))
+    assert r.returncode != 0 and "ck_dssmp_outbox_status" in r.stderr
+    for i, s in enumerate(("pending", "loaded", "rejected")):
+        assert _psql(env["conn"], "-c", ins.format(f"OB-{i}", s)).returncode == 0, s
+    # the previous CHECK (4 values) with a rejected_invalid row, as left by the earlier 001 / v1_7_004
+    assert _psql(env["conn"], "-c", "ALTER TABLE dam_app.dssmp_registration_outbox DROP CONSTRAINT ck_dssmp_outbox_status",
+                 "-c", "ALTER TABLE dam_app.dssmp_registration_outbox ADD CONSTRAINT ck_dssmp_outbox_status CHECK "
+                       "(status IN ('pending', 'loaded', 'rejected', 'rejected_invalid'))",
+                 "-c", ins.format("OB-RI", "rejected_invalid")).returncode == 0
+    for _ in range(2):
+        r = _psql(env["conn"], "-1", "-f", MIG)
+        assert r.returncode == 0, r.stderr
+    out = _psql(env["conn"], "-c", "SELECT outbox_id || ':' || status || ':' || reason_code FROM "
+                                   "dam_app.dssmp_registration_outbox ORDER BY 1").stdout.split()
+    assert out == ["OB-0:pending:x_code", "OB-1:loaded:x_code", "OB-2:rejected:x_code", "OB-RI:rejected:x_code"]
+    d = _psql(env["conn"], "-c", "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                                 "WHERE conname = 'ck_dssmp_outbox_status'").stdout
+    assert "rejected_invalid" not in d and "'rejected'" in d

@@ -470,7 +470,7 @@ effective_from, effective_to`; bridge `ref.pfm_instrument`.
 `manual_reading`, `extract_watermark` and the trigger functions; the app service principal's role owns its mutable
 tables and has SELECT + INSERT only on the append-only ones. `lakebase/001_app_schema.sql` also adds the v2 chain
 columns, the chain index, `review_chain_head` and `app_user.user_id` so the app needs no DDL on owner-owned objects
-(state.py patch: `tools/patches/v17_lakebase_owner_state_init.patch`). Validate with `tools/validate_lakebase.py`.
+(state.py owner-aware init, applied by App Dev in febbe7c / ac14bdf). Validate with `tools/validate_lakebase.py`.
 
 ### 7.1c DSSMP registration and publication (v1.7, Genie 2026-11-09)
 - **`ref.dssmp_version`** (sql/ddl/04 + migration `v1_7_003_dssmp_registration`, down script alongside) gains
@@ -494,8 +494,8 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   lakebase/001, rollback `..._down.sql`):** exactly `outbox_id` PK, `dam_id`, `dssmp_version_id`, `version_no`,
   `effective_from`, `change_reason`, `source_ref`, `document_uri`, `document_sha256` (NOT NULL), `proposed_by`,
   `approved_by`, `approved_at` (= signed_ts of the approve record), `approval_record_hash`, `status`
-  (`pending | loaded | rejected | rejected_invalid`; the loader writes `loaded` / `rejected`, `rejected_invalid` is
-  accepted because §7.19 allows it), `reason_code` (`stale`, a loader code below or a `dssmp_*` code; NULL when
+  (`pending | loaded | rejected` only; the loader writes `loaded` / `rejected`; `rejected_invalid` dropped by the
+  v1.7 steering 2026-11-09 in 001 + v1_7_004, an existing row is mapped to `rejected` with its reason kept), `reason_code` (`stale`, a loader code below or a `dssmp_*` code; NULL when
   loaded), `message` (free text), `processed_at`. No `supersedes` column: the loader looks up the dam's current
   approved version itself. The app INSERTs (as the app role, `StateStore.insert_dssmp_outbox`) in the same
   transaction as the CDSE's approve record; the publisher role has SELECT + UPDATE on `(status, reason_code, message,

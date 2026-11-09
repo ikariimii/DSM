@@ -411,3 +411,16 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   layer-1 commands and outputs; tools/verify/qa057_guard_probe.sql = the downs' first statement (test) and its PG
   emulation. NOT checked: every Databricks-side expected output (Statement Execution API JSON shape, DESCRIBE FUNCTION
   text, information_schema column names, jobs submit exit codes) - the steps themselves are the verification.
+
+## OUTBOX-STATUS-3 (v1.7 steering 2026-11-09: dssmp_registration_outbox status pending | loaded | rejected)
+
+- 'rejected_invalid' dropped from `ck_dssmp_outbox_status` in lakebase/001 (CREATE TABLE and the v1_7_004 block) and
+  in lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql (same block; existing 'rejected_invalid' rows are mapped
+  to 'rejected', reason_code / message kept; re-running converges a database that ran the earlier version). The down
+  is unchanged (maps rejected -> rejected_invalid for the pre-v1.7 shape). `dssmp_registration.STATUSES` = 3 values.
+  dam_cdse_outbox is NOT changed (not in the steering).
+- App side: App Dev drops 'rejected_invalid' from the app's dssmp_registration_outbox CHECK in step; until then
+  tests/test_dssmp_outbox_contract.py accepts the app CHECK with or without it (nothing else).
+- Evidence (PG 17.11): fresh 001 refuses 'rejected_invalid' and accepts the three values; a 4-value CHECK with a
+  'rejected_invalid' row is converged by the migration (twice): row -> rejected, constraint without rejected_invalid.
+- UNVERIFIED: on Lakebase.

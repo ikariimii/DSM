@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS dssmp_registration_outbox (outbox_id TEXT PRIMARY KEY
   source_ref TEXT, document_uri TEXT, document_sha256 TEXT NOT NULL, proposed_by TEXT NOT NULL,
   approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL, status TEXT NOT NULL,
   reason_code TEXT, message TEXT, processed_at TEXT,
-  CONSTRAINT ck_dssmp_outbox_status CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')));
+  CONSTRAINT ck_dssmp_outbox_status CHECK (status IN ('pending', 'loaded', 'rejected')));
 -- BEGIN v1_7_004 block
 DO $$
 DECLARE has_col BOOLEAN;
@@ -127,9 +127,9 @@ BEGIN
   ALTER TABLE dam_app.dssmp_registration_outbox ALTER COLUMN status DROP DEFAULT;
   ALTER TABLE dam_app.dssmp_registration_outbox DROP CONSTRAINT IF EXISTS ck_dssmp_outbox_status;
   UPDATE dam_app.dssmp_registration_outbox SET status = 'loaded' WHERE status = 'applied';
-  UPDATE dam_app.dssmp_registration_outbox SET status = 'rejected' WHERE status = 'rejected_stale';
+  UPDATE dam_app.dssmp_registration_outbox SET status = 'rejected' WHERE status IN ('rejected_stale', 'rejected_invalid');
   ALTER TABLE dam_app.dssmp_registration_outbox ADD CONSTRAINT ck_dssmp_outbox_status
-    CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid'));
+    CHECK (status IN ('pending', 'loaded', 'rejected'));
 END $$;
 -- END v1_7_004 block
 

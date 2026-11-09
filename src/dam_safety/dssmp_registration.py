@@ -4,8 +4,8 @@ Source: Lakebase dam_app.dssmp_registration_outbox, the agreed app contract (app
 lakebase/001 + lakebase/migrations/v1_7_004). The app INSERTs at 'pending' in the CDSE approve transaction; the
 publisher role may only UPDATE status / reason_code / message / processed_at. Columns: outbox_id, dam_id,
 dssmp_version_id, version_no, effective_from, change_reason, source_ref, document_uri, document_sha256, proposed_by,
-approved_by, approved_at, approval_record_hash, status (pending | loaded | rejected; the app also accepts
-rejected_invalid, this job never writes it), reason_code, message, processed_at. The previous approved version is
+approved_by, approved_at, approval_record_hash, status (pending | loaded | rejected; 'rejected_invalid' was
+dropped from the CHECK on 2026-11-09), reason_code, message, processed_at. The previous approved version is
 looked up in ref.dssmp_version (no supersedes column).
 Target: ref.dssmp_version (sql/ddl/04 + migration v1_7_003_dssmp_registration). ONE conditional MERGE per run inserts
 the new version as 'approved' (loaded_from_outbox_id = outbox_id) and, in the same statement, closes the dam's previous
@@ -45,7 +45,7 @@ DSSMP_COLS = ("dssmp_version_id", "dam_id", "version_no", "effective_from", "eff
 OUTBOX_COLS = ("outbox_id", "dam_id", "dssmp_version_id", "version_no", "effective_from", "change_reason",
                "source_ref", "document_uri", "document_sha256", "proposed_by", "approved_by", "approved_at",
                "approval_record_hash", "status", "reason_code", "message", "processed_at")
-STATUSES = ("pending", "loaded", "rejected", "rejected_invalid")
+STATUSES = ("pending", "loaded", "rejected")   # v1.7 steering 2026-11-09: no rejected_invalid
 REQUIRED = ("outbox_id", "dam_id", "dssmp_version_id", "version_no", "effective_from", "document_sha256",
             "approved_by", "approved_at", "approval_record_hash")
 APPROVAL_WAIT = dt.timedelta(hours=1)
