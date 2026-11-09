@@ -11,6 +11,13 @@
 -- (table or column), DELETE or TRIGGER on an append-only table, may SET
 -- session_replication_role, or has it preset; a guard trigger is missing, not on forbid_mutation(), or not ENABLE
 -- ALWAYS ('A'); any trigger on an append-only table is disabled (pg_trigger.tgenabled = 'D').
+-- v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox): not owned
+-- by dam_lakebase_owner, or the app holds anything beyond SELECT / INSERT on them; dam_lakebase_publisher missing,
+-- able to log in / privileged, holding anything beyond USAGE on the schema, SELECT and UPDATE (status, message,
+-- applied_at) on those three tables (any other table, column, sequence, INSERT, DELETE, TRUNCATE, TRIGGER,
+-- REFERENCES), a member of the owner, or named in a default ACL; the app role a member of the publisher role. With
+-- SET dam.extract_role: the extract role holding anything beyond SELECT (plus INSERT / UPDATE on extract_watermark),
+-- or no default ACL giving it SELECT on future tables of dam_lakebase_owner.
 WITH cfg AS (SELECT nullif(current_setting('dam.app_role', true), '') AS app,
                     'dam_lakebase_owner'::text AS own),
 guarded(t) AS (VALUES ('exceedance_status'), ('review_signoff'), ('manual_reading')),
@@ -18,6 +25,16 @@ gt AS (SELECT g.t, c.oid, c.relowner FROM guarded g
        LEFT JOIN pg_class c ON c.relname = g.t AND c.relnamespace = to_regnamespace('dam_app')),
 want(t, tg, kind) AS (SELECT t, 't_noupd_' || t, 'row' FROM guarded UNION ALL SELECT t, 't_notrunc_' || t, 'truncate' FROM guarded),
 app AS (SELECT r.* FROM cfg JOIN pg_roles r ON r.rolname = cfg.app),
+pub AS (SELECT r.* FROM pg_roles r WHERE r.rolname = 'dam_lakebase_publisher'),
+ext AS (SELECT r.* FROM pg_roles r WHERE r.rolname = nullif(current_setting('dam.extract_role', true), '')),
+outbox(t) AS (VALUES ('ref_change_publication'), ('onboarding_publication'), ('dssmp_registration_outbox')),
+ot AS (SELECT o.t, c.oid, c.relowner FROM outbox o
+       LEFT JOIN pg_class c ON c.relname = o.t AND c.relnamespace = to_regnamespace('dam_app')),
+tabs AS (SELECT c.oid, c.relname FROM pg_class c WHERE c.relnamespace = to_regnamespace('dam_app')
+         AND c.relkind IN ('r', 'p', 'v', 'm')),
+cols AS (SELECT a.attrelid, a.attname FROM pg_attribute a JOIN tabs ON tabs.oid = a.attrelid
+         WHERE a.attnum > 0 AND NOT a.attisdropped),
+allp(p) AS (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')),
 own AS (SELECT r.* FROM cfg JOIN pg_roles r ON r.rolname = cfg.own),
 privs(p) AS (VALUES ('TRUNCATE'), ('UPDATE'), ('DELETE'), ('TRIGGER'))
 SELECT * FROM (
@@ -71,4 +88,50 @@ SELECT * FROM (
   UNION ALL SELECT 'app_preset_replication_role', 'pg_db_role_setting presets session_replication_role'
     FROM app, pg_db_role_setting s WHERE s.setrole IN (app.oid, 0)
      AND array_to_string(s.setconfig, ',') ILIKE '%session_replication_role%'
+  UNION ALL SELECT 'outbox_missing', 'dam_app.' || t FROM ot WHERE oid IS NULL
+  UNION ALL SELECT 'outbox_owner', 'dam_app.' || t || ' owned by ' || relowner::regrole::text
+    FROM ot WHERE oid IS NOT NULL AND relowner::regrole::text <> 'dam_lakebase_owner'
+  UNION ALL SELECT 'app_outbox_privilege', app.rolname || ' has ' || allp.p || ' on dam_app.' || ot.t
+    FROM app, ot, allp WHERE ot.oid IS NOT NULL AND allp.p NOT IN ('SELECT', 'INSERT')
+     AND has_table_privilege(app.oid, ot.oid, allp.p)
+  UNION ALL SELECT 'app_outbox_privilege', app.rolname || ' has column UPDATE on dam_app.' || ot.t
+    FROM app, ot WHERE ot.oid IS NOT NULL AND has_any_column_privilege(app.oid, ot.oid, 'UPDATE')
+  UNION ALL SELECT 'publisher_role_missing', 'role dam_lakebase_publisher does not exist'
+    WHERE NOT EXISTS (SELECT 1 FROM pub)
+  UNION ALL SELECT 'publisher_role_attrs', 'dam_lakebase_publisher must be NOLOGIN and unprivileged'
+    FROM pub WHERE rolcanlogin OR rolsuper OR rolreplication OR rolbypassrls OR rolcreaterole OR rolcreatedb
+  UNION ALL SELECT 'publisher_member_of_owner', 'dam_lakebase_publisher is a member of dam_lakebase_owner'
+    FROM pub, own WHERE pg_has_role(pub.oid, own.oid, 'MEMBER')
+  UNION ALL SELECT 'app_member_of_publisher', app.rolname || ' is a member of dam_lakebase_publisher'
+    FROM app, pub WHERE pg_has_role(app.oid, pub.oid, 'MEMBER')
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has ' || allp.p || ' on dam_app.' || tabs.relname
+    FROM pub, tabs, allp WHERE has_table_privilege(pub.oid, tabs.oid, allp.p)
+     AND NOT (allp.p = 'SELECT' AND tabs.relname IN (SELECT t FROM outbox))
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has column ' || cp.p || ' on dam_app.'
+      || tabs.relname || '.' || cols.attname
+    FROM pub, tabs JOIN cols ON cols.attrelid = tabs.oid, (VALUES ('INSERT'), ('UPDATE'), ('REFERENCES')) cp(p)
+    WHERE has_column_privilege(pub.oid, tabs.oid, cols.attname, cp.p)
+     AND NOT (cp.p = 'UPDATE' AND tabs.relname IN (SELECT t FROM outbox)
+              AND cols.attname IN ('status', 'message', 'applied_at'))
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher lacks UPDATE (' || c.col || ') on dam_app.' || ot.t
+    FROM pub, ot, (VALUES ('status'), ('message'), ('applied_at')) c(col)
+    WHERE ot.oid IS NOT NULL AND NOT has_column_privilege(pub.oid, ot.oid, c.col, 'UPDATE')
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has a privilege on sequence ' || c.relname
+    FROM pub, pg_class c WHERE c.relnamespace = to_regnamespace('dam_app') AND c.relkind = 'S'
+     AND (has_sequence_privilege(pub.oid, c.oid, 'USAGE') OR has_sequence_privilege(pub.oid, c.oid, 'UPDATE'))
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher may CREATE in schema dam_app'
+    FROM pub WHERE has_schema_privilege(pub.oid, 'dam_app', 'CREATE')
+  UNION ALL SELECT 'publisher_default_privilege', 'a default ACL grants dam_lakebase_publisher: '
+      || array_to_string(d.defaclacl, ',')
+    FROM pub, pg_default_acl d WHERE array_to_string(d.defaclacl, ',') ~ '(^|,)dam_lakebase_publisher='
+  UNION ALL SELECT 'extract_privilege', ext.rolname || ' has ' || allp.p || ' on dam_app.' || tabs.relname
+    FROM ext, tabs, allp WHERE allp.p <> 'SELECT' AND has_table_privilege(ext.oid, tabs.oid, allp.p)
+     AND NOT (tabs.relname = 'extract_watermark' AND allp.p IN ('INSERT', 'UPDATE'))
+  UNION ALL SELECT 'extract_privilege', ext.rolname || ' has column UPDATE on dam_app.' || tabs.relname
+    FROM ext, tabs WHERE tabs.relname <> 'extract_watermark' AND has_any_column_privilege(ext.oid, tabs.oid, 'UPDATE')
+  UNION ALL SELECT 'extract_default_select_missing', 'no ALTER DEFAULT PRIVILEGES FOR ROLE dam_lakebase_owner IN '
+      || 'SCHEMA dam_app GRANT SELECT ON TABLES TO ' || ext.rolname
+    FROM ext WHERE NOT EXISTS (SELECT 1 FROM pg_default_acl d, own WHERE d.defaclrole = own.oid
+      AND d.defaclnamespace = to_regnamespace('dam_app') AND d.defaclobjtype = 'r'
+      AND array_to_string(d.defaclacl, ',') ~ ('(^|,)"?' || ext.rolname || '"?=r/'))
 ) v ORDER BY 1, 2;

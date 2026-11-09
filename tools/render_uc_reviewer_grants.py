@@ -1,7 +1,9 @@
 """Render the per-dam GRANT block of sql/ddl/10b_reviewer_authority.sql from the dam list (SCHEMA_CONTRACT §2, v1.6).
 
 Each dam group `dam-<dam_id>-members` (the groups ref.dam_row_filter uses) gets USE SCHEMA on ref and SELECT on the
-least-privilege view ref.v_dam_reviewer_authority, and nothing else: never ref.dam or ref.project_membership.
+least-privilege view ref.v_dam_reviewer_authority and (v1.7, app SCHEMA_CONTRACT §7 item 18: OBO reads at go-live and
+flag-apply) SELECT on ref.dssmp_version (per-dam row filter in both security modes, sql/ddl/10a_*), and nothing else:
+never ref.dam or ref.project_membership.
 Same dam-id source and validation as tools/render_app_permissions.py. CI runs --check.
 
 Usage:
@@ -20,6 +22,7 @@ SQL = os.path.join(ROOT, "sql", "ddl", "10b_reviewer_authority.sql")
 BEGIN = "-- BEGIN GENERATED grants (tools/render_uc_reviewer_grants.py; do not edit by hand)"
 END = "-- END GENERATED grants"
 VIEW = "ref.v_dam_reviewer_authority"
+DSSMP = "ref.dssmp_version"
 
 _spec = importlib.util.spec_from_file_location("_rap", os.path.join(ROOT, "tools", "render_app_permissions.py"))
 _rap = importlib.util.module_from_spec(_spec)
@@ -37,7 +40,8 @@ def render(dam_ids) -> str:
     lines = [BEGIN]
     for d in ids:
         g = f"`dam-{d}-members`"
-        lines += [f"GRANT USE SCHEMA ON SCHEMA ref TO {g};", f"GRANT SELECT ON TABLE {VIEW} TO {g};"]
+        lines += [f"GRANT USE SCHEMA ON SCHEMA ref TO {g};", f"GRANT SELECT ON TABLE {VIEW} TO {g};",
+                  f"GRANT SELECT ON TABLE {DSSMP} TO {g};"]
     lines.append(END)
     return "\n".join(lines) + "\n"
 

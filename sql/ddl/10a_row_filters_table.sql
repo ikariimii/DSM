@@ -11,6 +11,7 @@ ALTER TABLE ref.sensor                 SET ROW FILTER ref.dam_row_filter ON (dam
 ALTER TABLE ref.calibration            SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE ref.threshold              SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE ref.pfm                    SET ROW FILTER ref.dam_row_filter ON (dam_id);
+ALTER TABLE ref.dssmp_version          SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE silver.reading_reduced     SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE silver.incl_reduced        SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE ref.incl_installation      SET ROW FILTER ref.dam_row_filter ON (dam_id);

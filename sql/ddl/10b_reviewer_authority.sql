@@ -26,18 +26,24 @@ FROM ref.project_membership m
 JOIN ref.dam d ON d.dam_id = m.dam_id
 WHERE upper(m.role) = 'CDSE' AND m.dam_id <> '*' AND ref.dam_row_filter(m.dam_id);
 
--- Grants: USE SCHEMA ref + SELECT on the view, per dam group only. Bundles/SQL files cannot loop, so the block is
+-- Grants: USE SCHEMA ref + SELECT on the view + (v1.7) SELECT on ref.dssmp_version (row-filtered per dam, 10a_*), per dam
+-- group only. Bundles/SQL files cannot loop, so the block is
 -- GENERATED from the dam list by tools/render_uc_reviewer_grants.py; CI runs --check. USE CATALOG for the dam groups is
 -- a deployment prerequisite not granted by this repo (UNVERIFIED, VERIFICATION.md UC-GRANTS).
 -- BEGIN GENERATED grants (tools/render_uc_reviewer_grants.py; do not edit by hand)
 GRANT USE SCHEMA ON SCHEMA ref TO `dam-SYN-DAM-01-members`;
 GRANT SELECT ON TABLE ref.v_dam_reviewer_authority TO `dam-SYN-DAM-01-members`;
+GRANT SELECT ON TABLE ref.dssmp_version TO `dam-SYN-DAM-01-members`;
 GRANT USE SCHEMA ON SCHEMA ref TO `dam-SYN-DAM-02-members`;
 GRANT SELECT ON TABLE ref.v_dam_reviewer_authority TO `dam-SYN-DAM-02-members`;
+GRANT SELECT ON TABLE ref.dssmp_version TO `dam-SYN-DAM-02-members`;
 GRANT USE SCHEMA ON SCHEMA ref TO `dam-SYN-DAM-03-members`;
 GRANT SELECT ON TABLE ref.v_dam_reviewer_authority TO `dam-SYN-DAM-03-members`;
+GRANT SELECT ON TABLE ref.dssmp_version TO `dam-SYN-DAM-03-members`;
 GRANT USE SCHEMA ON SCHEMA ref TO `dam-SYN-DAM-04-members`;
 GRANT SELECT ON TABLE ref.v_dam_reviewer_authority TO `dam-SYN-DAM-04-members`;
+GRANT SELECT ON TABLE ref.dssmp_version TO `dam-SYN-DAM-04-members`;
 GRANT USE SCHEMA ON SCHEMA ref TO `dam-SYN-DAM-05-members`;
 GRANT SELECT ON TABLE ref.v_dam_reviewer_authority TO `dam-SYN-DAM-05-members`;
+GRANT SELECT ON TABLE ref.dssmp_version TO `dam-SYN-DAM-05-members`;
 -- END GENERATED grants

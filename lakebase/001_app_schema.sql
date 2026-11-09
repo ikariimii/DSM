@@ -150,7 +150,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
 --     dam_lakebase_owner; this file refuses to finish if it is. state.py must skip DDL on the owner-owned objects:
 --     tools/patches/v17_lakebase_owner_state_init.patch (App Dev applies it; not applied here).
 --   * Guard triggers are ENABLE ALWAYS, so they fire even under session_replication_role = replica.
---   * The extract job's role (SET dam.extract_role) gets SELECT on all tables + INSERT/UPDATE on extract_watermark.
+--   * The extract job's role (SET dam.extract_role) gets SELECT on all tables + INSERT/UPDATE on extract_watermark,
+--     and SELECT on tables created later by dam_lakebase_owner or the app role (ALTER DEFAULT PRIVILEGES, app
+--     SCHEMA_CONTRACT §7 item 17 (c)). It is never widened beyond that.
+--   * v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox) are
+--     owned by dam_lakebase_owner: the app has SELECT + INSERT only. A separate NOLOGIN role dam_lakebase_publisher
+--     has USAGE, SELECT and column-level UPDATE (status, message, applied_at) on exactly those tables and nothing
+--     else (no DELETE / INSERT / TRUNCATE, no default privileges). The dam_ref_publish job's login is made a member
+--     via SET dam.publisher_login (it must not be the app role, nor a member of dam_lakebase_owner).
 -- lakebase/validate_append_only.sql (tools/validate_lakebase.py) re-checks all of it after every deploy.
 -- Unset role GUCs => that role's grants are skipped (guarded ownership is still moved). Needs CREATEROLE (first
 -- run) and the deployer able to act as the old and new owners (PG ALTER ... OWNER rules). UNVERIFIED on Lakebase:
@@ -170,6 +177,24 @@ ALTER TABLE exceedance_status OWNER TO dam_lakebase_owner;
 ALTER TABLE review_signoff OWNER TO dam_lakebase_owner;
 ALTER TABLE manual_reading OWNER TO dam_lakebase_owner;
 ALTER TABLE extract_watermark OWNER TO dam_lakebase_owner;
+ALTER TABLE ref_change_publication OWNER TO dam_lakebase_owner;
+ALTER TABLE onboarding_publication OWNER TO dam_lakebase_owner;
+ALTER TABLE dssmp_registration_outbox OWNER TO dam_lakebase_owner;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dam_lakebase_publisher') THEN
+    CREATE ROLE dam_lakebase_publisher NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dam_lakebase_publisher'
+             AND (rolcanlogin OR rolsuper OR rolreplication OR rolbypassrls OR rolcreaterole OR rolcreatedb)) THEN
+    RAISE EXCEPTION 'dam_lakebase_publisher must be NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+END $$;
+REVOKE ALL ON ALL TABLES IN SCHEMA dam_app FROM dam_lakebase_publisher;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA dam_app FROM dam_lakebase_publisher;
+GRANT USAGE ON SCHEMA dam_app TO dam_lakebase_publisher;
+GRANT SELECT, UPDATE (status, message, applied_at)
+  ON ref_change_publication, onboarding_publication, dssmp_registration_outbox TO dam_lakebase_publisher;
 DO $$
 DECLARE o RECORD;
 BEGIN
@@ -192,6 +217,7 @@ DO $$
 DECLARE
   r TEXT := nullif(current_setting('dam.app_role', true), '');
   x TEXT := nullif(current_setting('dam.extract_role', true), '');
+  pl TEXT := nullif(current_setting('dam.publisher_login', true), '');
   bad TEXT;
   o RECORD;
 BEGIN
@@ -213,7 +239,8 @@ BEGIN
     -- mutable app tables (everything except the guarded three and extract_watermark) belong to the app
     FOR o IN SELECT c.oid::regclass AS rel FROM pg_class c
              WHERE c.relnamespace = 'dam_app'::regnamespace AND c.relkind IN ('r', 'p')
-               AND c.relname NOT IN ('exceedance_status', 'review_signoff', 'manual_reading', 'extract_watermark')
+               AND c.relname NOT IN ('exceedance_status', 'review_signoff', 'manual_reading', 'extract_watermark',
+                                     'ref_change_publication', 'onboarding_publication', 'dssmp_registration_outbox')
                AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = r) LOOP
       EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, r);
     END LOOP;
@@ -222,11 +249,30 @@ BEGIN
     EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I', r);
     EXECUTE format('GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading TO %I', r);
     EXECUTE format('GRANT USAGE ON SEQUENCE exceedance_status_id_seq, manual_reading_id_seq TO %I', r);
+    EXECUTE format('REVOKE ALL ON ref_change_publication, onboarding_publication, dssmp_registration_outbox FROM %I', r);
+    EXECUTE format('GRANT SELECT, INSERT ON ref_change_publication, onboarding_publication, '
+                   'dssmp_registration_outbox TO %I', r);
+    IF pg_has_role(r, 'dam_lakebase_publisher', 'MEMBER') THEN
+      EXECUTE format('REVOKE dam_lakebase_publisher FROM %I', r);
+    END IF;
   END IF;
   IF x IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = x) THEN
     EXECUTE format('GRANT USAGE ON SCHEMA dam_app TO %I', x);
     EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA dam_app TO %I', x);
     EXECUTE format('GRANT INSERT, UPDATE ON extract_watermark TO %I', x);
+    -- tables created later (by the owner, or by the app at startup) stay readable by the extract: SELECT only
+    EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE dam_lakebase_owner IN SCHEMA dam_app GRANT SELECT ON TABLES '
+                   'TO %I', x);
+    IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA dam_app GRANT SELECT ON TABLES TO %I', r, x);
+    END IF;
+  END IF;
+  IF pl IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = pl) THEN
+    IF pl = r OR pg_has_role(pl, 'dam_lakebase_owner', 'MEMBER') THEN
+      RAISE EXCEPTION 'publisher login % must be neither the app role nor a member of dam_lakebase_owner', pl
+        USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    EXECUTE format('GRANT dam_lakebase_publisher TO %I', pl);
   END IF;
 END $$;
 

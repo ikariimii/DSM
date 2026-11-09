@@ -45,7 +45,8 @@ def test_no_grant_on_base_tables_and_grants_only_to_dam_groups():
         assert not re.search(r"GRANT\s+\w+.*\bON\s+(TABLE\s+)?ref\.(dam|project_membership)\b", code, re.I), f
     grants = re.findall(r"^GRANT (.+?) TO `([^`]+)`;", _code(V10B), re.M)
     assert grants and all(re.fullmatch(r"dam-[A-Za-z0-9_-]+-members", g) for _, g in grants)
-    assert {p for p, _ in grants} == {"USE SCHEMA ON SCHEMA ref", "SELECT ON TABLE ref.v_dam_reviewer_authority"}
+    assert {p for p, _ in grants} == {"USE SCHEMA ON SCHEMA ref", "SELECT ON TABLE ref.v_dam_reviewer_authority",
+                                      "SELECT ON TABLE ref.dssmp_version"}
 
 
 def test_generated_grants_in_sync_and_wired_into_ci_and_setup():

@@ -18,6 +18,7 @@ ALTER TABLE ref.sensor                 DROP ROW FILTER;
 ALTER TABLE ref.calibration            DROP ROW FILTER;
 ALTER TABLE ref.threshold              DROP ROW FILTER;
 ALTER TABLE ref.pfm                    DROP ROW FILTER;
+ALTER TABLE ref.dssmp_version          DROP ROW FILTER;
 ALTER TABLE silver.reading_reduced     DROP ROW FILTER;
 ALTER TABLE silver.incl_reduced        DROP ROW FILTER;
 ALTER TABLE ref.incl_installation      DROP ROW FILTER;
@@ -36,6 +37,7 @@ ALTER TABLE rpt.engineering_commentary DROP ROW FILTER;
 
 -- Tag every dam_id column (repeat for each in-scope table incl. pipeline-owned ones; tags are not filters):
 ALTER TABLE silver.reading_reduced ALTER COLUMN dam_id SET TAGS ('dam_scope' = 'dam_id');
+ALTER TABLE ref.dssmp_version ALTER COLUMN dam_id SET TAGS ('dam_scope' = 'dam_id');   -- v1.7: app users read it OBO
 
 CREATE POLICY IF NOT EXISTS dam_membership ON CATALOG IDENTIFIER(:catalog)
   COMMENT 'Rows visible only to members of the dam project'

@@ -188,3 +188,27 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - UNVERIFIED: not run on a workspace; Delta MERGE with subqueries in the USING source; ADD CONSTRAINT on a
   ref.dssmp_version that already holds approved rows without approval fields fails by design (PRE-CHECK in the
   header); the app side (outbox INSERT, dssmp_version chain records) does not exist yet - App Dev.
+
+## LB-PUBLISHER (Lakebase publisher role + default privileges, v1.7; app SCHEMA_CONTRACT §7 items 17 / 18)
+
+- `lakebase/001_app_schema.sql`: the three publication outboxes (`ref_change_publication`, `onboarding_publication`,
+  `dssmp_registration_outbox`) are owned by `dam_lakebase_owner`; the app role has SELECT + INSERT only (the app never
+  updates them: checked in app/backend/repos). NOLOGIN `dam_lakebase_publisher`: USAGE on dam_app, SELECT and column
+  UPDATE (status, message, applied_at) on those three tables, nothing else; the dam_ref_publish login joins it via
+  `SET dam.publisher_login` (refused if it is the app role or an owner member). The extract role stays SELECT-only
+  and gets `ALTER DEFAULT PRIVILEGES FOR ROLE dam_lakebase_owner` and `FOR ROLE <app role>` `GRANT SELECT ON
+  TABLES`; there is no default privilege for the publisher.
+- `lakebase/validate_append_only.sql` adds outbox_owner, app_outbox_privilege, publisher_* , extract_privilege and
+  extract_default_select_missing checks.
+- UC: `tools/render_uc_reviewer_grants.py` (CI --check) grants each dam group SELECT on `ref.dssmp_version`; the table
+  is row-filtered per dam in both security modes (`sql/ddl/10a_row_filters_table.sql` SET ROW FILTER,
+  `10a_row_filters_abac.sql` DROP ROW FILTER + dam_scope tag).
+- Evidence: tests/test_lakebase_publisher_role.py on local PostgreSQL 17.11 (publisher can set outcome columns only;
+  UPDATE of payload / kind / dam_id / requested_* / document_sha256 / approval_record_hash, DELETE, INSERT, TRUNCATE,
+  CREATE and reads of other tables are refused; app cannot UPDATE / DELETE / TRUNCATE outboxes; extract sees tables
+  created later by the app and the owner, publisher does not; the validator catches each widening), app live tests
+  tests/test_lakebase_owner_live.py + test_state_pg_append_only.py pass on the new 001.
+- UNVERIFIED: Lakebase role model (membership of an OAuth SP role in a NOLOGIN group role, ALTER DEFAULT PRIVILEGES
+  by the deployer), the publish job's login name; the ABAC tag on ref.dssmp_version.
+- Test hazard: roles are cluster-global, so the ownership tests that flip `dam_lakebase_owner` attributes can break
+  another agent's run on the same PostgreSQL cluster (seen once on 2026-11-09; re-run passed).
