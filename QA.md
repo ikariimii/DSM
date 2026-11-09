@@ -794,3 +794,16 @@ Scope: the 3 VDV Helpcenter exports in dam-refs `vendor_export_samples_vdv/` (ma
 - **QA-045b kept open** (TRUNCATE xfail retained; 98fab6c not on this branch tip).
 - **Still open:** QA-044, QA-005e (vendor parity UNVERIFIED), QA-041, QA-046.
 - **Suites:** root 705 passed / 2 skipped (.venv-dsm); app 341 passed (app/.venv); qa/ 230 passed / 3 xfailed; guard 0.
+
+## 2026-11-09 10:40 EST: QA-045b closed on app/v1.6-port (4014e4f + DA 98fab6c/bd2cf29; live PostgreSQL 17.11)
+- **Ancestry:** HEAD 586389b includes af253a8 (QA-045a close). Stack: af253a8 → bd2cf29 (merge 98fab6c) → 4014e4f (app TRUNCATE guard + live-PG test) → 586389b (hand merge of origin/main bed918c Contract v1.6). origin/app/v1.6-port does not exist; no push.
+- **QA-045b verified on live PG 17.11** (existing local cluster `/tmp/pg045b`, port 55432, user postgres; binary from /tmp/pgdeb/.../postgresql/17). App tests test_state_pg_append_only.py: 4 passed with DAM_TEST_PG. Lakebase tests test_lakebase_append_only.py: 6 passed. Independent adversarial SQL:
+  - TRUNCATE / TRUNCATE ONLY / TRUNCATE CASCADE on guarded tables: refused (append-only) as owner and as app role.
+  - UPDATE/DELETE: refused.
+  - Lakebase tables review_signoff, exceedance_status, manual_reading: all have statement-level BEFORE TRUNCATE + row UPDATE/DELETE; REVOKE TRUNCATE from dam.app_role leaves INSERT.
+  - Idempotent re-apply of DDL/guards: OK.
+  - **Residual risks (not a pass condition for the trigger itself):** table **owner** can `ALTER TABLE ... DISABLE TRIGGER` and then TRUNCATE (confirmed). `session_replication_role=replica` (superuser) skips user triggers for UPDATE and TRUNCATE (confirmed). App role cannot DISABLE TRIGGER, DROP TABLE, or set session_replication_role (refused). Mitigations: keep table ownership off the app role; optional REVOKE of TRIGGER/ownership; do not grant REPLICATION / superuser to the app.
+- **test_contract_v15:** stricter — requires len(REVIEW_RECORD_COLS)==24 with CHAIN_COLS ⊆ cols, and HASH_EXCLUDED XOR CHAIN_FIELDS coverage. The 24 columns match sql/ddl/08_audit.sql and docs/SCHEMA_CONTRACT v1.6 exactly. Old assert (every col ∈ CHAIN_FIELDS, no finalizer) was incorrect for signature columns and weaker on count.
+- **v1.6 port spot-check:** batch.installation_version_at and corrections.effective_records (incl_correction-only reviews) are additive, not weakening. QA-018..QA-045a markers/code present (see per-ID table in the agent report). `qa/test_gtilt_digipro_parity.py`: 12 passed. QA-045a xfail remains removed; QA-045b xfail removed after this verification.
+- **Still open:** QA-044, QA-005e (vendor parity UNVERIFIED), QA-041, QA-046.
+- **Suites:** root 730 passed / 2 skipped; app 346 passed; qa/ 231 passed / 2 xfailed; guard 0.

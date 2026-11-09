@@ -643,11 +643,17 @@ def test_qa045a_noop_cannot_be_swapped_in_to_accept_a_stripped_prod_chain():
     assert ac.is_enforcing(signer) and not ac.is_enforcing(ac.NoopSigner())
 
 
-@pytest.mark.xfail(strict=True, reason="QA-045b: the Postgres append-only guard is a row-level UPDATE/DELETE trigger; "
-                                       "TRUNCATE review_signoff (+ DELETE of the mutable head row) is not refused")
+# QA-045b closed (App Dev 4014e4f + DA 98fab6c / bd2cf29; live PG 17.11 verified 2026-11-09):
+# statement-level BEFORE TRUNCATE triggers on append-only tables. Strict xfail removed.
 def test_postgres_guard_also_refuses_truncate():
     src = (ROOT / "app" / "backend" / "repos" / "state.py").read_text()
-    assert re.search(r"BEFORE TRUNCATE ON", src)
+    assert re.search(r"BEFORE TRUNCATE ON \{s\}\{t\}", src) or re.search(
+        r"BEFORE TRUNCATE ON \{\{s\}\}\{t\}", src) or "BEFORE TRUNCATE ON" in src
+    assert "t_app_notrunc_" in src and "FOR EACH STATEMENT" in src
+    assert "app_forbid_mutation" in src
+    lb = (ROOT / "lakebase" / "001_app_schema.sql").read_text()
+    for t in ("review_signoff", "exceedance_status", "manual_reading"):
+        assert re.search(rf"BEFORE TRUNCATE ON {t}\s+FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation\(\)", lb)
 
 
 # ============================================================ demo-path approval_status vs gold view / engine
