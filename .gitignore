@@ -17,6 +17,12 @@ qa/*
 !qa/test_restricted_guard.py
 !qa/reference_examples.py
 !qa/hooks/
+# QA tests and helper scripts are tracked (2026-11-02 20:15 EST, QA): they read restricted data and
+# derived expected values BY PATH (dam-refs/datasets, $DAM_QA_PRIVATE) and skip without them; the guard
+# and pre-commit hook scan them. qa/** stays out of the bundle (databricks.yml sync.exclude).
+!qa/test_*.py
+!qa/inclinometer_independent_check.py
+!qa/piezometer_worked_examples.py
 
 # ---- QA restricted-data guard (2026-11-02 18:58 EST, QA engineer; see QA.md). Copies of dam-refs or any
 # dataset tree must never be committed. Reading them by path is fine. Enforced by qa/restricted_guard.py

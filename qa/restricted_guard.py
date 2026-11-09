@@ -13,6 +13,11 @@ fingerprints (hashes only) are cached OUTSIDE the repo at $DAM_RESTRICTED_FP_CAC
   * 64-bit sha1 prefix of every 4-number window of each  -> embedded data rows / fixtures / pasted tables
     line of restricted CSV/TXT/GK/XLSX/PDF text
   * 64-bit sha1 prefix of normalized text lines >= 40 chars from restricted text/PDFs -> pasted PDF text
+  * QA-034: 64-bit hashes of restricted-DERIVED scalars (computed results such as a bias-shift dD, quoted manual
+    example values) listed by QA in $DAM_QA_PRIVATE/restricted_derived_scalars.json (outside the repo, read by
+    path). A line hits on one 'single' scalar or on >= 2 distinct scalars of one source group; a file hits on
+    >= 3 distinct scalars of one group. Sign and trailing zeros are ignored (-1.50 == 1.5).
+    The scalar check skips testonly_restricted/ ONLY while git ignores it (sanctioned local-only internal tests).
 
 Usage:
   python qa/restricted_guard.py build            # refresh fingerprints from dam-refs (by path)
@@ -25,6 +30,8 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DATASETS = os.environ.get('DAM_REFS_DATASETS', '/workspace/dam-refs/datasets')
 FP = os.path.join(REPO, 'qa', 'restricted_denylist.json')        # committed: sha256 + basenames only
 CACHE = os.environ.get('DAM_RESTRICTED_FP_CACHE', '/workspace/.cache/dam-safety-restricted-fp')  # OUTSIDE repo
+QA_PRIVATE = os.environ.get('DAM_QA_PRIVATE', '/workspace/dam-refs/qa_private')                   # OUTSIDE repo
+SCALARS = 'derived_scalars.json'   # cache file: hashes only
 BIG = 200000   # files with more numeric windows than this are subsampled 1/16 (any pasted block >~50 rows still hits)
 SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
 SKIP_FILES = {os.path.normpath(FP)}
@@ -74,6 +81,23 @@ def numseq(line):
     toks = [n for n in (norm_num(t) for t in NUM.findall(line)) if n is not None]
     if len(toks) >= 6 and len({v for v in toks if float(v) != 0}) >= 3: return h('N:' + ' '.join(toks))
     return None
+def scalar_key(t):
+    v = norm_num(t)
+    return None if v is None else h('S:' + v.lstrip('-'))
+def line_scalars(line):
+    return {k for k in (scalar_key(t) for t in NUM.findall(line)) if k is not None}
+def build_scalars():
+    src = os.path.join(QA_PRIVATE, 'restricted_derived_scalars.json')
+    if not os.path.exists(src): return None
+    d = json.load(open(src))
+    out = {'single': sorted({scalar_key(repr(x)) for x in d.get('single', [])}),
+           'groups': [sorted({scalar_key(repr(x)) for x in g}) for g in d.get('groups', {}).values()]}
+    os.makedirs(CACHE, exist_ok=True); json.dump(out, open(os.path.join(CACHE, SCALARS), 'w'))
+    return out
+def load_scalars():
+    p = os.path.join(CACHE, SCALARS)
+    if not os.path.exists(p): return set(), []
+    d = json.load(open(p)); return set(d['single']), [set(g) for g in d['groups']]
 def norm_text(line):
     s = re.sub(r'\s+', ' ', line).strip().lower()
     return s if len(s) >= 40 and re.search(r'[a-z]{3}', s) else None
@@ -155,10 +179,17 @@ def build():
     os.makedirs(CACHE, exist_ok=True)
     for name, st in (('num_windows.u64', wins), ('text_lines.u64', lines), ('num_lines.u64', nseq)):
         a = array.array('Q', sorted(st)); open(os.path.join(CACHE, name), 'wb').write(a.tobytes())
+    sc = build_scalars()
+    print('derived scalars: %s' % ('%d single, %d groups' % (len(sc['single']), len(sc['groups'])) if sc else 'none (%s absent)' % QA_PRIVATE))
     print('denylist: %d files, %d names -> %s; content cache: %d windows, %d text lines, %d number rows -> %s' % (len(files), len(names), FP, len(wins), len(lines), len(nseq), CACHE))
 
 def load_cache(name):
     a = array.array('Q'); a.frombytes(open(os.path.join(CACHE, name), 'rb').read()); return set(a)
+
+LOCAL_ONLY = ('testonly_restricted/',)
+def git_ignored(rel):
+    try: return subprocess.run(['git', '-C', REPO, 'check-ignore', '-q', rel]).returncode == 0
+    except Exception: return False
 
 def repo_files():
     for dp, dn, fn in os.walk(REPO):
@@ -176,7 +207,9 @@ def scan(paths=None, min_windows=3):
     nl = load_cache('num_lines.u64') if have_cache and os.path.exists(os.path.join(CACHE, 'num_lines.u64')) else set()
     if have_cache and not nl: print('NOTE: no num_lines cache (built before QA-029): run build to enable row-sequence checks')
     if not have_cache: print('NOTE: no content cache at %s (dam-refs absent?): hash/name/path checks only' % CACHE)
-    hits = []
+    s_single, s_groups = load_scalars()
+    if have_cache and not s_groups: print('NOTE: no derived-scalar cache (QA-034): run build with qa_private present')
+    hits = []; _noted = set()
     for p in (paths or list(repo_files())):
         if not os.path.isfile(p): continue
         rel = os.path.relpath(p, REPO)
@@ -184,16 +217,25 @@ def scan(paths=None, min_windows=3):
         if os.path.basename(p).lower() in names: hits.append((rel, 'basename of a restricted file'))
         if os.path.getsize(p) >= MIN_SHA_BYTES and sha256(p) in shas: hits.append((rel, 'exact copy of a restricted file')); continue
         if not have_cache: continue
-        nw, nt, nq, ex = 0, 0, 0, []
+        nw, nt, nq, ns, ex = 0, 0, 0, 0, []
+        file_sc = set()
+        local_ok = rel.replace(os.sep, '/').startswith(LOCAL_ONLY) and git_ignored(rel)
+        if local_ok and s_groups: _noted.add(rel.replace(os.sep, '/').split('/')[0])
         for i, l in enumerate(text_lines(p), 1):
+            ls = line_scalars(l) if s_groups and not local_ok else set()
+            if ls:
+                file_sc |= ls
+                if ls & s_single or any(len(ls & g) >= 2 for g in s_groups): ns += 1; ex.append(i)
             k = [w for w in windows(l) if w in wins]
             if k: nw += 1; ex.append(i)
             t = norm_text(l)
             if t and h(t) in tl: nt += 1; ex.append(i)
             q = numseq(l)
             if q is not None and q in nl: nq += 1; ex.append(i)
-        if nw >= min_windows or nt >= 1 or nq >= 1:
-            hits.append((rel, 'content derived from restricted data: %d numeric-row lines, %d text lines, %d number rows (e.g. lines %s)' % (nw, nt, nq, sorted(set(ex))[:8])))
+        if not ns and any(len(file_sc & g) >= 3 for g in s_groups): ns = 1
+        if nw >= min_windows or nt >= 1 or nq >= 1 or ns >= 1:
+            hits.append((rel, 'content derived from restricted data: %d numeric-row lines, %d text lines, %d number rows, %d derived-scalar lines (e.g. lines %s)' % (nw, nt, nq, ns, sorted(set(ex))[:8])))
+    for d in sorted(_noted): print('INFO: %s/ is git-ignored local-only: derived-scalar check not applied (other checks are)' % d)
     return hits
 
 if __name__ == '__main__':

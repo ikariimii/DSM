@@ -38,3 +38,31 @@ def test_guard_detects_a_planted_copy(tmp_path, monkeypatch):
 def test_qa_scripts_pass(script):
     r = subprocess.run([sys.executable, os.path.join(QA, script)], capture_output=True, text=True, cwd=REPO)
     assert r.returncode == 0 and ' FAIL' not in r.stdout.replace('0 FAIL', ''), r.stdout[-2000:] + r.stderr[-2000:]
+
+SCALARS_SRC = os.path.join(g.QA_PRIVATE, 'restricted_derived_scalars.json')
+
+@pytest.mark.skipif(not os.path.exists(SCALARS_SRC), reason='qa_private not mounted')
+def test_guard_catches_restricted_derived_scalars():
+    # QA-034: values are read from qa_private at runtime (never written into this file); probes live in a
+    # temp dir inside the repo and are removed in finally.
+    import json
+    d = json.load(open(SCALARS_SRC)); g.build_scalars()
+    single = d['single'][0]
+    grp = next(v for v in d['groups'].values() if len([x for x in v if x not in d['single']]) >= 3)
+    pair = [x for x in grp if x not in d['single']][:3]
+    pd = os.path.join(REPO, 'qa', '_scalar_selftest'); os.makedirs(pd, exist_ok=True)
+    w = lambda n, t: (open(os.path.join(pd, n), 'w').write(t), os.path.join(pd, n))[1]
+    try:
+        cases = {
+            w('single.md', 'dD is %r here\n' % single): True,
+            w('reformat.md', '| x | -%s0 |\n' % repr(single)): True,                   # sign + trailing zero
+            w('pair.py', 'A = %r; B = %r\n' % (pair[0], pair[1])): True,
+            w('spread.md', 'a %r\n\nb %r\n\nc %r\n' % tuple(pair)): True,              # >= 3 of a group per file
+            w('one_member.md', 'only %r alone\n' % pair[0]): False,                    # negative control
+            w('clean.md', 'tol max(2.0, 3*SE) ranks proposals only\n'): False,
+        }
+        hit = {p for p, _ in g.scan(list(cases))}
+        assert {os.path.relpath(p, REPO) for p, e in cases.items() if e} == hit, hit
+    finally:
+        for f in os.listdir(pd): os.remove(os.path.join(pd, f))
+        os.rmdir(pd)
