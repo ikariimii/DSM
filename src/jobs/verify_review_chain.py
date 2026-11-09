@@ -22,6 +22,7 @@ except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
 from dam_safety.audit_chain import (CHAIN_FIELDS_V2, PROD_CATALOGS, SignerConfigError, load_signer,
                                     require_signer_for_catalog, verify_with_chain_heads)
+from dam_safety.catalog import normalize_catalog
 from dam_safety.dssmp_authority import dssmp_authority_problems
 from dam_safety.rule_flag_authority import (SECOND_APPROVER_SETTING, rule_flag_authority_problems,
                                             second_approver_required)
@@ -44,15 +45,19 @@ def verify_all(records, heads, signer=None, catalog=None):
 
     QA-053: the prod fail-closed check is enforced HERE too, not only in start(), so calling this entry point directly
     cannot bypass it. catalog None (not given) is treated as production (fail closed). When the guard refuses, nothing
-    is verified and every chain gets ok=False, reason 'signer_refused' (the task then fails)."""
+    is verified and every chain gets ok=False, reason 'signer_refused' (the task then fails); with no chains at all a
+    single refused verdict (dam_id/chain_id None) is returned, so a refusal is never an empty "nothing failed" list.
+    QA-055 follow-up: any other name is canonicalized by catalog.normalize_catalog first; an unknown, empty, garbled
+    or non-string name RAISES ValueError (never passes, never falls back to dev)."""
     chains = sorted({(r["dam_id"], r["chain_id"]) for r in records} | {(h["dam_id"], h["chain_id"]) for h in heads})
+    canonical = PROD_CATALOGS[0] if catalog is None else normalize_catalog(catalog)      # ValueError = refuse
     try:
-        require_signer_for_catalog(PROD_CATALOGS[0] if catalog is None else catalog, signer)
+        require_signer_for_catalog(canonical, signer)
     except SignerConfigError as e:
         return [{"dam_id": d, "chain_id": c, "records": sum(1 for r in records if r["dam_id"] == d
                                                             and r["chain_id"] == c),
                  "ok": False, "reason": "signer_refused", "first_broken_seq": None, "detail": str(e)}
-                for d, c in chains]
+                for d, c in (chains or [(None, None)])]
     out = []
     for dam_id, chain_id in chains:
         rows = [r for r in records if r["dam_id"] == dam_id and r["chain_id"] == chain_id]

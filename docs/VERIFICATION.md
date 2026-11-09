@@ -231,3 +231,15 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
 - Finding (pre-existing, not fixed here): the jobs' Lakebase SQL uses unqualified table names and
   `lakebase_extract._connect` sets no search_path; the live test sets `search_path TO dam_app` explicitly.
 - UNVERIFIED: not run on a Lakebase instance.
+
+## QA-055 (catalog allowlist) + verify_all fail closed (2026-11-09)
+
+- Commit A applies App Dev's tools/patches/qa055_catalog_allowlist.patch (e988454) unchanged: src/dam_safety/catalog.py,
+  audit_chain.require_signer_for_catalog and jobs/_common.args canonicalize, tests/test_catalog_allowlist.py.
+- Commit B: `verify_review_chain.verify_all` canonicalizes the catalog itself; None = dam_prod (refused without a real
+  signer); an empty, unknown, garbled or non-string name raises ValueError; a prod refusal with no chains still returns
+  one ok=False `signer_refused` verdict instead of an empty list. Tests: tests/test_catalog_allowlist.py (verify_all
+  cases), tests/test_prod_fail_closed.py.
+- Note: the patch docstring names a byte-identical app copy `app/backend/catalog.py` checked by
+  app/tests/test_settings_prod_guard.py; neither exists on e988454 (App Dev). There is no qa/test_prod_signer_fail_closed.py
+  in this tree; the prod fail-closed tests are tests/test_prod_fail_closed.py.

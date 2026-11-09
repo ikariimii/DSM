@@ -116,3 +116,26 @@ def test_jobs_refuse_unknown(monkeypatch, name):
     monkeypatch.setattr(sys, "argv", ["job", "--catalog", name])
     with pytest.raises(SystemExit):
         _common.args()
+
+
+# ------------------------------------------------------------------ verify_all fail closed (QA-055 follow-up, DA)
+@pytest.mark.parametrize("name", ["", " ", "dam_staging", "dam_prod2", "dam prod", "d\u0430m_prod", "'dam_prod'",
+                                  "\"dam_prod\"", "main", 0, 1.5, b"dam_prod", ["dam_prod"]])
+def test_verify_all_unknown_empty_or_garbled_name_raises_and_never_passes(name):
+    heads = [{"dam_id": "CRD", "chain_id": "CRD", "chain_seq": 1, "head_hash": "c" * 64}]
+    for recs, hs in (([], []), ([], heads)):
+        with pytest.raises(ValueError):
+            vj.verify_all(recs, hs, None, catalog=name)
+
+
+@pytest.mark.parametrize("name", [None, "dam_prod", "DAM_PROD", "dam_prod\u200b", "\uff44\uff41\uff4d\uff3f\uff50\uff52\uff4f\uff44"])
+def test_verify_all_prod_or_missing_catalog_refuses_even_with_no_chains(name):
+    out = vj.verify_all([], [], None, catalog=name)
+    assert out == [{"dam_id": None, "chain_id": None, "records": 0, "ok": False, "reason": "signer_refused",
+                    "first_broken_seq": None, "detail": out[0]["detail"]}]
+    assert "dam_prod" in out[0]["detail"]
+
+
+def test_verify_all_dev_and_test_still_verify():
+    assert vj.verify_all([], [], None, catalog="dam_dev") == []
+    assert vj.verify_all([], [], None, catalog=" DAM_TEST\u200b") == []
