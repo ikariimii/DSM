@@ -162,7 +162,7 @@ def test_v15_alarm_episode_carries_erroneous_mark_with_who_and_when():
 # ---- v1.6 (app SCHEMA_CONTRACT §7 10d): inclinometer installation_version on alarms ----
 def test_v16_installation_version_column_view_and_evaluator():
     cols = _cols("07_ops.sql", "ops.alarm_transition")
-    assert cols[-1] == "installation_version"                     # appended: positional tuple + additive migration
+    assert cols[-2:] == ["installation_version", "cdse_ack_required_at_open"]   # appended in order (v1.6, v1.7)
     v = open(os.path.join(ROOT, "sql", "ddl", "11_gold_views.sql")).read()
     ev = v[v.index("CREATE OR REPLACE VIEW ops.alarm_event"):]
     assert "installation_version" in ev[:ev.index(";")]
@@ -170,7 +170,7 @@ def test_v16_installation_version_column_view_and_evaluator():
     ep = ep[:ep.index(";")]
     assert "max_by(installation_version, CASE WHEN reading_id IS NOT NULL THEN event_ts END) AS installation_version" in ep
     src = open(os.path.join(ROOT, "src", "jobs", "alarm_evaluator.py")).read()
-    assert 'src.get("qa_flag"), iv))' in src and 'inst_version(sid, t.ts, log) if t.event != "ACK" else None' in src
+    assert 'src.get("qa_flag"), iv, ca))' in src and 'inst_version(sid, t.ts, log) if t.event != "ACK" else None' in src
     assert '"ref", "incl_installation"' in src
 
 

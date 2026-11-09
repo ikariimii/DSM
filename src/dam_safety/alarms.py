@@ -277,3 +277,26 @@ def evaluate_sensor_batch(sensor_id: str, readings: Sequence[dict], threshold_ro
     row = state_to_row(st)
     row["evaluated_through_ts"] = max([r["ts_utc"] for r in new], default=wm)
     return row, trs, n_late
+
+
+# ---------------------------------------------------------------------------------------------
+# v1.7 cdse_ack_required (DSSMP; App Dev agreed 2026-11-09): snapshot at episode open
+# ---------------------------------------------------------------------------------------------
+def cdse_ack_snapshot(event: str, threshold_id: Optional[str], threshold_version: Optional[int],
+                      threshold_rows: Sequence[dict]) -> Optional[bool]:
+    """Value for ops.alarm_transition.cdse_ack_required_at_open. Only the RAISE transition (it opens the episode)
+    carries it: ref.threshold.cdse_ack_required of the exact rule version that raised (threshold_id,
+    threshold_version), i.e. the version in effect at evaluation. Every other event -> None. The row is appended to
+    an append-only table, so the snapshot is immutable for the life of the episode; un-flagging the rule later only
+    changes the CURRENT flag that ops.alarm_episode shows next to it. Fails closed: a RAISE whose rule version or
+    flag cannot be found raises (pre-v1.7 schema, or the migration did not run) instead of guessing false."""
+    if event != "RAISE":
+        return None
+    for r in threshold_rows:
+        if str(r.get("threshold_id")) == str(threshold_id) and int(r.get("threshold_version")) == int(threshold_version):
+            v = r.get("cdse_ack_required")
+            if v is None:
+                raise ValueError(f"ref.threshold {threshold_id} v{threshold_version}: cdse_ack_required is NULL/absent "
+                                 "(run sql/migrations/v1_7_001_cdse_ack.sql)")
+            return bool(v)
+    raise ValueError(f"RAISE on {threshold_id} v{threshold_version}: rule version not among the evaluated thresholds")

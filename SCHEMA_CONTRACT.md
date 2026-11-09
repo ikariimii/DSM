@@ -196,6 +196,20 @@ Tables named in the plan canvas or the app that are not in the FERC canvas:
   = that of the latest reading-driven transition. **UNVERIFIED / no feed yet:** the evaluator reads
   `silver.v_reading_current`; inclinometer results live in `silver.incl_reduced`, so until an inclinometer metric is
   fed to the evaluator no inclinometer alarm (and no non-NULL value) exists.
+- **v1.7 `cdse_ack_required` (DSSMP; Genie 2026-11-09, App Dev agreed).** `ref.threshold.cdse_ack_required BOOLEAN NOT
+  NULL DEFAULT false` (the alarm-rule table; per dam via `dam_id`, per rule `threshold_id`, versioned SCD2 with the
+  rule). Source: the dam's DSSMP. TRUE = the dam's CDSE (`ref.dam.cdse_id` or a CDSE membership,
+  `ref.v_dam_reviewer_authority`) must acknowledge this rule's alarms **at any level**. **Snapshot at open:**
+  `ops.alarm_transition.cdse_ack_required_at_open BOOLEAN` (last column) is written by `alarm_evaluator` on the
+  **RAISE** row only, from the rule version that raised (`threshold_id`, `threshold_version`, the version in effect
+  at evaluation; `alarms.cdse_ack_snapshot`); NULL on every other event. The table is append-only, so the snapshot is
+  immutable for the life of the episode; un-flagging the rule mid-episode does not change it
+  (`tests/test_cdse_ack_required.py`). If the flag cannot be read the alarm is still raised and the snapshot is TRUE
+  (conservative) with a logged issue. RAISE rows written before v1.7 stay NULL (unknown, never backfilled).
+  **`ops.alarm_episode`** exposes `cdse_ack_required_at_open` (binding snapshot), `cdse_ack_required` (CURRENT flag of
+  the opening rule's `is_current` version; NULL if the rule is gone), `raise_threshold_id`, `raise_threshold_version`.
+  **Extract:** the `ALARM_ACK` row in `audit.event_log` carries both in `payload` (recorded, not enforced).
+  **Enforcement (403 for a non-CDSE ack) is the app's.** Migration `sql/migrations/v1_7_001_cdse_ack.sql`.
 
 ## 5. Columns the app reads (agreed subset)
 | Object | Columns |
@@ -467,6 +481,9 @@ name and fail loudly if it does not resolve.
   **before** `dam_uc_setup` (`sql/ddl/08` names the chain columns, `sql/ddl/11` selects
   `ops.alarm_transition.installation_version`). Do not re-run v1_5_001 afterwards (its older CHECK rejects
   `alarm_event`); if it was, re-run v1_6_001. UNVERIFIED (MIGRATION-2).
+- **Upgrade (v1.7):** then run `sql/migrations/v1_7_001_cdse_ack.sql` (idempotent) **before** `dam_uc_setup`
+  (`sql/ddl/11` selects `cdse_ack_required_at_open` / `cdse_ack_required`). It enables the irreversible Delta feature
+  `allowColumnDefaults` on `ref.threshold` and backfills the new column to false. UNVERIFIED (MIGRATION-3).
 
 ## 9. Sign-off
 | Party | Agent | Status |

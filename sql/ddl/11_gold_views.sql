@@ -78,7 +78,7 @@ SELECT first_value(CASE WHEN event = 'RAISE' THEN transition_id END, true)
        dam_id, sensor_id, alarm_key, episode_no, ts_utc AS event_ts, event, from_state, to_state,
        value, metric_value, threshold_id, threshold_version, actor, comment,
        reading_id, calib_id, cal_version, formula_id, formula_version, recompute_batch_id, qa_flag,
-       installation_version
+       installation_version, cdse_ack_required_at_open
 FROM t WHERE episode_no > 0
 WINDOW w AS (PARTITION BY alarm_key, episode_no ORDER BY ts_utc, recorded_ts
              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING);
@@ -112,6 +112,11 @@ SELECT event_id, any_value(dam_id) AS dam_id, any_value(se.instrument_id) AS ins
        -- ref.incl_installation row valid at the reading's ts, written by alarm_evaluator) is their lineage.
        max_by(installation_version, CASE WHEN reading_id IS NOT NULL THEN event_ts END) AS installation_version,
        max(CASE WHEN event = 'RAISE' THEN reading_id END)  AS raise_reading_id,
+       -- v1.7 cdse_ack_required (App Dev agreed): snapshot written by alarm_evaluator on the RAISE row from the rule
+       -- version in effect then (immutable for the episode) + the rule that opened the episode (current flag below)
+       max(CASE WHEN event = 'RAISE' THEN threshold_id END) AS raise_threshold_id,
+       max(CASE WHEN event = 'RAISE' THEN threshold_version END) AS raise_threshold_version,
+       max(CASE WHEN event = 'RAISE' THEN cdse_ack_required_at_open END) AS cdse_ack_required_at_open,
        max(CASE WHEN event = 'RAISE' THEN cal_version END) AS raise_cal_version,
        size(collect_set(cal_version)) > 1                   AS mixed_calibration
 FROM ops.alarm_event e JOIN ref.sensor se USING (sensor_id)
@@ -124,8 +129,12 @@ SELECT g.*,
        coalesce(mk.is_erroneous, false) AS erroneous_mark,
        mk.erroneous_reason              AS erroneous_reason,
        mk.marked_by                     AS erroneous_marked_by,
-       mk.marked_ts                     AS erroneous_marked_ts
-FROM g LEFT JOIN mk ON mk.reading_id = g.reading_id;
+       mk.marked_ts                     AS erroneous_marked_ts,
+       -- v1.7: CURRENT flag of the opening rule (its is_current version now), NULL if that rule no longer exists.
+       -- cdse_ack_required_at_open is the binding snapshot, the app decides how to use both (enforcement: App Dev).
+       cr.cdse_ack_required             AS cdse_ack_required
+FROM g LEFT JOIN mk ON mk.reading_id = g.reading_id
+LEFT JOIN ref.threshold cr ON cr.threshold_id = g.raise_threshold_id AND cr.is_current AND cr.effective_to IS NULL;
 
 CREATE OR REPLACE VIEW silver.incl_survey_header AS
 SELECT instrument_id, survey_id, survey_ts, is_baseline, any_value(probe_serial) AS probe_serial,

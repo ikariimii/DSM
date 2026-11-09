@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS ops.alarm_transition (
   formula_version   STRING,
   recompute_batch_id STRING COMMENT 'reduction batch of the reading row (silver.reading_reduced)',
   qa_flag           STRING COMMENT 'v1.4: QC flag of the reading that caused the transition (NULL for ACK)',
-  installation_version TIMESTAMP COMMENT 'v1.6: inclinometer alarms: ref.incl_installation.effective_from of the row valid at ts_utc (effective_from <= ts_utc < effective_to). NULL for other instruments and ACK'
+  installation_version TIMESTAMP COMMENT 'v1.6: inclinometer alarms: ref.incl_installation.effective_from of the row valid at ts_utc (effective_from <= ts_utc < effective_to). NULL for other instruments and ACK',
+  cdse_ack_required_at_open BOOLEAN COMMENT 'v1.7: on the RAISE (episode-opening) row only: ref.threshold.cdse_ack_required of the rule version that raised (threshold_id, threshold_version). Immutable (append-only table) for the life of the episode. NULL on every other event and on RAISE rows written before v1.7 (unknown)'
 ) TBLPROPERTIES (delta.appendOnly = true, delta.enableChangeDataFeed = true);
 -- v1.4 (App Developer): a reading-driven transition never carries a NULL value/reading (only ACK rows may).
 -- Enforced here and by the evaluator's pre-write guard (tests/test_alarm_lineage_contract.py).
