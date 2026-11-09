@@ -7,7 +7,8 @@ import { useApi } from "../hooks";
 import { Loading, utc } from "../components/ui";
 import { explain } from "../codes";
 
-const BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad", loaded: "ok", rejected_invalid: "bad" };  // rejected_invalid: legacy alias
+const BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad", loaded: "ok" };
+const OUTBOX_STATUSES = ["pending", "loaded", "rejected"];   // §7 20: anything else is flagged, never "ok"
 
 function ChangeRow({ ch, canDecide, policy, onDone }: { ch: any; canDecide: boolean; policy?: any; onDone: () => void }) {
   const [why, setWhy] = useState("");
@@ -23,7 +24,7 @@ function ChangeRow({ ch, canDecide, policy, onDone }: { ch: any; canDecide: bool
       <td>{ch.change_reason_code}<div className="muted">{ch.rationale}</div></td>
       <td>{ch.proposed_by}<div className="muted">{utc(ch.proposed_at)}</div></td>
       <td><span className={`badge ${BADGE[ch.status] || "muted"}`}>{ch.status}</span>
-        {ch.outbox && <span className={`badge ${BADGE[ch.outbox.status] || "muted"}`}>DA load {ch.outbox.status}</span>}
+        {ch.outbox && <span className={`badge ${OUTBOX_STATUSES.includes(ch.outbox.status) ? BADGE[ch.outbox.status] : "bad"}`}>DA load {ch.outbox.status}{OUTBOX_STATUSES.includes(ch.outbox.status) ? "" : " (not a contract status)"}</span>}
         {ch.outbox?.reason_code && <div className="error">DA load refused: <b>{ch.outbox.reason_code}</b>{explain(ch.outbox.reason_code) ? ` — ${explain(ch.outbox.reason_code)}` : ""}<div className="muted">{ch.outbox.message}</div></div>}
         {ch.decided_by && <div className="muted">by {ch.decided_by} {utc(ch.decided_at)}: {ch.decision_rationale}</div>}</td>
       <td>{canDecide && ch.status === "pending" && (

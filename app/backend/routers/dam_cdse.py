@@ -160,7 +160,8 @@ def _new(c: Ctx, request: Request, dam_id: str, kind: str, previous: str | None,
 def _open_assignment(st, dam_id: str) -> dict | None:
     """An assignment already recorded and not refused by the load job (pending load or loaded)."""
     for r in _view(st, st.rows("dam_cdse_change", "proposed_at", dam_id=dam_id, kind="assign")):
-        if r["status"] == "approved" and not (r["outbox"] and r["outbox"]["status"].startswith("rejected")):
+        # only the contract 'rejected' closes an assignment; any other status keeps it open (fail closed)
+        if r["status"] == "approved" and not (r["outbox"] and r["outbox"]["status"] == "rejected"):
             return r
     return None
 
@@ -171,7 +172,7 @@ def _open_assignment_q(q, dam_id: str) -> dict | None:
     rows = q("SELECT c.change_id, o.status AS outbox_status FROM {s}dam_cdse_change c LEFT JOIN {s}dam_cdse_outbox o "
              "ON o.outbox_id = c.outbox_id WHERE c.dam_id = %s AND c.kind = 'assign' AND c.status = 'approved'",
              (dam_id,))
-    return next((r for r in rows if not (r["outbox_status"] or "").startswith("rejected")), None)
+    return next((r for r in rows if r["outbox_status"] != "rejected"), None)
 
 
 def _no_pending_load_q(q, dam_id: str) -> None:
