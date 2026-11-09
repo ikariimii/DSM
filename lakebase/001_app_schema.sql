@@ -12,7 +12,7 @@
 -- QA-045c: the whole init runs in ONE transaction under a transaction-scoped advisory lock, so concurrent inits
 -- (two psql sessions, or this script racing the app's StateStore.init_schema, which takes the same key) serialize,
 -- and no other session ever sees a table without its guard. Key 4702045 = the shared 'dam_app schema init' lock
--- (same literal in app/backend/repos/state.py, see tools/patches). Released automatically at COMMIT/ROLLBACK.
+-- (same literal INIT_LOCK_KEY in app/backend/repos/state.py). Released automatically at COMMIT/ROLLBACK.
 BEGIN;
 DO $$ BEGIN PERFORM pg_advisory_xact_lock(4702045); END $$;  -- held until COMMIT (no result row printed)
 CREATE SCHEMA IF NOT EXISTS dam_app;
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS review_chain_head (
 -- app role could rewind it. review_chain_head_log is append-only like review_signoff (owner dam_lakebase_owner,
 -- guard triggers ENABLE ALWAYS, app SELECT + INSERT only): one row per advance, the current head of a chain is its
 -- highest chain_seq, PK (chain_id, chain_seq) forbids two heads at the same position. The patched app
--- (tools/patches/v17_chain_head_log_state.patch) appends here instead of updating review_chain_head; the extract
+-- (the app head-log change in state.py, applied by App Dev in 478b7b5) appends here instead of updating review_chain_head; the extract
 -- takes the highest chain_seq per chain over both tables (transition), preferring this table at equal seq.
 CREATE TABLE IF NOT EXISTS review_chain_head_log (
   chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL CHECK (chain_seq >= 0),
@@ -243,7 +243,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
 --     mutable app tables (app_user, alarm_ack, ..., review_chain_head, and anything state.py creates later), so
 --     state.py keeps managing those. It must NOT be superuser, REPLICATION or BYPASSRLS, nor a member of
 --     dam_lakebase_owner; this file refuses to finish if it is. state.py must skip DDL on the owner-owned objects:
---     tools/patches/v17_lakebase_owner_state_init.patch (App Dev applies it; not applied here).
+--     the app state.py owner-aware init (applied by App Dev in febbe7c / ac14bdf; patch file removed in e413293).
 --   * Guard triggers are ENABLE ALWAYS, so they fire even under session_replication_role = replica.
 --   * The extract job's role (SET dam.extract_role) gets SELECT on all tables + INSERT/UPDATE on extract_watermark,
 --     and SELECT on tables created later by dam_lakebase_owner or the app role (ALTER DEFAULT PRIVILEGES, app

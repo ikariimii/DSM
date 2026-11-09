@@ -116,3 +116,21 @@ checked 2026-11-09 11:53 -05:00; `git worktree list` shows no qa043-wt, Genie pr
 | /workspace/wt-v17 | feat/v1.7-cdse-ack-hardening | Databricks-Data-Architect | data-architect@dam-safety.local |
 
 No history is rewritten: these records are corrected here only. UNCONFIRMED: none.
+
+## 5. Integration notes (2026-11-09)
+
+- **Lock class in the 0aed4c4 commit message.** App Dev's commit 0aed4c4 (QA-056, `app/v1.6-integ-appdev`) says
+  the per-dam lock uses class 4702046. That is wrong in the message only: the code (`app/backend/repos/state.py`
+  `DAM_LOCK_NS = 4702047`, `lock_dam`) and the app SCHEMA_CONTRACT correctly use **4702047** for the dam lock;
+  4702046 is the DA chain-lock class (`CHAIN_LOCK_CLASS`, review_chain_head_log) and 4702045 the init lock. Lock
+  order in `append_chained` (478b7b5): dam 4702047 -> check(q) -> chain 4702046 (asserted by
+  tests/test_chain_head_log.py). History is not rewritten; this note is the correction.
+- **Integration of 478b7b5.** wt-integ's branch had one local commit (the runbook, 3103554) on top of 23b39c5 when
+  App Dev's 478b7b5 (a fast-forward of 23b39c5) arrived, so `git merge --ff-only` was not possible; the unpushed
+  runbook commit was rebased onto 478b7b5 (now 33bee49, same content). Then App Dev's
+  `tools/patches/v17_chain_head_log_tests_applied.patch` was applied.
+- **Applied patches removed from tools/patches.** All five were verified as applied before deletion (each added
+  line present in the tree, or `git apply -R --check` clean): `v17_chain_head_log_state.patch` (App Dev 478b7b5),
+  `v17_chain_head_log_tests_applied.patch` (this commit), `qa056_unique_guards.patch` (DA 424c6e3),
+  `qa055_catalog_allowlist.patch` (DA e988454), `qa045c_app_state_init_lock.patch` (added in d63804f, QA-045c, author "Data Layer Engineer"; state.py carries all 42 added lines). They stay in
+  git history.

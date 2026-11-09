@@ -147,8 +147,8 @@ Expected: the single line `lakebase append-only/ownership: OK`, exit code 0 (eac
 `FAIL <check>: <detail>` line and exit 1; exit 2 = cannot connect). Closes LB-OWNER, LB-PUBLISHER, OUTBOX-CONTRACT, LB-CDSE-TABLES, LB-HEAD-LOG (role model, advisory locks and
 hashtext() on Lakebase: step 4b P5), LB-PG14 (step 4b P6), LAKEBASE-AUTH (deployer path).
 
-The app patch for the head log (`tools/patches/v17_chain_head_log_state.patch`) is App Dev's to apply AFTER
-v1_7_006; an unpatched app keeps working.
+The app's head-log change (state.py, applied by App Dev in 478b7b5; lock order dam 4702047 -> check -> chain 4702046)
+needs v1_7_006 FIRST: run the Lakebase migrations before deploying an app at or after 478b7b5 (step 5).
 
 ## 4b. UNVERIFIED primitives: one step each, with a pass/fail check (dev only, after step 4)
 

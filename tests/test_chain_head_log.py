@@ -1,7 +1,8 @@
 """v1.7 residual (a): tamper-resistant Lakebase chain head. review_chain_head_log is append-only under
 dam_lakebase_owner (guard triggers ENABLE ALWAYS; app SELECT + INSERT only); the extract takes the highest chain_seq per
-chain over the log and the legacy head; the app change is tools/patches/v17_chain_head_log_state.patch (NOT applied
-here: the live test applies it to a throw-away export of HEAD). Live parts need DAM_TEST_PG (PostgreSQL >= 15)."""
+chain over the log and the legacy head. The app change (formerly tools/patches/v17_chain_head_log_state.patch) was
+applied by App Dev in 478b7b5 (lock order dam 4702047 -> check -> chain 4702046) and the patch file deleted; the tests
+now check app/backend/repos/state.py itself and drive HEAD's committed app/. Live parts need DAM_TEST_PG (PG >= 15)."""
 import os
 import shutil
 import subprocess
@@ -23,7 +24,7 @@ import lakebase_extract as lx  # noqa: E402
 
 DDL_PATH = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 VAL_PATH = os.path.join(ROOT, "lakebase", "validate_append_only.sql")
-PATCH = os.path.join(ROOT, "tools", "patches", "v17_chain_head_log_state.patch")
+STATE = os.path.join(ROOT, "app", "backend", "repos", "state.py")
 MIG = os.path.join(ROOT, "lakebase", "migrations", "v1_7_006_chain_head_log.sql")
 DOWN = os.path.join(ROOT, "lakebase", "migrations", "v1_7_006_chain_head_log_down.sql")
 BLOCK = re.compile(r"-- BEGIN v1_7_006 block.*?-- END v1_7_006 block\n", re.S)
@@ -53,16 +54,28 @@ def test_001_and_validator_guard_the_head_log():
     assert "('review_chain_head_log')" in open(VAL_PATH).read()
 
 
-def test_patch_applies_to_the_app_at_head_and_drops_update_of_the_head():
-    r = subprocess.run(["git", "-C", ROOT, "apply", "--check", PATCH], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    txt = open(PATCH).read()
-    state = txt[txt.index("+++ b/app/backend/repos/state.py"):txt.index("diff ", txt.index("+++ b/app/backend/repos/state.py"))]
-    added = [l[1:] for l in state.splitlines() if l.startswith("+") and not l.startswith("+++")
-             and not l[1:].lstrip().startswith("#")]
-    code = "\n".join(added)
-    assert "review_chain_head_log" in code and "pg_advisory_xact_lock" in code
-    assert 'q("UPDATE {s}review_chain_head' not in code and '" FOR UPDATE"' not in code
+def _code(st: str) -> str:
+    return "\n".join(l for l in st.splitlines() if not l.lstrip().startswith("#"))
+
+
+def _app_has_the_head_log(st: str) -> bool:
+    code = _code(st)
+    return ("CHAIN_LOCK_CLASS" in code and "review_chain_head_log" in code
+            and 'q("UPDATE {s}review_chain_head' not in code and '" FOR UPDATE"' not in code)
+
+
+def test_app_state_carries_the_head_log_change_with_lock_order_dam_check_chain():
+    st = open(STATE).read()
+    assert _app_has_the_head_log(st)
+    assert re.search(r"^CHAIN_LOCK_CLASS = 4702046\b", st, re.M) and re.search(r"^DAM_LOCK_NS = 4702047\b", st, re.M)
+    assert re.search(r"^INIT_LOCK_KEY = 4702045\b", st, re.M)
+    body = _code(st[st.index("    def append_chained("):])
+    body = body[:body.index("\n    def ", 10)]
+    i_dam, i_check = body.index("self.lock_dam(q, lock_key)"), body.index("if check is not None:\n                check(q)")
+    i_chain = body.index("pg_advisory_xact_lock(%s, hashtext(%s))")
+    assert i_dam < i_check < i_chain                                   # dam -> check -> chain (QA-056)
+    assert "INSERT INTO {s}review_chain_head_log" in body
+    assert not os.path.exists(os.path.join(ROOT, "tools", "patches", "v17_chain_head_log_state.patch"))
 
 
 # ---------------------------------------------------------------- live
@@ -127,13 +140,12 @@ def test_even_the_owner_cannot_update_without_dropping_the_guard(env):
 
 @live
 def test_patched_app_appends_heads_and_reads_the_latest(env):
-    """Apply the patch to an export of HEAD's app/ and drive the real StateStore as the app role."""
+    """Export HEAD's committed app/ (head-log change applied by App Dev) and drive the real StateStore as the app role."""
     dst = env["tmp"] / "app_export"
-    require_git(ROOT, "`git archive HEAD app` (the patch is applied to HEAD's committed app/)")
+    require_git(ROOT, "`git archive HEAD app` (the test drives HEAD's committed app/)")
     tar = subprocess.run(["git", "-C", ROOT, "archive", "HEAD", "app"], capture_output=True, check=True).stdout
     tarfile.open(fileobj=io.BytesIO(tar)).extractall(dst, filter="data")
-    r = subprocess.run(["git", "apply", PATCH], cwd=dst, capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
+    assert _app_has_the_head_log(git_show_or_skip(ROOT, "HEAD", "app/backend/repos/state.py"))
     code = f"""
 import sys; sys.path.insert(0, {str(dst / 'app')!r})
 from psycopg_pool import ConnectionPool

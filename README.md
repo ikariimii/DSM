@@ -125,7 +125,7 @@ After v1.5, run `sql/migrations/v1_6_001_audit_chain.sql` (idempotent; pre-check
    CI runs it after `bundle deploy` when `vars.LAKEBASE_ENDPOINT` and `vars.LAKEBASE_APP_ROLE` are set.
 3. Nobody is granted membership in `dam_lakebase_owner` except the deployer for the duration of a migration; never
    `GRANT SET ON PARAMETER session_replication_role` to the app role.
-4. App Dev: apply `tools/patches/v17_lakebase_owner_state_init.patch` (state.py skips DDL on objects it does not own)
+4. App Dev: state.py skips DDL on objects it does not own (applied in febbe7c / ac14bdf)
    **before** step 1 reaches an environment, otherwise the app's startup init fails with "must be owner".
 
 ## Deploy (NOT RUN — needs user approval)

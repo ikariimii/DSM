@@ -3,7 +3,7 @@
 -- seeded once from the legacy app-owned review_chain_head. The block is byte-identical to lakebase/001
 -- (tests/test_chain_head_log.py); re-running lakebase/001 has the same effect. Run as the deployer with membership in
 -- dam_lakebase_owner, with SET dam.app_role and dam.extract_role.
--- ORDER: after lakebase/001 at v1_7_005; BEFORE the app carrying tools/patches/v17_chain_head_log_state.patch (the
+-- ORDER: after lakebase/001 at v1_7_005; BEFORE the app carrying the app head-log change (state.py, applied by App Dev in 478b7b5) (the
 -- patched app needs the log; an unpatched app keeps working and only updates the legacy table); the extract
 -- (src/jobs/lakebase_extract.py) reads both tables. IDEMPOTENT. Then lakebase/validate_append_only.sql (0 rows).
 -- DOWN: v1_7_006_chain_head_log_down.sql (drops nothing; revokes the app role's INSERT).
@@ -15,7 +15,7 @@ BEGIN;
 -- app role could rewind it. review_chain_head_log is append-only like review_signoff (owner dam_lakebase_owner,
 -- guard triggers ENABLE ALWAYS, app SELECT + INSERT only): one row per advance, the current head of a chain is its
 -- highest chain_seq, PK (chain_id, chain_seq) forbids two heads at the same position. The patched app
--- (tools/patches/v17_chain_head_log_state.patch) appends here instead of updating review_chain_head; the extract
+-- (the app head-log change in state.py, applied by App Dev in 478b7b5) appends here instead of updating review_chain_head; the extract
 -- takes the highest chain_seq per chain over both tables (transition), preferring this table at equal seq.
 CREATE TABLE IF NOT EXISTS review_chain_head_log (
   chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL CHECK (chain_seq >= 0),

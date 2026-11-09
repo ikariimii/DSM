@@ -1,7 +1,7 @@
 -- DOWN for lakebase/migrations/v1_7_006_chain_head_log.sql. Drops NOTHING: review_chain_head_log, its rows (audit
 -- evidence of every head the app reached) and its guard triggers stay. What it reverses: the app role loses INSERT on
 -- the log (it keeps SELECT), so only an UNPATCHED app may run afterwards: roll back
--- tools/patches/v17_chain_head_log_state.patch in the app FIRST. The extract keeps reading both tables (the log can
+-- the app head-log change (state.py, applied by App Dev in 478b7b5) in the app FIRST. The extract keeps reading both tables (the log can
 -- only hold heads up to the rollback; the legacy table then moves ahead and wins on chain_seq).
 -- Data-level fallback: a Lakebase point-in-time branch/restore (Postgres tables, not Delta). IDEMPOTENT. Re-applying
 -- v1_7_006 (or lakebase/001) restores the grant.
