@@ -37,7 +37,12 @@ RULE_FLAG_ACTION_TYPES = ("alarm_rule_flag_propose", "alarm_rule_flag_apply", "a
 # v1.7 DSSMP version registration (subject_type 'dssmp_version', decisions propose | approve | reject). The DA's UC
 # CHECKs and the engine's action types must add them before the extract carries these rows (SCHEMA_CONTRACT §7 19).
 DSSMP_ACTION_TYPES = ("dssmp_version_propose", "dssmp_version_approve", "dssmp_version_reject")
-APP_ACTION_TYPES = ACTION_TYPES + RULE_FLAG_ACTION_TYPES + DSSMP_ACTION_TYPES
+# v1.7 first-CDSE bootstrap and CDSE changes (subject_type 'dam') and the bulk re-version of rules under a superseded
+# DSSMP version (subject_type 'rule_reversion'); SCHEMA_CONTRACT §7 items 20 / 21 (DA CHECKs + engine).
+CDSE_ACTION_TYPES = ("dam_cdse_assign", "dam_cdse_change_propose", "dam_cdse_change_approve", "dam_cdse_change_reject")
+REVERSION_ACTION_TYPES = ("rule_reversion_propose", "rule_reversion_approve", "rule_reversion_reject")
+APP_ACTION_TYPES = (ACTION_TYPES + RULE_FLAG_ACTION_TYPES + DSSMP_ACTION_TYPES + CDSE_ACTION_TYPES
+                    + REVERSION_ACTION_TYPES)
 HASH_EXCLUDED = ("record_hash", "signature", "sig_alg", "key_id")
 CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
                 "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",

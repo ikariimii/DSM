@@ -106,6 +106,28 @@ DDL = [
         approval_record_hash TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
         reason_code TEXT, message TEXT, processed_at TEXT)""",
+    # v1.7 dam CDSE bootstrap / change (SCHEMA_CONTRACT §7 item 20). Workflow state (chained dam_cdse_* records are the
+    # evidence) and the outbox the DA's load job turns into ref.dam.cdse_id. The app NEVER writes ref.dam.
+    """CREATE TABLE IF NOT EXISTS {s}dam_cdse_change (
+        change_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('assign', 'change')),
+        previous_cdse_id TEXT, new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL,
+        rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0), proposed_by TEXT NOT NULL, proposed_by_id TEXT,
+        proposed_at TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+        decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, outbox_id TEXT,
+        approval_record_hash TEXT)""",
+    """CREATE TABLE IF NOT EXISTS {s}dam_cdse_outbox (
+        outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, kind TEXT NOT NULL, previous_cdse_id TEXT,
+        new_cdse_id TEXT NOT NULL, change_reason_code TEXT NOT NULL, proposed_by TEXT NOT NULL,
+        approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')),
+        reason_code TEXT, message TEXT, processed_at TEXT)""",
+    # v1.7 bulk re-version of the rules set under a superseded DSSMP version (SCHEMA_CONTRACT §7 item 21).
+    """CREATE TABLE IF NOT EXISTS {s}rule_reversion_proposal (
+        proposal_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, to_dssmp_version_id TEXT NOT NULL,
+        rules TEXT NOT NULL, proposed_by TEXT NOT NULL, proposed_by_id TEXT, proposed_at TEXT NOT NULL,
+        rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'applied', 'rejected')),
+        decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, pub_ids TEXT)""",
     # chain head: the serialization point for appends (row lock / sqlite write lock) and the tail anchor that makes a
     # deleted LAST record detectable. Updated only inside the append transaction.
     """CREATE TABLE IF NOT EXISTS {s}review_chain_head (
@@ -114,7 +136,7 @@ DDL = [
 
 APPEND_ONLY = ("review_signoff",)
 # Outbox rows are immutable except the publisher's bookkeeping columns (DA contract); DELETE / TRUNCATE refused.
-OUTBOX_GUARDED = ("dssmp_registration_outbox",)
+OUTBOX_GUARDED = ("dssmp_registration_outbox", "dam_cdse_outbox")
 OUTBOX_MUTABLE_COLS = ("status", "reason_code", "message", "processed_at")
 # QA-045c: transaction-scoped advisory lock key shared with ../lakebase/001_app_schema.sql, so app inits and the
 # data-layer script serialize against each other and no session ever sees an append-only table without its guard.
@@ -413,6 +435,26 @@ class StateStore:
         self.execute("UPDATE {s}dssmp_registration_outbox SET status = %s, reason_code = %s, message = %s, "
                      "processed_at = %s WHERE outbox_id = %s AND status = 'pending'",
                      (status, reason_code, message, now_iso(), outbox_id))
+
+    # ------------------------------------------------------------ generic workflow rows (cdse change, re-version)
+    def rows(self, table: str, order: str, **where) -> list[dict]:
+        cond = [f"{k} = %s" for k in where]
+        sql = f"SELECT * FROM {{s}}{table}" + (" WHERE " + " AND ".join(cond) if cond else "") + f" ORDER BY {order}"
+        return [dict(r) for r in self.execute(sql, tuple(where.values()))]
+
+    @staticmethod
+    def decide_pending(q, table: str, key: str, ident: str, fields: dict) -> None:
+        """UPDATE one 'pending' workflow row; raises if it was decided concurrently (aborts the chain transaction)."""
+        sets = ", ".join(f"{k} = %s" for k in fields)
+        n = q(f"UPDATE {{s}}{table} SET {sets} WHERE {key} = %s AND status = 'pending' RETURNING {key}",
+              (*fields.values(), ident))
+        if not n:
+            raise RuntimeError(f"{ident} is no longer pending")
+
+    def demo_publish(self, table: str, outbox_id: str, status: str, reason_code, message) -> None:
+        """DEMO ONLY stand-in for a DA publisher role: bookkeeping columns only (guard triggers refuse the rest)."""
+        self.execute(f"UPDATE {{s}}{table} SET status = %s, reason_code = %s, message = %s, processed_at = %s "
+                     "WHERE outbox_id = %s AND status = 'pending'", (status, reason_code, message, now_iso(), outbox_id))
 
     # ------------------------------------------------------------ users & roles
     def resolve_user(self, user_id: str, email: str) -> dict | None:

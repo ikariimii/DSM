@@ -5,6 +5,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
+import { CdseChangeQueue } from "./CdsePanel";
 
 const REG_BADGE: Record<string, string> = { pending: "warn", approved: "ok", rejected: "bad" };
 // contract spellings (loaded / rejected) and the DA load job's (applied / rejected_stale / rejected_invalid)
@@ -31,11 +32,17 @@ function Status({ r }: { r: any }) {
 
 export function RegistrationList({ damId, rows, canDecide, policy, onDone }: { damId: string; rows: any[]; canDecide: boolean; policy: any; onDone: () => void }) {
   const [why, setWhy] = useState<Record<string, string>>({});
+  const [noRev, setNoRev] = useState<Record<string, boolean>>({});
   const [err, setErr] = useState<string | null>(null);
-  const act = async (rid: string, what: "approve" | "reject") => {
-    setErr(null);
+  const [note, setNote] = useState<string | null>(null);
+  const act = async (r: any, what: "approve" | "reject") => {
+    setErr(null); setNote(null);
+    const rid = r.registration_id;
+    const propose_reversion = what === "approve" && (r.affected_count || 0) > 0 && !noRev[rid];
     try {
-      await api(`/api/dams/${damId}/dssmp-registrations/${rid}/${what}`, { method: "POST", body: { rationale: why[rid] || "" } });
+      const res: any = await api(`/api/dams/${damId}/dssmp-registrations/${rid}/${what}`, { method: "POST", body: { rationale: why[rid] || "", propose_reversion } });
+      if (res?.reversion) setNote(`Re-version proposal ${res.reversion.proposal_id} created for ${res.reversion.rules.length} rules — approve it below.`);
+      if (res?.reversion_error) setNote(`Re-version not proposed yet: ${res.reversion_error.code || ""} ${res.reversion_error.message || res.reversion_error}. Propose it once the version is loaded.`);
       onDone();
     } catch (e: any) { setErr(e.message); }
   };
@@ -43,6 +50,7 @@ export function RegistrationList({ damId, rows, canDecide, policy, onDone }: { d
   return (
     <div>
       {err && <div className="error">{err}</div>}
+      {note && <div className="muted">{note}</div>}
       <table>
         <thead><tr><th>Version</th><th>No.</th><th>Effective from (UTC)</th><th>Change reason / source</th><th>Document</th><th>Proposed</th><th>Status</th><th></th></tr></thead>
         <tbody>
@@ -57,17 +65,61 @@ export function RegistrationList({ damId, rows, canDecide, policy, onDone }: { d
                   : <span>{r.document_uri}</span>}
                   <div className="muted" title="sha256">{r.document_sha256 ? `sha256 ${r.document_sha256.slice(0, 12)}…` : "no sha256"}</div></td>
                 <td>{r.proposed_by}<div className="muted">{utc(r.proposed_at)}</div><div className="muted">{r.rationale}</div></td>
-                <td><Status r={r} />{r.decided_by && <div className="muted">{r.status} by {r.decided_by} {utc(r.decided_at)}: {r.decision_rationale}</div>}</td>
+                <td><Status r={r} />
+                  {r.status === "pending" && r.affected_count != null && (
+                    <details className="muted"><summary><b>{r.affected_count}</b> rule{r.affected_count === 1 ? "" : "s"} set under the version this supersedes (must be re-versioned before flag edits)</summary>
+                      <div>{(r.affected_rules || []).join(", ") || "none"}</div></details>)}
+                  {r.decided_by && <div className="muted">{r.status} by {r.decided_by} {utc(r.decided_at)}: {r.decision_rationale}</div>}</td>
                 <td>{canDecide && r.status === "pending" && (
                   <div>
                     <input placeholder="rationale (required)" value={why[r.registration_id] || ""} onChange={(e) => setWhy({ ...why, [r.registration_id]: e.target.value })} />
-                    {!self && <button onClick={() => act(r.registration_id, "approve")}>Approve</button>}
-                    <button className="secondary" onClick={() => act(r.registration_id, "reject")}>{self ? "Withdraw (reject)" : "Reject"}</button>
+                    {!self && (r.affected_count || 0) > 0 && <label className="muted"><input type="checkbox" checked={!noRev[r.registration_id]} onChange={(e) => setNoRev({ ...noRev, [r.registration_id]: !e.target.checked })} /> also propose re-version of {r.affected_count} rules</label>}
+                    {!self && <button onClick={() => act(r, "approve")}>Approve</button>}
+                    <button className="secondary" onClick={() => act(r, "reject")}>{self ? "Withdraw (reject)" : "Reject"}</button>
                   </div>)}</td>
               </tr>);
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// Bulk re-version: ONE proposal moving every affected rule to the new DSSMP version (values unchanged, N+1); the dam's
+// CDSE approves it and every N+1 publication is queued in one transaction (SCHEMA_CONTRACT §7 21).
+export function ReversionPanel({ damId, to, policy }: { damId: string; to?: string; policy?: any }) {
+  const { data, reload } = useApi<any>(`/api/dams/${damId}/rule-reversions${to ? `?to=${encodeURIComponent(to)}` : ""}`);
+  const [why, setWhy] = useState<Record<string, string>>({});
+  const [err, setErr] = useState<string | null>(null);
+  if (!data) return null;
+  const post = async (path: string, body: any) => {
+    setErr(null);
+    try { await api(`/api/dams/${damId}/rule-reversions${path}`, { method: "POST", body }); reload(); } catch (e: any) { setErr(e.message); }
+  };
+  const pend = (data.proposals || []).filter((p: any) => p.status === "pending");
+  return (
+    <div>
+      <h4>Rule re-version {to ? `to ${to}` : ""}</h4>
+      {err && <div className="error">{err}</div>}
+      {to && data.affected_count > 0 && !pend.length && data.can_propose && (
+        <div><span className="muted">{data.affected_count} rules are set under a superseded version: {data.affected_rules.map((r: any) => r.threshold_id).join(", ")}</span>
+          <input placeholder="rationale (required)" value={why._new || ""} onChange={(e) => setWhy({ ...why, _new: e.target.value })} />
+          <button onClick={() => post("", { to_dssmp_version_id: to, rationale: why._new || "" })}>Propose re-version of {data.affected_count} rules</button></div>)}
+      {to && data.affected_count === 0 && <div className="muted">Every current rule is set under {to}.</div>}
+      {(data.proposals || []).map((p: any) => {
+        const self = policy?.cdse_flag_require_second_approver && p.proposed_by === policy?.me;
+        return (
+          <div key={p.proposal_id} className="card-row">
+            <span className={`badge ${p.status === "applied" ? "ok" : p.status === "rejected" ? "bad" : "warn"}`}>{p.status}</span>{" "}
+            {p.rules.length} rules → {p.to_dssmp_version_id} <span className="muted">by {p.proposed_by} {utc(p.proposed_at)}: {p.rationale}</span>
+            <div className="muted">{p.rules.map((r: any) => `${r.threshold_id} v${r.threshold_version}`).join(", ")}</div>
+            {p.decided_by && <div className="muted">{p.status} by {p.decided_by} {utc(p.decided_at)}: {p.decision_rationale}{p.pub_ids ? ` — ${p.pub_ids.length} publications queued` : ""}</div>}
+            {p.status === "pending" && data.can_decide && (
+              <div><input placeholder="rationale (required)" value={why[p.proposal_id] || ""} onChange={(e) => setWhy({ ...why, [p.proposal_id]: e.target.value })} />
+                {!self && <button onClick={() => post(`/${p.proposal_id}/approve`, { rationale: why[p.proposal_id] || "" })}>Approve re-version</button>}
+                <button className="secondary" onClick={() => post(`/${p.proposal_id}/reject`, { rationale: why[p.proposal_id] || "" })}>Reject</button></div>)}
+          </div>);
+      })}
     </div>
   );
 }
@@ -125,6 +177,11 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
       {msg && <div className="muted">{msg}</div>}
       {err && <div className="error">{err}</div>}
       {data && <RegistrationList damId={damId} rows={data.registrations} canDecide={data.can_decide} policy={{ ...data.approval_policy, me: me?.email }} onDone={reload} />}
+      {data && (() => {
+        const loaded = data.registrations.filter((r: any) => r.status === "approved" && r.ref?.status === "approved" && !r.ref?.effective_to);
+        const latest = loaded.sort((a: any, b: any) => b.version_no - a.version_no)[0];
+        return latest ? <ReversionPanel damId={damId} to={latest.dssmp_version_id} policy={{ ...data.approval_policy, me: me?.email }} /> : null;
+      })()}
     </div>
   );
 }
@@ -132,6 +189,7 @@ export function DssmpRegistrationStep({ damId, disabled }: { damId?: string; dis
 // CDSE approval panel: every pending registration of the dams the caller is the CDSE of.
 export default function DssmpApprovals({ me }: { me?: any }) {
   const { data, error, loading, reload } = useApi<any>("/api/dssmp-registrations/pending");
+  const rv = useApi<any>("/api/rule-reversions/pending");
   const rows: any[] = data?.registrations || [];
   const dams = Array.from(new Set(rows.map((r) => r.dam_id)));
   const policy = data && { ...data.approval_policy, me: me?.email };
@@ -140,7 +198,12 @@ export default function DssmpApprovals({ me }: { me?: any }) {
       <Loading error={error} loading={loading} />
       {data && <ProvisionalNote policy={data.approval_policy} />}
       {data && !rows.length && <div className="muted">Nothing waiting for your approval.</div>}
-      {dams.map((d) => <div key={d}><h3>{d}</h3><RegistrationList damId={d} rows={rows.filter((r) => r.dam_id === d)} canDecide policy={policy} onDone={reload} /></div>)}
+      {dams.map((d) => <div key={d}><h3>{d}</h3><RegistrationList damId={d} rows={rows.filter((r) => r.dam_id === d)} canDecide policy={policy} onDone={() => { reload(); rv.reload(); }} /></div>)}
+      <h3>Rule re-version proposals</h3>
+      {rv.data && !rv.data.proposals.length && <div className="muted">No re-version proposals waiting.</div>}
+      {rv.data && Array.from(new Set<string>(rv.data.proposals.map((p: any) => p.dam_id))).map((d) => <div key={d}><b>{d}</b><ReversionPanel damId={d} policy={policy} /></div>)}
+      <h3>CDSE changes</h3>
+      <CdseChangeQueue me={me} />
     </Card>
   );
 }

@@ -22,8 +22,8 @@ from .bootstrap import bootstrap_admins
 from .config import Settings
 from .repos.analytics import MockAnalytics, SqlAnalytics
 from .repos.state import StateStore, lakebase_pool
-from .routers import (admin, alarm_rules, alarms, core, dssmp, dssmp_registration, instruments, onboarding, reports,
-                      signoffs)
+from .routers import (admin, alarm_rules, alarms, core, dam_cdse, dssmp, dssmp_registration, instruments, onboarding,
+                      reports, rule_reversion, signoffs)
 
 log = logging.getLogger("dam_safety_app")
 
@@ -55,8 +55,10 @@ def create_app(settings: Settings | None = None, pg_pool=None, analytics_factory
     else:
         app.state.analytics_factory = lambda token: SqlAnalytics(settings, token)
     app.state.signer = signer or NoopSigner()  # QA-039 v2: future key-based signer hook (no-op by default)
-    for r in (core, instruments, alarms, alarm_rules, dssmp, dssmp_registration, reports, onboarding, admin, signoffs):
+    for r in (core, instruments, alarms, alarm_rules, dssmp, dssmp_registration, dam_cdse, rule_reversion, reports,
+              onboarding, admin, signoffs):
         app.include_router(r.router)
+    app.include_router(rule_reversion.queue_router)
 
     dist = Path(settings.static_dir)
     if (dist / "index.html").exists():

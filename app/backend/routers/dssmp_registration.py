@@ -34,6 +34,7 @@ from .. import audit_chain as ac
 from ..config import approval_policy
 from ..deps import Ctx, analytics, ctx, store
 from . import alarms as alarms_router
+from . import rule_reversion as rr
 from . import signoffs as sg
 
 router = APIRouter()
@@ -56,10 +57,12 @@ class ProposeBody(BaseModel):
     document_sha256: str | None = None
     document_id: str | None = None
     rationale: str | None = None
+    propose_reversion: bool = False   # direct registration only
 
 
 class DecisionBody(BaseModel):
     rationale: str | None = None
+    propose_reversion: bool = False   # approve only: also create the bulk re-version proposal once loaded
 
 
 class UploadBody(BaseModel):
@@ -167,12 +170,29 @@ def _view(st, an, rows: list[dict]) -> list[dict]:
         x = ref.get(r["dssmp_version_id"])
         # volume_uri: shown when the DA's load adds it (outbox or ref row; not selected from UC until the DA confirms
         # where the column lives - SCHEMA_CONTRACT §7 item 19)
+        if r["status"] == "pending":   # shown on the approval screen: the rules this version would supersede
+            try:
+                aff = [x["threshold_id"] for x in rr.affected_rules(an, r["dam_id"], r["dssmp_version_id"])]
+            except Exception:  # noqa: BLE001
+                aff = None
+            r = {**r, "affected_rules": aff, "affected_count": None if aff is None else len(aff)}
         out.append({**r, "outbox": o and {k: o.get(k) for k in ("outbox_id", "status", "reason_code", "message",
                                                                  "processed_at", "approval_record_hash", "volume_uri")},
                     "ref": ({"status": "unverifiable", "error": err} if err else
                             x and {k: x.get(k) for k in ("status", "dam_id", "version_no", "effective_from",
                                                          "effective_to", "volume_uri")})})
     return out
+
+
+def _maybe_reversion(want: bool, c: Ctx, request: Request, an, st, dam_id: str, vid: str, rationale: str) -> dict:
+    """Optionally create the bulk re-version proposal right after a CDSE approval (a separate transaction: the version
+    must first be LOADED - approved-but-not-loaded fails closed and is reported, to be proposed as a follow-up)."""
+    if not want:
+        return {}
+    try:
+        return {"reversion": rr.create(c, request, an, st, dam_id, vid, rationale)}
+    except HTTPException as e:
+        return {"reversion": None, "reversion_error": e.detail}
 
 
 # ------------------------------------------------------------------ documents
@@ -355,7 +375,8 @@ def register_direct(dam_id: str, body: ProposeBody, request: Request, c: Ctx = D
     st.audit(c.email, "dssmp_version_register_direct", dam_id, reg["dssmp_version_id"], {"outbox_id": outbox_id})
     _demo_load(request, an, st, outbox_id)
     return {**_view(st, an, [st.dssmp_registration(row["registration_id"])])[0], "chain_seq": rec["chain_seq"],
-            "approval_record_hash": rec["record_hash"]}
+            "approval_record_hash": rec["record_hash"],
+            **_maybe_reversion(body.propose_reversion, c, request, an, st, dam_id, reg["dssmp_version_id"], rationale)}
 
 
 @router.post(BASE + "/dssmp-registrations/{registration_id}/approve")
@@ -391,7 +412,8 @@ def approve(dam_id: str, registration_id: str, body: DecisionBody, request: Requ
     st.audit(c.email, "dssmp_version_approve", dam_id, r["dssmp_version_id"], {"outbox_id": outbox_id})
     _demo_load(request, an, st, outbox_id)
     return {**_view(st, an, [st.dssmp_registration(registration_id)])[0], "chain_seq": rec["chain_seq"],
-            "approval_record_hash": rec["record_hash"]}
+            "approval_record_hash": rec["record_hash"],
+            **_maybe_reversion(body.propose_reversion, c, request, an, st, dam_id, r["dssmp_version_id"], rationale)}
 
 
 @router.post(BASE + "/dssmp-registrations/{registration_id}/reject")

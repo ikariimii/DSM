@@ -217,6 +217,17 @@ class MockAnalytics:
                   | {"effective_to": None, "status": "approved", "loaded_from_outbox_id": row["outbox_id"]})
         return "loaded", None, None
 
+    # demo-only stand-in for the DA's CDSE load job (SCHEMA_CONTRACT §7 item 20): sets ref.dam.cdse_id, which the
+    # demo view (cdse_principals) exposes at once. Returns (status, reason_code, message).
+    def load_cdse_outbox(self, row: dict) -> tuple[str, str | None, str | None]:
+        cur = self.d.setdefault("dam_cdse", {}).get(row["dam_id"])
+        if row["kind"] == "assign" and cur:
+            return "rejected_invalid", "cdse_exists", f"dam {row['dam_id']} already has CDSE {cur}"
+        if row["kind"] == "change" and (cur or "").lower() != (row.get("previous_cdse_id") or "").lower():
+            return "rejected_invalid", "cdse_stale", f"current CDSE is {cur}, not {row.get('previous_cdse_id')}"
+        self.d["dam_cdse"][row["dam_id"]] = row["new_cdse_id"]
+        return "loaded", None, None
+
     # demo-only: a live alarm-rule flag edit appends the new ref.threshold version immediately (the DA job in prod)
     def apply_threshold_version(self, payload: dict) -> None:
         self.d["thresholds"].append(copy.deepcopy(payload["insert"]))

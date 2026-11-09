@@ -3,6 +3,7 @@ import { api, type Me } from "../api";
 import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
 import { DssmpRegistrationStep } from "./DssmpRegistrations";
+import { CdsePanel } from "./CdsePanel";
 
 type Col = { key: string; label?: string; type?: "text" | "number" | "select" | "json" | "date" | "checkbox"; options?: string[] };
 
@@ -117,6 +118,7 @@ function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit:
           { key: "path" }, { key: "table" }, { key: "column" }, { key: "raw_unit" }]} />}
         {name === "users" && <Rows value={data.users || []} onSave={save} disabled={readOnly} cols={[
           { key: "email" }, { key: "display_name" }, { key: "role", type: "select", options: ["viewer", "engineer", "dso", "dam_admin"] }]} />}
+        {name === "users" && <CdsePanel damId={data.details?.dam_id} />}
         {name === "validate" && <Validate draftId={draftId} />}
         {name === "golive" && <GoLive draftId={draftId} disabled={readOnly} onDone={reload} />}
       </Card>

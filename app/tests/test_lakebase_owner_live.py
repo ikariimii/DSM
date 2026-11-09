@@ -96,8 +96,10 @@ def test_owner_model_startup_runs_no_owner_ddl(lakebase, monkeypatch):
     assert not [q for q in ddl if any(o in q for o in owner_objects) and not q.lstrip().upper().startswith(
         "CREATE TABLE IF NOT EXISTS")], ddl
     assert not [q for q in ddl if "review_signoff" in q and not q.lstrip().upper().startswith("CREATE TABLE IF NOT EXISTS")]
-    # the only trigger DDL is the app's own guard on its app-owned DSSMP outbox (v1.7), never an owner table
-    assert {q.split(" ON ")[1].split()[0] for q in ddl if q.lstrip().upper().startswith(("CREATE TRIGGER", "CREATE OR REPLACE TRIGGER"))} <= {"{s}dssmp_registration_outbox"}
+    # the only trigger DDL is the app's own guards on its app-owned outboxes (v1.7: DSSMP, dam CDSE), never an owner table
+    from backend.repos.state import OUTBOX_GUARDED
+    assert {q.split(" ON ")[1].split()[0] for q in ddl if q.lstrip().upper().startswith(("CREATE TRIGGER", "CREATE OR REPLACE TRIGGER"))} <= {f"{{s}}{t}" for t in OUTBOX_GUARDED}
+    assert not set(OUTBOX_GUARDED) & set(owner_objects)
 
 
 def test_append_verify_and_guards_as_app_role(lakebase):
@@ -162,9 +164,7 @@ def test_init_fails_closed_when_owner_table_is_not_provisioned(lakebase, sabotag
 
 
 # ------------------------------------------------------------------ DSSMP outbox (agreed contract) vs the DA table
-@pytest.mark.xfail(strict=True, raises=RuntimeError, reason="DA 86993d0 lakebase/001 dssmp_registration_outbox uses requested_by/"
-                   "applied_at/no reason_code; Genie: the agreed contract wins and the DA is migrating. Remove this "
-                   "marker when lakebase/001 matches (SCHEMA_CONTRACT §7 item 19)")
+# was a strict xfail against DA 86993d0; DA 91e7979 (lakebase/001 + v1_7_004) migrated the table to the contract
 def test_app_role_inserts_a_contract_outbox_row_with_the_approve_record(lakebase):
     from backend import audit_chain as ac
     _, app = lakebase

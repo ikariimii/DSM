@@ -644,7 +644,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       approved, non-superseded version (step `dssmp`), even with no thresholds.
     - **Flag-apply N+1 uses the same codes (409).** Consequence: once the DA load job supersedes a dam's DSSMP
       version, flag edits on rules still set under the old version are refused (`dssmp_superseded`) until the DA
-      re-versions those rules under the new DSSMP. Open question for Genie/DA: intended?
+      re-versions those rules under the new DSSMP. Open question for Genie/DA: intended? **Decided (Genie): yes, no
+      grace path; the app offers a bulk re-version (item 21).**
     - **Workflow:** answered by item 19 (wizard registration → CDSE approval → outbox → DA load job).
     - **Demo:** the seed has `DSSMP-<dam>-2026` (approved) for each dam. Tests register `DSSMP-NEW-2026` for the
       onboarded dam.
@@ -706,7 +707,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       proposer can never approve (403 `self_approval_forbidden`) and can only reject. The setting is NOT written to
       the chain (DA request).
     - **New dams:** before go-live the dam has no stored app roles, so a platform admin proposes. The DA must expose
-      the new dam's CDSE in `ref.v_dam_reviewer_authority` BEFORE go-live, or nobody can approve (fail closed).
+      the new dam's CDSE in `ref.v_dam_reviewer_authority` BEFORE go-live, or nobody can approve (fail closed). The
+      first CDSE itself comes from the bootstrap in item 20.
     - **CONFLICT with the DA's 86993d0 / 18ebff2 (committed after the contract above; NOT resolved in the app).**
       `lakebase/001` creates `dssmp_registration_outbox` owner-owned. The app has INSERT/SELECT only, so the app's
       CREATE TABLE IF NOT EXISTS and guard DDL are no-ops/skipped there. Its columns differ from the agreed contract:
@@ -740,7 +742,9 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **Outbox decision (Genie): the AGREED contract wins.** The app keeps its INSERT on the contract columns
       (`proposed_by`, `reason_code`, `processed_at`; status pending|loaded|rejected). The DA migrates
       `lakebase/001` / `dssmp_registration.OUTBOX_COLS` to it. Until then the live-PG approve INSERT fails against
-      86993d0's table (expected).
+      86993d0's table (expected). **Resolved by DA 91e7979** (`lakebase/001` + `v1_7_004_dssmp_outbox_contract`):
+      the table now has exactly the contract columns and status CHECK; the live-PG test inserts a contract row with
+      the approve record as the restricted app role (no longer xfail).
     - **CDSE direct registration (Genie):** `POST /api/dams/{dam}/dssmp-registrations/direct`, the dam's CDSE only
       (fail closed), same body as propose, rationale required. In ONE transaction it writes ONE
       `dssmp_version_approve` record with NO prior proposal (the engine's "CDSE may approve directly";
@@ -759,6 +763,67 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       the app does not SELECT it from UC until the DA confirms which table carries it). `reason_code
       dssmp_document_hash_mismatch` is a load rejection with its own message: re-register with the correct
       document.
+20. **Dam CDSE: first-CDSE bootstrap and CDSE changes (v1.7, Genie).** The app NEVER writes `ref.dam`.
+    - **Bootstrap:** `POST /api/dams/{dam}/cdse/assign` `{cdse_id, reason_code, rationale}`.
+      - Who and when: the PLATFORM ADMIN only, and only while the dam has no CDSE (`ref.v_dam_reviewer_authority`
+        empty) and is not live (no `ref.dam` row in the app's dam list).
+      - Refusals: 403 for any other role; 409 `dam_live` / `cdse_exists` / `cdse_assign_pending` (an assignment
+        waiting for the load job); 409 `cdse_unverifiable` / `dam_state_unverifiable` when the lookups fail (fail
+        closed); 422 `reason_code_invalid`, missing rationale, or a `cdse_id` that is not an e-mail principal.
+      - It appends ONE chain record: `action_type dam_cdse_assign`, `decision assign`, `subject_type dam`,
+        `subject_id` = dam_id. In the same transaction it writes the change row (approved) and ONE outbox row.
+    - **Changes:** `POST /api/dams/{dam}/cdse/changes` `{cdse_id, reason_code, rationale}` is a platform-admin
+      PROPOSAL (`dam_cdse_change_propose`; 409 `cdse_authority_missing` when the dam has no CDSE yet, so use assign;
+      `cdse_unchanged`; `cdse_change_pending`). `POST .../cdse/changes/{change_id}/approve|reject` `{rationale}` is
+      for the dam's CURRENT CDSE only (`dam_cdse_change_approve` / `_reject`, subject `dam`). It returns 409
+      `cdse_stale` if the current CDSE no longer equals the proposal's `previous_cdse_id`. Self-approval follows the
+      PROVISIONAL `CDSE_FLAG_REQUIRE_SECOND_APPROVER` (403 `self_approval_forbidden`). Approve inserts ONE outbox row
+      in the same transaction. `GET /api/dams/{dam}/cdse` returns the state; `GET /api/cdse-changes/pending` is the
+      caller's queue.
+    - **`reason_code` enum** (`dam_cdse_change.change_reason_code`, outbox `change_reason_code`):
+      `initial_appointment`, `resignation`, `retirement`, `reassignment`, `incapacity`, `regulatory_direction`,
+      `correction`.
+    - **Outbox `dam_app.dam_cdse_outbox`** (same pattern and guards as item 19): `outbox_id` (`DCO-<uuid>`),
+      `dam_id`, `kind` (`assign`|`change`), `previous_cdse_id` (NULL for assign), `new_cdse_id`,
+      `change_reason_code`, `proposed_by`, `approved_by`, `approved_at` (= the deciding record's `signed_ts`),
+      `approval_record_hash`, `status` (`pending`|`loaded`|`rejected`|`rejected_invalid`), `reason_code`, `message`,
+      `processed_at`. The app inserts only. The guard triggers allow UPDATE of `status, reason_code, message,
+      processed_at` only, and refuse DELETE/TRUNCATE.
+    - **DA to provision:**
+      - the 4 action types and subject `dam` in the UC CHECKs and the engine;
+      - the publisher role with SELECT + column-level UPDATE of the 4 bookkeeping columns;
+      - the load job: verify the record (hash, signer = admin for assign, the then-current CDSE for change). For
+        assign, refuse if `ref.dam.cdse_id` is already set (`cdse_exists`); for change, refuse if it is not
+        `previous_cdse_id` (`cdse_stale`). Then set `ref.dam.cdse_id` and expose it in
+        `ref.v_dam_reviewer_authority`.
+    - Go-live still requires the CDSE row in the view (`cdse_authority_missing`, item 19). Demo mode has a stand-in
+      loader with the same refusals.
+21. **Bulk re-version of rules after a DSSMP revision (v1.7, Genie).** The 409 `dssmp_superseded` stays (no grace
+    path).
+    - **Affected rules** = the dam's current `ref.threshold` rows whose `dssmp_version_id` is not the new version.
+      The DSSMP approval screen shows their count and ids for each pending registration (`affected_count`,
+      `affected_rules`); `GET /api/dams/{dam}/rule-reversions?to=<vid>` gives the preview and the proposals.
+    - **Proposal:** `POST /api/dams/{dam}/rule-reversions` `{to_dssmp_version_id, rationale}`. Who: dam_admin,
+      platform admin, or the dam's CDSE. It is ONE proposal covering EVERY affected rule (`rule_reversion_propose`).
+      DSSMP approve / direct registration also accept `propose_reversion: true`. That proposal is created after the
+      approval in its own transaction; if the version is not loaded yet, `reversion_error` is returned and the
+      proposal is made as a follow-up. Refusals: target not loaded, approved and in effect (409 with the
+      `dssmp_findings` code), `nothing_to_reversion`, `reversion_pending`, and rules lacking NOT NULL columns.
+    - **Decision:** `POST .../{proposal_id}/approve|reject` `{rationale}`, the dam's CDSE only.
+      - Self-approval follows the provisional setting.
+      - Approve re-checks the target and every rule. Any rule changed or not covered gives 409 `reversion_stale`
+        and nothing is queued.
+      - It then appends ONE `rule_reversion_approve` record (subject `rule_reversion`, subject_id = proposal_id;
+      `corrected_value.publications` lists every publication id and new version) and, in the SAME transaction,
+      queues one N+1 `ref.threshold.new_version` publication per rule. Values are unchanged (limits, tier,
+      deadband, persistence, `cdse_ack_required`) except `dssmp_version_id` = target, `threshold_version` + 1,
+      `effective_from` = now, `set_by`.
+    - **Publication payload additions:** `cause: "dssmp_reversion"`, `reversion_proposal_id`, `approval_record_hash`.
+      DA: the publisher and engine must accept a `rule_reversion_approve` record as the authority for these
+      publications (subject `rule_reversion`, not `dssmp_version`, which the engine reserves for the dssmp actions).
+      Add the 3 action types and the subject type to the CHECKs.
+    - Alarms and open episodes are not touched (the flag is carried unchanged; the ack rule ORs the episode
+      snapshot). `GET /api/rule-reversions/pending` is the caller's CDSE queue.
 
 ## 8. Contract items for v1.8 (logged, not implemented)
 

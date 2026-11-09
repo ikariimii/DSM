@@ -71,6 +71,12 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
   approves it (rationale required, chained), and the app queues it in `dam_app.dssmp_registration_outbox` for the
   DA load job. Go-live is refused until the version is loaded in `ref.dssmp_version` as approved and not superseded
   (SCHEMA_CONTRACT §7 item 19).
+- **Dam CDSE (v1.7):** the platform admin assigns a dam's FIRST CDSE (not live, none yet; reason_code + rationale,
+  chained); later changes are admin proposals the current CDSE approves. Queued in `dam_app.dam_cdse_outbox` for the
+  DA load job, which sets `ref.dam.cdse_id` (wizard step "Users & roles"; §7 item 20).
+- **Bulk re-version (v1.7):** after a DSSMP revision the approval screen lists the rules set under the superseded
+  version; ONE proposal moves them all to the new version (values unchanged, N+1), the CDSE approves and every
+  publication is queued in one transaction (§7 item 21). Flag edits stay refused (409) until then.
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
   `config.env` **for the first prod deploy only, then remove it from prod config** and redeploy once the first
   admin has signed in and granted roles in the Admin UI. Rules (`backend/bootstrap.py`):
