@@ -1,5 +1,6 @@
 -- Lakebase (Postgres 17, Autoscaling project dam-<target>) app OLTP state.
--- Schema dam_app. OWNERSHIP: the App Developer's app/backend/repos/state.py creates
+-- Schema dam_app. OBJECT OWNER (v1.7): role dam_lakebase_owner (NOLOGIN), see 'ownership hardening' below.
+-- DEFINITIONS: the App Developer's app/backend/repos/state.py creates
 -- app_user, dam_role, alarm_ack, alarm_comment, onboarding_draft, onboarding_publication,
 -- report_draft, pfm_review, audit_log (CREATE IF NOT EXISTS at startup). This file is the
 -- data-layer copy of those definitions (kept column-compatible) PLUS the tables the data
@@ -87,20 +88,118 @@ CREATE OR REPLACE TRIGGER t_notrunc_review_signoff BEFORE TRUNCATE ON review_sig
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
 CREATE OR REPLACE TRIGGER t_notrunc_manual_reading BEFORE TRUNCATE ON manual_reading
   FOR EACH STATEMENT EXECUTE FUNCTION forbid_mutation();
--- Defence in depth: REVOKE TRUNCATE from the app's Postgres role. The role is the app service principal's
--- Lakebase role, whose name is per-workspace and not known to this file, so it is opt-in: run with
---   SET dam.app_role = '<app SP role name>';
--- before this script. Unset or nonexistent role => no-op. NOTE: if that role OWNS the tables (state.py creates
--- them at startup), REVOKE does not stop it re-granting itself; the trigger above is the binding guard.
-DO $$
-DECLARE r TEXT := nullif(current_setting('dam.app_role', true), '');
-BEGIN
-  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-    EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I', r);
-  END IF;
-END $$;
-
 CREATE TABLE IF NOT EXISTS extract_watermark (
   table_name TEXT PRIMARY KEY, last_id BIGINT, last_ts TEXT, updated_at TEXT NOT NULL);
+
+-- ---- v1.7 mirror of the rest of state.py's init (QA-039 v2 chain), so the app never needs DDL ----
+-- Same names/types as state.py _init_schema() on an existing v1 table (nullable ADD COLUMN, chain_seq BIGINT).
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS action_type TEXT, ADD COLUMN IF NOT EXISTS reviewer_email TEXT,
+  ADD COLUMN IF NOT EXISTS reviewer_sub TEXT, ADD COLUMN IF NOT EXISTS original_value TEXT,
+  ADD COLUMN IF NOT EXISTS corrected_value TEXT, ADD COLUMN IF NOT EXISTS chain_id TEXT,
+  ADD COLUMN IF NOT EXISTS chain_seq BIGINT, ADD COLUMN IF NOT EXISTS prev_hash TEXT,
+  ADD COLUMN IF NOT EXISTS record_hash TEXT, ADD COLUMN IF NOT EXISTS signature TEXT,
+  ADD COLUMN IF NOT EXISTS sig_alg TEXT, ADD COLUMN IF NOT EXISTS key_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS review_signoff_chain_seq ON review_signoff (chain_id, chain_seq);
+CREATE TABLE IF NOT EXISTS review_chain_head (
+  chain_id TEXT PRIMARY KEY, chain_seq INTEGER NOT NULL, head_hash TEXT NOT NULL, updated_ts TEXT NOT NULL);
+ALTER TABLE app_user ADD COLUMN IF NOT EXISTS user_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
+
+-- ---- v1.7 ownership hardening (QA-045b residual risks) ----
+-- Risk 1: a table OWNER can ALTER TABLE ... DISABLE TRIGGER (then TRUNCATE/UPDATE/DELETE), drop the trigger, replace
+-- the trigger function, or GRANT itself TRUNCATE back; the SCHEMA owner can DROP any table in the schema.
+-- Risk 2: a superuser, or a role granted SET on session_replication_role, can SET session_replication_role = replica,
+-- under which ordinary (ORIGIN-enabled) triggers do not fire (PG 17 docs: ALTER TABLE ... ENABLE/DISABLE TRIGGER;
+-- runtime-config-client session_replication_role).
+-- Model (split ownership):
+--   * NOLOGIN role dam_lakebase_owner owns the schema dam_app, the append-only tables exceedance_status,
+--     review_signoff, manual_reading (their id sequences move with them) and the trigger functions forbid_mutation()
+--     and app_forbid_mutation(). Nobody logs in as it; the deployer runs this file with membership in it.
+--   * The app service principal's role (SET dam.app_role) gets USAGE + CREATE on the schema, SELECT + INSERT (no
+--     UPDATE / DELETE / TRUNCATE / TRIGGER) on the append-only tables and USAGE on their sequences, and OWNS the
+--     mutable app tables (app_user, alarm_ack, ..., review_chain_head, and anything state.py creates later), so
+--     state.py keeps managing those. It must NOT be superuser, REPLICATION or BYPASSRLS, nor a member of
+--     dam_lakebase_owner; this file refuses to finish if it is. state.py must skip DDL on the owner-owned objects:
+--     tools/patches/v17_lakebase_owner_state_init.patch (App Dev applies it; not applied here).
+--   * Guard triggers are ENABLE ALWAYS, so they fire even under session_replication_role = replica.
+--   * The extract job's role (SET dam.extract_role) gets SELECT on all tables + INSERT/UPDATE on extract_watermark.
+-- lakebase/validate_append_only.sql (tools/validate_lakebase.py) re-checks all of it after every deploy.
+-- Unset role GUCs => that role's grants are skipped (guarded ownership is still moved). Needs CREATEROLE (first
+-- run) and the deployer able to act as the old and new owners (PG ALTER ... OWNER rules). UNVERIFIED on Lakebase:
+-- the deployer role and its attributes, the app SP role's attributes (docs/VERIFICATION.md LB-OWNER).
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dam_lakebase_owner') THEN
+    CREATE ROLE dam_lakebase_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dam_lakebase_owner'
+             AND (rolcanlogin OR rolsuper OR rolreplication OR rolbypassrls)) THEN
+    RAISE EXCEPTION 'dam_lakebase_owner must be NOLOGIN NOSUPERUSER NOREPLICATION NOBYPASSRLS'
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+END $$;
+ALTER SCHEMA dam_app OWNER TO dam_lakebase_owner;
+ALTER TABLE exceedance_status OWNER TO dam_lakebase_owner;
+ALTER TABLE review_signoff OWNER TO dam_lakebase_owner;
+ALTER TABLE manual_reading OWNER TO dam_lakebase_owner;
+ALTER TABLE extract_watermark OWNER TO dam_lakebase_owner;
+DO $$
+DECLARE o RECORD;
+BEGIN
+  FOR o IN SELECT p.oid::regprocedure AS fn FROM pg_proc p
+           WHERE p.pronamespace = 'dam_app'::regnamespace AND p.proname IN ('forbid_mutation', 'app_forbid_mutation')
+             AND p.proowner <> 'dam_lakebase_owner'::regrole LOOP
+    EXECUTE format('ALTER ROUTINE %s OWNER TO dam_lakebase_owner', o.fn);
+  END LOOP;
+END $$;
+REVOKE ALL ON SCHEMA dam_app FROM PUBLIC;
+-- Guard triggers fire ALWAYS (also under session_replication_role = replica). These tables are never
+-- logical-replication targets (SCHEMA_CONTRACT 7.3: no synced tables), so ALWAYS cannot block a replication apply.
+ALTER TABLE exceedance_status ENABLE ALWAYS TRIGGER t_noupd_exceedance_status,
+  ENABLE ALWAYS TRIGGER t_notrunc_exceedance_status;
+ALTER TABLE review_signoff ENABLE ALWAYS TRIGGER t_noupd_review_signoff,
+  ENABLE ALWAYS TRIGGER t_notrunc_review_signoff;
+ALTER TABLE manual_reading ENABLE ALWAYS TRIGGER t_noupd_manual_reading,
+  ENABLE ALWAYS TRIGGER t_notrunc_manual_reading;
+DO $$
+DECLARE
+  r TEXT := nullif(current_setting('dam.app_role', true), '');
+  x TEXT := nullif(current_setting('dam.extract_role', true), '');
+  bad TEXT;
+  o RECORD;
+BEGIN
+  IF r IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    SELECT string_agg(a, ', ') INTO bad FROM (
+      SELECT 'SUPERUSER' a FROM pg_roles WHERE rolname = r AND rolsuper
+      UNION ALL SELECT 'REPLICATION' FROM pg_roles WHERE rolname = r AND rolreplication
+      UNION ALL SELECT 'BYPASSRLS' FROM pg_roles WHERE rolname = r AND rolbypassrls) z;
+    IF bad IS NOT NULL THEN
+      RAISE EXCEPTION 'app role % must not be %', r, bad USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF pg_has_role(r, 'dam_lakebase_owner', 'MEMBER') THEN
+      EXECUTE format('REVOKE dam_lakebase_owner FROM %I', r);   -- direct membership only
+      IF pg_has_role(r, 'dam_lakebase_owner', 'MEMBER') THEN
+        RAISE EXCEPTION 'app role % is an indirect member of dam_lakebase_owner', r
+          USING ERRCODE = 'insufficient_privilege';
+      END IF;
+    END IF;
+    -- mutable app tables (everything except the guarded three and extract_watermark) belong to the app
+    FOR o IN SELECT c.oid::regclass AS rel FROM pg_class c
+             WHERE c.relnamespace = 'dam_app'::regnamespace AND c.relkind IN ('r', 'p')
+               AND c.relname NOT IN ('exceedance_status', 'review_signoff', 'manual_reading', 'extract_watermark')
+               AND c.relowner <> (SELECT oid FROM pg_roles WHERE rolname = r) LOOP
+      EXECUTE format('ALTER TABLE %s OWNER TO %I', o.rel, r);
+    END LOOP;
+    EXECUTE format('GRANT USAGE, CREATE ON SCHEMA dam_app TO %I', r);
+    EXECUTE format('REVOKE ALL ON exceedance_status, review_signoff, manual_reading FROM %I', r);
+    EXECUTE format('REVOKE TRUNCATE ON exceedance_status, review_signoff, manual_reading FROM %I', r);
+    EXECUTE format('GRANT SELECT, INSERT ON exceedance_status, review_signoff, manual_reading TO %I', r);
+    EXECUTE format('GRANT USAGE ON SEQUENCE exceedance_status_id_seq, manual_reading_id_seq TO %I', r);
+  END IF;
+  IF x IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = x) THEN
+    EXECUTE format('GRANT USAGE ON SCHEMA dam_app TO %I', x);
+    EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA dam_app TO %I', x);
+    EXECUTE format('GRANT INSERT, UPDATE ON extract_watermark TO %I', x);
+  END IF;
+END $$;
 
 COMMIT;

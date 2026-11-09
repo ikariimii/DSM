@@ -465,6 +465,13 @@ effective_from, effective_to`; bridge `ref.pfm_instrument`.
   - `manual_reading` → CSV into `/Volumes/<cat>/raw/landing/<dam>/readings/manual_<stamp>.csv` (v1.0 said `manual/`, which bronze does not read), so ADAS and manual readings share one ingest path
   - `report_draft` → `rpt.dssmr_draft` (append-only snapshot per content sha256) + `rpt.dssmr` upsert while still `draft`
 
+### 7.1b Object ownership (v1.7)
+`dam_lakebase_owner` (NOLOGIN) owns schema `dam_app`, the append-only tables `exceedance_status`, `review_signoff`,
+`manual_reading`, `extract_watermark` and the trigger functions; the app service principal's role owns its mutable
+tables and has SELECT + INSERT only on the append-only ones. `lakebase/001_app_schema.sql` also adds the v2 chain
+columns, the chain index, `review_chain_head` and `app_user.user_id` so the app needs no DDL on owner-owned objects
+(state.py patch: `tools/patches/v17_lakebase_owner_state_init.patch`). Validate with `tools/validate_lakebase.py`.
+
 ### 7.2 Ownership of writes (v1.1, app Q11)
 The app writes Lakebase only. `dam_lakebase_extract` is the **only** writer of `ALARM_ACK` rows to `audit.event_log`;
 the alarm evaluator is the **only** writer of `ACK` transitions (dedup tag `lakebase_ack:<event_id>`). `certified`/`submitted`

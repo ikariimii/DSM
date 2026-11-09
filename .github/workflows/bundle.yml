@@ -39,6 +39,33 @@ jobs:
       # UC SELECT on ref.v_dam_reviewer_authority per dam group, generated from the same dam list (v1.6 ROLE-LEVEL).
       - run: python tools/render_uc_reviewer_grants.py --check
 
+  # v1.7 Lakebase ownership hardening: needs a LIVE PostgreSQL (service container). Runs lakebase/001 as the
+  # deployer, then the append-only / ownership tests AS a throwaway app role (DISABLE TRIGGER, TRUNCATE and
+  # SET session_replication_role must fail) and the validator on a good and on deliberately bad setups.
+  lakebase-pg:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env: { POSTGRES_PASSWORD: ci-only-not-a-secret, POSTGRES_HOST_AUTH_METHOD: trust }
+        ports: [ "5432:5432" ]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DAM_TEST_PG: "host=localhost port=5432 user=postgres dbname=postgres"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get install -y postgresql-client
+      - run: pip install -e ".[dev]" "psycopg[binary]>=3.1"
+      - run: python -m pytest -q tests/test_lakebase_append_only.py tests/test_lakebase_ownership.py
+      # the validator itself against a freshly provisioned DB (exit 1 on any violation)
+      - run: |
+          psql "$DAM_TEST_PG" -c "CREATE ROLE ci_app LOGIN" -c "CREATE DATABASE ci_lb"
+          PGOPTIONS="-c dam.app_role=ci_app" psql "$DAM_TEST_PG dbname=ci_lb" -X -v ON_ERROR_STOP=1 -f lakebase/001_app_schema.sql
+          python tools/validate_lakebase.py --app-role ci_app --dsn "$DAM_TEST_PG dbname=ci_lb"
+
   validate:
     needs: test
     runs-on: ubuntu-latest
@@ -66,6 +93,11 @@ jobs:
       - uses: databricks/setup-cli@main
       - run: databricks bundle deploy -t test --var="warehouse_id=${{ vars.WAREHOUSE_ID }}" --var="ops_email=${{ vars.OPS_EMAIL }}"
       - run: databricks bundle run -t test dam_uc_setup
+      # v1.7: Lakebase append-only / ownership validation (live DB). UNVERIFIED: endpoint path and app role vars.
+      - if: vars.LAKEBASE_ENDPOINT != '' && vars.LAKEBASE_APP_ROLE != ''
+        run: |
+          pip install "psycopg[binary]>=3.1" "databricks-sdk>=0.60"
+          python tools/validate_lakebase.py --app-role "${{ vars.LAKEBASE_APP_ROLE }}" --lb-endpoint "${{ vars.LAKEBASE_ENDPOINT }}"
 
   deploy-prod:
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'prod'
@@ -86,3 +118,8 @@ jobs:
           --var="ops_destination_id=${{ vars.OPS_DESTINATION_ID }}"
           --var="life_safety_destination_id=${{ vars.LIFE_SAFETY_DESTINATION_ID }}"
       - run: databricks bundle run -t prod dam_uc_setup
+      # v1.7: Lakebase append-only / ownership validation (live DB). UNVERIFIED: endpoint path and app role vars.
+      - if: vars.LAKEBASE_ENDPOINT != '' && vars.LAKEBASE_APP_ROLE != ''
+        run: |
+          pip install "psycopg[binary]>=3.1" "databricks-sdk>=0.60"
+          python tools/validate_lakebase.py --app-role "${{ vars.LAKEBASE_APP_ROLE }}" --lb-endpoint "${{ vars.LAKEBASE_ENDPOINT }}"

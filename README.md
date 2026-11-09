@@ -113,6 +113,21 @@ SQL scripting, `catalog` parameter) **before** `dam_uc_setup`. Fresh installs sk
 After v1.5, run `sql/migrations/v1_6_001_audit_chain.sql` (idempotent; pre-check in its header) **before**
 `dam_uc_setup`. Never re-run v1_5_001 after it (if you did, re-run v1_6_001). UNVERIFIED (VERIFICATION MIGRATION-2).
 
+## Lakebase deploy checklist (v1.7 ownership hardening; NOT RUN on Lakebase)
+1. As a deployer role with CREATEROLE that can act as the current table owners (UNVERIFIED which Lakebase role this is):
+   `PGOPTIONS='-c dam.app_role=<app SP role> -c dam.extract_role=<extract job role>' psql "$DSN" -X -v ON_ERROR_STOP=1 -f lakebase/001_app_schema.sql`
+   (idempotent, one locked transaction). It creates the NOLOGIN role `dam_lakebase_owner`, which owns the schema,
+   the append-only tables (`exceedance_status`, `review_signoff`, `manual_reading`) and the trigger functions; the
+   app role gets SELECT + INSERT there and owns only its mutable tables. It refuses an app role that is SUPERUSER,
+   REPLICATION or BYPASSRLS.
+2. Validate: `python tools/validate_lakebase.py --app-role <app SP role> --lb-endpoint projects/<p>/branches/<b>/endpoints/<e>`
+   (or `--dsn`; runs `lakebase/validate_append_only.sql`, read only). Any `FAIL` line blocks the release.
+   CI runs it after `bundle deploy` when `vars.LAKEBASE_ENDPOINT` and `vars.LAKEBASE_APP_ROLE` are set.
+3. Nobody is granted membership in `dam_lakebase_owner` except the deployer for the duration of a migration; never
+   `GRANT SET ON PARAMETER session_replication_role` to the app role.
+4. App Dev: apply `tools/patches/v17_lakebase_owner_state_init.patch` (state.py skips DDL on objects it does not own)
+   **before** step 1 reaches an environment, otherwise the app's startup init fails with "must be owner".
+
 ## Deploy (NOT RUN — needs user approval)
 ```
 databricks bundle validate -t dev
