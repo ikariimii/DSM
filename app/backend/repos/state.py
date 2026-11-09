@@ -155,7 +155,7 @@ class StateStore:
         self._append_only_guards()
 
     def _append_only_guards(self) -> None:
-        """UPDATE/DELETE on append-only tables fail in the database, not only in app code (QA-039)."""
+        """UPDATE/DELETE (QA-039) and TRUNCATE (QA-045b) on append-only tables fail in the database, not in app code."""
         for t in APPEND_ONLY:
             if self.kind == "sqlite":
                 for op in ("UPDATE", "DELETE"):
@@ -169,6 +169,11 @@ class StateStore:
                 self.execute(f"DROP TRIGGER IF EXISTS t_app_noupd_{t} ON {{s}}{t}")
                 self.execute(f"CREATE TRIGGER t_app_noupd_{t} BEFORE UPDATE OR DELETE ON {{s}}{t} "
                              "FOR EACH ROW EXECUTE FUNCTION {s}app_forbid_mutation()")
+                # QA-045b: row triggers do not fire on TRUNCATE; PostgreSQL allows TRUNCATE triggers only
+                # FOR EACH STATEMENT (PG 17 docs, CREATE TRIGGER). sqlite has no TRUNCATE.
+                self.execute(f"DROP TRIGGER IF EXISTS t_app_notrunc_{t} ON {{s}}{t}")
+                self.execute(f"CREATE TRIGGER t_app_notrunc_{t} BEFORE TRUNCATE ON {{s}}{t} "
+                             "FOR EACH STATEMENT EXECUTE FUNCTION {s}app_forbid_mutation()")
 
     # ------------------------------------------------------------ users & roles
     def resolve_user(self, user_id: str, email: str) -> dict | None:
