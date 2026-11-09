@@ -11,7 +11,7 @@ import pytest
 from backend import audit_chain as ac
 from backend.repos import contract as ct
 from backend.repos.state import StateStore
-from conftest import ADMIN, DSO, ENG, VIEWER
+from conftest import ADMIN, CDSE, DSO, ENG, VIEWER
 
 IID = "CRD-IN-1"
 
@@ -394,14 +394,15 @@ def test_all_reviewer_actions_land_in_one_verifiable_dam_chain(recs):
     r2 = c.post(f"/api/instruments/{IID}/incl/surveys/{sid}/corrections/D1/review", user=ENG,
                 json={"decision": "reject", "rationale": "depth offset not supported by casing log"})
     eid = _crd_event(c)["event_id"]
-    r3 = c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "spike after rainfall; checking"})
+    r3 = c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"rationale": "spike after rainfall; checking"})
     r4 = c.post(f"/api/alarms/{eid}/close", user=ADMIN, json={"reason": "field check OK"})
     assert [r.status_code for r in (r1, r2, r3, r4)] == [200] * 4, [r.text for r in (r1, r2, r3, r4)]
     rows = st.chain_rows("CRD")
     assert [(r["chain_seq"], r["action_type"], r["decision"]) for r in rows] == [
         (1, "bias_review", "approve"), (2, "data_correction_review", "reject"), (3, "alarm_ack", "acknowledge"),
         (4, "alarm_close", "close")]
-    assert [r["review_level"] for r in rows] == ["engineer", "engineer", "engineer", "CDSE"]
+    # v1.6 ROLE-LEVEL: only the dam's named CDSE records CDSE; the platform admin's close is "engineer" (no elevation)
+    assert [r["review_level"] for r in rows] == ["engineer", "engineer", "CDSE", "engineer"]
     assert all(r["reviewer_id"] and r["reviewer_email"] and r["signed_ts"].endswith("+00:00") for r in rows)
     assert r3.json()["state"] == "acknowledged" and r3.json()["chain_seq"] == 3
     assert r4.json()["state"] == "closed" and r4.json()["chain_seq"] == 4
@@ -423,7 +424,7 @@ def test_original_values_are_retained_never_overwritten(recs):
     c.post(f"/api/instruments/{IID}/incl/surveys/{sid}/corrections/D1/review", user=ENG,
            json={"decision": "approve", "rationale": "offset confirmed by survey"})
     ev = _crd_event(c)
-    c.post(f"/api/alarms/{ev['event_id']}/ack", user=ENG, json={"rationale": "reviewed"})
+    c.post(f"/api/alarms/{ev['event_id']}/ack", user=CDSE, json={"rationale": "reviewed"})
     c.post(f"/api/alarms/{ev['event_id']}/close", user=ADMIN, json={"reason": "resolved"})
     rows = st.chain_rows("CRD")
     orig = json.loads(rows[0]["original_value"])
@@ -447,17 +448,17 @@ def test_original_values_are_retained_never_overwritten(recs):
 def test_ack_requires_rationale(c, body):
     eid = _crd_event(c)["event_id"]
     kw = {} if body is None else {"json": body}
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, **kw).status_code == 422
+    assert c.post(f"/api/alarms/{eid}/ack", user=CDSE, **kw).status_code == 422
     assert c.tc.app.state.store.chain_rows("CRD") == []
     assert _crd_event(c)["state"] == "open"
     # the older `comment` field still works as the rationale
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"comment": "ok, checking"}).status_code == 200
+    assert c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"comment": "ok, checking"}).status_code == 200
 
 
 def test_close_and_reviews_require_rationale(recs):
     c, sid, an = recs
     eid = _crd_event(c)["event_id"]
-    c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "r"})
+    c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"rationale": "r"})
     assert c.post(f"/api/alarms/{eid}/close", user=ADMIN, json={"reason": "      "}).status_code == 422
     for path in ("bias-proposals/B1", "corrections/D1"):
         for r in ("", "   "):
@@ -499,7 +500,8 @@ def test_token_is_never_logged_stored_or_returned(c, caplog):
     caplog.set_level(logging.DEBUG)
     tok = _jwt({"sub": "sso-sub-777", "email": ENG})
     h = {"x-forwarded-user": f"uid-{ENG}", "x-forwarded-email": ENG, "x-forwarded-access-token": tok}
-    eid = _crd_event(c)["event_id"]
+    # ENG's own (level-1, engineer-ackable) alarm on CRD
+    eid = next(a for a in c.get("/api/alarms?dam_id=CRD", user=ENG).json()["alarms"] if a["level"] == 1)["event_id"]
     r = c.tc.post(f"/api/alarms/{eid}/ack", headers=h, json={"rationale": "checking"})
     assert r.status_code == 200
     v = c.tc.get("/api/dams/CRD/audit/signoffs/verify", headers=h)
@@ -518,10 +520,10 @@ def test_state_race_inside_transaction_rolls_back(c, monkeypatch):
     pre-check, the request gets 409 and no chain record is written."""
     st = c.tc.app.state.store
     eid = _crd_event(c)["event_id"]
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "first"}).status_code == 200
+    assert c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"rationale": "first"}).status_code == 200
     real = st.ack_states
     monkeypatch.setattr(st, "ack_states", lambda ids: {i: {**r, "state": "open"} for i, r in real(ids).items()})
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "second"}).status_code == 409
+    assert c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"rationale": "second"}).status_code == 409
     monkeypatch.undo()
     assert c.post(f"/api/alarms/{eid}/close", user=ADMIN, json={"reason": "done"}).status_code == 200
     monkeypatch.setattr(st, "ack_states", lambda ids: {i: {**r, "state": "acknowledged"} for i, r in real(ids).items()})

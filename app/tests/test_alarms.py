@@ -1,4 +1,4 @@
-from conftest import ADMIN, DSO, ENG, NOBODY, VIEWER
+from conftest import ADMIN, CDSE, DSO, ENG, NOBODY, VIEWER
 
 
 def _crd_event(c, user=ENG):
@@ -25,15 +25,17 @@ def test_list_scoped_and_gated(rc):
 def test_ack_close_workflow(c):
     ev = _crd_event(c)
     eid = ev["event_id"]
-    assert ev["state"] == "open" and ev["can_ack"] and not ev["can_close"]
+    assert ev["state"] == "open" and ev["level"] >= 2 and ev["requires_cdse"] and not ev["can_close"]
+    assert not ev["can_ack"] and not ev["is_cdse"]          # ENG is not CRD's CDSE
+    assert _crd_event(c, CDSE)["can_ack"] and _crd_event(c, CDSE)["is_cdse"]
     # engineer cannot close; must ack first anyway
     assert c.post(f"/api/alarms/{eid}/close", user=ENG, json={"reason": "fine"}).status_code == 403
     assert c.post(f"/api/alarms/{eid}/close", user=ADMIN, json={"reason": "fine"}).status_code == 409
-    r = c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"comment": "checking"})
+    r = c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"comment": "checking"})
     assert r.status_code == 200 and r.json()["state"] == "acknowledged"
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "again"}).status_code == 409
+    assert c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"rationale": "again"}).status_code == 409
     a = c.get(f"/api/alarms/{eid}", user=ENG).json()
-    assert a["acknowledged_by"] == ENG and a["comments"][0]["body"] == "checking"
+    assert a["acknowledged_by"] == CDSE and a["comments"][0]["body"] == "checking"
     assert not a["can_ack"] and not a["can_close"]
     assert c.get(f"/api/alarms/{eid}", user=ADMIN).json()["can_close"]
     r = c.post(f"/api/alarms/{eid}/comment", user=ENG, json={"body": "reading verified in field"})
@@ -51,7 +53,7 @@ def test_alarm_acl(c):
     al = c.get("/api/alarms?dam_id=PHR", user=DSO).json()["alarms"]
     eid = al[0]["event_id"]
     assert c.get(f"/api/alarms/{eid}", user=ENG).status_code == 403
-    assert c.post(f"/api/alarms/{eid}/ack", user=ENG, json={"rationale": "x"}).status_code == 403
+    assert c.post(f"/api/alarms/{eid}/ack", user=CDSE, json={"rationale": "x"}).status_code == 403
     assert c.post(f"/api/alarms/{eid}/comment", user=VIEWER, json={"body": "x"}).status_code == 403
     assert c.get("/api/alarms/EV-NOPE").status_code == 404
     assert c.post(f"/api/alarms/{eid}/ack", user=DSO, json={"rationale": "piezometer spike reviewed"}).status_code == 200

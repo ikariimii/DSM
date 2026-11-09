@@ -15,6 +15,7 @@ ENG = "engineer.crd@demo.local"
 VIEWER = "viewer.bfk@demo.local"
 DSO = "dso.phr@demo.local"
 NOBODY = "nobody@demo.local"
+CDSE = "cdse.crd@demo.local"  # ref.dam.cdse_id of CRD (engineer on CRD and HLD)
 
 
 class Client:

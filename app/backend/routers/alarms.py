@@ -1,6 +1,9 @@
 """Alarms console: list (merged with Lakebase ack state) and acknowledge workflow.
 
-Workflow: open -> acknowledged (engineer+, rationale required) -> closed (dso+, reason required). Ack and close
+Workflow: open -> acknowledged (rationale required) -> closed (dso+, reason required). Acknowledging an alarm at
+level >= CDSE_ACK_MIN_LEVEL (Evaluate/ACTION = HIGH, Act = CRITICAL) is the CDSE acknowledgement: only the dam's named
+CDSE may do it (signoffs.is_cdse; FERC Ch.14 App K 14-K-4) - no app role (dso, dam_admin, platform admin) substitutes.
+Level-1 (Verify/ALERT) alarms stay engineer+. Ack and close
 are reviewer actions: each appends one record to the dam's hash chain (audit_chain.py) atomically with the state change.
 Comments: engineer+. Every action is written to the audit log by the app service
 principal with the acting user's email (shared writes via SP)."""
@@ -37,17 +40,33 @@ class AckBody(BaseModel):
     comment: str | None = Field(default=None, max_length=4000)
 
 
+# HIGH = level 2 (Evaluate / ACTION), CRITICAL = level 3 (Act); level 1 (Verify / ALERT) is not a CDSE action.
+CDSE_ACK_MIN_LEVEL = 2
+
+
+def needs_cdse_ack(ev: dict) -> bool:
+    return (ev.get("level") or 0) >= CDSE_ACK_MIN_LEVEL
+
+
+def _can_ack(c: Ctx, ev: dict, an, cdse: bool | None = None) -> bool:
+    if ev.get("state", "open") != "open":
+        return False
+    if needs_cdse_ack(ev):
+        return sg.is_cdse(c, ev["dam_id"], an) if cdse is None else cdse
+    return c.can(ev["dam_id"], "engineer")
+
+
 ALARM_ORIGINAL_FIELDS = ("event_id", "dam_id", "instrument_id", "level", "value", "unit", "event_ts")
 
 
 def _chain_base(ev: dict, prior: dict | None, action: str, decision: str, new_state: str, rationale: str,
-                c: Ctx, request: Request) -> dict:
+                c: Ctx, request: Request, an) -> dict:
     """Chain record for an alarm action. original_value = the alarm as raised (measured value, unit, level) and its
     prior workflow state; corrected_value = the new workflow state. The measured value is never changed."""
     who = sg.reviewer_identity(c, request)
     original = {**{k: ev.get(k) for k in ALARM_ORIGINAL_FIELDS}, "state": (prior or {}).get("state") or "open"}
     base = {"review_id": f"RS-{uuid.uuid4().hex}", "dam_id": ev["dam_id"], "subject_type": "alarm_event",
-            "subject_id": ev["event_id"], "review_level": sg.review_level(c, ev["dam_id"]), "decision": decision,
+            "subject_id": ev["event_id"], "review_level": sg.review_level(c, ev["dam_id"], an), "decision": decision,
             "comment": rationale, "reviewer_id": who["reviewer_id"], "reviewer_pe_license": None,
             "signed_ts": sg.now_utc(), "action_type": action, "reviewer_email": who["reviewer_email"],
             "reviewer_sub": who["reviewer_sub"], "original_value": ac.canon_json(original),
@@ -85,8 +104,11 @@ def list_alarms(dam_id: str | None = None, state: str | None = None, min_level: 
     if state:
         events = [e for e in events if e["state"] == state]
     events = [e for e in events if (e.get("level") or 0) >= min_level]
+    cdse = {d: sg.is_cdse(c, d, an) for d in {e["dam_id"] for e in events}}
     for e in events:
-        e["can_ack"] = c.can(e["dam_id"], "engineer") and e["state"] == "open"
+        e["requires_cdse"] = needs_cdse_ack(e)
+        e["is_cdse"] = cdse[e["dam_id"]]
+        e["can_ack"] = _can_ack(c, e, an, cdse[e["dam_id"]])
         e["can_close"] = c.can(e["dam_id"], "dso") and e["state"] == "acknowledged"
     events.sort(key=lambda e: ({"open": 0, "acknowledged": 1, "closed": 2}[e["state"]], -(e.get("level") or 0),
                                e["event_ts"]), reverse=False)
@@ -98,7 +120,9 @@ def get_alarm(event_id: str, c: Ctx = Depends(ctx), an=Depends(analytics), st=De
     ev = _event(an, c, event_id, "viewer")
     ev = merge_ack([gate_for(an, ev["dam_id"]).apply_event(ev)], st.ack_states([event_id]))[0]
     ev["comments"] = st.comments(event_id)
-    ev["can_ack"] = c.can(ev["dam_id"], "engineer") and ev["state"] == "open"
+    ev["requires_cdse"] = needs_cdse_ack(ev)
+    ev["is_cdse"] = sg.is_cdse(c, ev["dam_id"], an)
+    ev["can_ack"] = _can_ack(c, ev, an, ev["is_cdse"])
     ev["can_close"] = c.can(ev["dam_id"], "dso") and ev["state"] == "acknowledged"
     return ev
 
@@ -106,12 +130,19 @@ def get_alarm(event_id: str, c: Ctx = Depends(ctx), an=Depends(analytics), st=De
 @router.post("/{event_id}/ack")
 def ack(event_id: str, request: Request, body: AckBody | None = None, c: Ctx = Depends(ctx), an=Depends(analytics),
         st=Depends(store)):
-    ev = _event(an, c, event_id, "engineer")
+    if needs_cdse_ack(an.alarm_event(event_id) or {}):
+        # CDSE acknowledgement: the dam ACL (viewer+) still applies, then only the dam's named CDSE may act.
+        ev = _event(an, c, event_id, "viewer")
+        if not sg.is_cdse(c, ev["dam_id"], an):
+            raise HTTPException(403, f"Level {ev.get('level')} alarm: only the CDSE of dam {ev['dam_id']} (ref.dam.cdse_id) "
+                                     "may acknowledge it; app roles (dso, dam_admin, admin) do not confer CDSE")
+    else:
+        ev = _event(an, c, event_id, "engineer")
     rationale = sg.rationale_of((body.rationale or body.comment) if body else None)
     prior = st.ack_states([event_id]).get(event_id)
     if prior and prior["state"] != "open":
         raise HTTPException(409, f"alarm {event_id} is already {prior['state']}")
-    base = _chain_base(ev, prior, "alarm_ack", "acknowledge", "acknowledged", rationale, c, request)
+    base = _chain_base(ev, prior, "alarm_ack", "acknowledge", "acknowledged", rationale, c, request, an)
     out = {}
     try:  # the state change and its chained record commit together (or not at all)
         row = sg.append(st, request, base, also=lambda q: out.update(st.acknowledge(event_id, ev["dam_id"], c.email, q)))
@@ -131,7 +162,7 @@ def close(event_id: str, body: CloseBody, request: Request, c: Ctx = Depends(ctx
     prior = st.ack_states([event_id]).get(event_id)
     if not prior or prior["state"] != "acknowledged":
         raise HTTPException(409, f"alarm {event_id} must be acknowledged before it is closed")
-    base = _chain_base(ev, prior, "alarm_close", "close", "closed", rationale, c, request)
+    base = _chain_base(ev, prior, "alarm_close", "close", "closed", rationale, c, request, an)
     out = {}
     try:
         row = sg.append(st, request, base,

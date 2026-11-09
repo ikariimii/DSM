@@ -40,6 +40,13 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
   filters** on the user's own token (OBO), and the app's per-dam roles below sit on top of both.
 - **Per-dam roles** are viewer < engineer < dso < dam_admin, plus a global admin, and are stored in
   `dam_app.dam_role`. They are a UX layer on top of the UC filters, not a replacement for them.
+- **The CDSE is a person, not a role (v1.6 ROLE-LEVEL, FERC Ch.14 App K 14-K-4).** Only the principal named in
+  `ref.dam.cdse_id` (or an active `ref.project_membership` row with role `CDSE` for exactly that dam) gets the `CDSE`
+  review level and may acknowledge level 2 (Evaluate / HIGH) and level 3 (Act / CRITICAL) alarms. Everyone else,
+  including dso, dam_admin and the platform admin, gets 403 with nothing written, and the UI hides the CDSE sign-off
+  button. Level 1 (Verify) alarms are still engineer+. All other reviews are recorded at `engineer` level. Admin powers
+  (users, roles) are unchanged. Old chain records keep their stored level and still verify. Demo persona:
+  `cdse.crd@demo.local` (CDSE of CRD, engineer on CRD and HLD).
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
   `config.env` **for the first prod deploy only, then remove it from prod config** and redeploy once the first
   admin has signed in and granted roles in the Admin UI. Rules (`backend/bootstrap.py`):

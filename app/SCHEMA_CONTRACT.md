@@ -17,6 +17,7 @@ reads `DAM_CATALOG` (bundle: `${var.catalog}`); each schema can be overridden (`
 | Object | Use | Adapter |
 |---|---|---|
 | `ref.site`, `ref.structure` | portfolio, drill-down | as-is |
+| `ref.dam` (`dam_id`, `cdse_id` only), `ref.project_membership` (`principal`, `dam_id`, `role`, `revoked_ts`) | who is the dam's CDSE (v1.6 ROLE-LEVEL, §5a); `ref.site` does not expose `cdse_id`, so `ref.dam` is read directly | `cdse_id`, plus active `role = 'CDSE'` rows for exactly that `dam_id` |
 | `ref.instrument` ⨝ `ref.calibration` ⨝ `ref.formula` | registry, latest values | `contract.instrument` (`tip_el_m`/`top_el_m`) |
 | `ref.calibration` | versions | `contract.calibration`: `sign_mult`, `offset` are **columns** (§10 Q3); if found in `params` the calibration gets a `calibration_issues` entry and is not approved; `method` ∈ `linear|poly`; `certificate_uri`; `is_retired` never counts as approved |
 | `ref.formula` | verified flag per version | `contract.formula` |
@@ -101,7 +102,7 @@ updates ref.incl_correction, never applies a correction and never changes a meas
 |---|---|---|---|
 | `bias_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/bias-proposals/{record_id}/review` (engineer+) | `incl_correction` / `approve\|reject` | `{parameter_name, before_value}` → `{parameter_name, auto_value, override_value, after_value, applied_by_app:false}` (units as stored in ref.incl_correction) |
 | `data_correction_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/corrections/{record_id}/review` (engineer+; any proposed ref.incl_correction record; a bias record is typed `bias_review`) | `incl_correction` / `approve\|reject` | as above |
-| `alarm_ack` (CDSE acknowledgement) | `POST /api/alarms/{event_id}/ack` (engineer+) | `alarm_event` / `acknowledge` | `{event_id, dam_id, instrument_id, level, value, unit, event_ts, state:"open"}` → `{state:"acknowledged", measured_value_changed:false}` |
+| `alarm_ack` (CDSE acknowledgement at level ≥ 2) | `POST /api/alarms/{event_id}/ack` (level 2 Evaluate = HIGH and level 3 Act = CRITICAL: **the dam's CDSE only**, see below; level 1 Verify: engineer+) | `alarm_event` / `acknowledge` | `{event_id, dam_id, instrument_id, level, value, unit, event_ts, state:"open"}` → `{state:"acknowledged", measured_value_changed:false}` |
 | `alarm_close` | `POST /api/alarms/{event_id}/close` (dso+) | `alarm_event` / `close` | same alarm snapshot with `state:"acknowledged"` → `{state:"closed", measured_value_changed:false}` |
 
 Review bodies: `{decision, rationale, reviewer_pe_license?}`; ack: `{rationale}` (`comment` accepted as the older name);
@@ -109,8 +110,22 @@ close: `{reason}`. **The rationale is required and must be non-empty after trimm
 `length(trim(comment)) > 0` as backstop); it is stored in `comment`. original_value / corrected_value are canonical
 JSON text; the original is stored next to the corrected value and never overwritten (Ch.14 §14.4.1).
 
-**Columns.** `review_id` (`RS-<uuid>`), `dam_id`, `subject_type`, `subject_id`, `review_level` (app role → level:
-engineer → `engineer`; dso, dam_admin, platform admin → `CDSE`; proposal, §7 item 9), `decision`, `comment`,
+**CDSE identity (v1.6 ROLE-LEVEL, FERC Ch.14 App K 14-K-4).** The CDSE is a named person, not an app role. A caller is
+the CDSE of dam D when their X-Forwarded-User id or X-Forwarded-Email equals (case-insensitive, trimmed)
+`ref.dam.cdse_id` for D, or the `principal` of an active (`revoked_ts IS NULL`) `ref.project_membership` row with
+`role = 'CDSE'` and `dam_id = D` exactly. `dam_id = '*'` grants and group principals are **not** resolved (the app cannot
+expand groups); the lookup fails closed (lookup error → not CDSE). The CDSE of one dam is not the CDSE of another.
+The dam ACL still applies (the CDSE needs viewer+ on the dam). For a level ≥ 2 alarm, everyone else, including dso,
+dam_admin and the platform admin, gets **403 before any write** (no chain record, no ack state, no audit entry), and
+`GET /api/alarms[/{id}]` returns `requires_cdse`, `is_cdse` and `can_ack` so the UI hides the CDSE sign-off control.
+Close stays dso+ (recorded at `engineer` unless the closer is the CDSE). dso / dam_admin / admin keep their user and
+role administration powers. Records written before v1.6 under the earlier proposal (dso / dam_admin / admin →
+`CDSE`) keep their stored `review_level` and still verify: `record_hash` is recomputed from stored content, so only new
+records change (`app/tests/test_cdse_roles.py::test_pre_change_chain_still_verifies_and_only_new_records_change`).
+
+**Columns.** `review_id` (`RS-<uuid>`), `dam_id`, `subject_type`, `subject_id`, `review_level` (v1.6 ROLE-LEVEL, Genie-confirmed: `CDSE` **only** when the
+caller is the dam's CDSE, otherwise `engineer` for every app role: engineer, dso, dam_admin and platform admin get no
+review elevation), `decision`, `comment`,
 `reviewer_id` = X-Forwarded-User (demo personas: `demo:<email>`), `reviewer_email` = X-Forwarded-Email,
 `reviewer_sub` = `sub` claim of `x-forwarded-access-token` base64url-decoded **without verification, identity only**
 (NULL if absent or malformed; the token itself is never stored, logged or returned, test-enforced), `reviewer_pe_license`,
@@ -258,8 +273,9 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision
 ```
    c. `src/jobs/lakebase_extract.py`: copy the new columns (item 8a) and preserve `chain_seq` order; the UC copy can be
       re-verified with the same `record_hash` rule. The `review_chain_head` table does not need extracting.
-   d. The role → `review_level` mapping (engineer → `engineer`; dso / dam_admin / platform admin → `CDSE`) is a proposal:
-      please confirm against the Ch.14 role definitions or give the right mapping.
+   d. The role → `review_level` mapping is **confirmed (v1.6 ROLE-LEVEL, Genie)**: `CDSE` only for the dam's
+      `ref.dam.cdse_id` / active direct `ref.project_membership` CDSE principal; engineer, dso, dam_admin and platform
+      admin → `engineer`. Pre-v1.6 rows that carry `CDSE` for a dso/admin stay as written (they still verify).
    e. `audit.event_log` `ALARM_ACK` (extract of `alarm_ack`) is unchanged; the chained record is the reviewer evidence.
 10. **v1.5 conflicts with the chained audit record (e01e1ab) and what the DA needs to change (proposal):**
    a. **Conflict 1:** `audit.review_record` `ck_review_record_subject_decision` (v1.5 migration + `08_audit.sql`) allows
@@ -279,7 +295,8 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
 # for alarm_event rows it is the same construction over the alarm as raised (signed fields + original alarm
 # fields), so corrections.approval_problem must not be applied to them.
 ```
-   c. **Conflict 3:** the role → `review_level` mapping in the extract (item 9d) is still a proposal.
+   c. **Conflict 3 (resolved in v1.6):** the role → `review_level` mapping is confirmed (item 9d); the extract copies
+      `review_level` as stored, so historical `CDSE` rows from the earlier proposal are carried unchanged.
    d. **`ops.alarm_episode` + `installation_version` (proposal):** inclinometer episodes have `calib_id` NULL. Without
       `installation_version` on the episode, the app cannot approve them and withholds the value (`LINEAGE_INCOMPLETE`).
       DDL: `ALTER TABLE ops.alarm_episode ADD COLUMNS (installation_version TIMESTAMP COMMENT 'ref.incl_installation

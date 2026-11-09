@@ -413,7 +413,16 @@ def build() -> dict:
                              n_test_vectors=len(vr["results"])))
     return dict(sites=sites, structures=structures, instruments=instruments, calibrations=calibrations,
                 readings=readings, thresholds=thresholds, pfms=pfms, alarm_events=alarm_events,
-                incl_surveys=incl_surveys, incl_installations=incl_installations, formulas=formulas)
+                incl_surveys=incl_surveys, incl_installations=incl_installations, formulas=formulas,
+                dam_cdse=dict(DAM_CDSE), project_membership=[dict(m) for m in CDSE_MEMBERSHIP])
+
+
+# ref.dam.cdse_id per demo dam (the named Chief Dam Safety Engineer; FERC Ch.14 App K 14-K-4). Only CRD's CDSE is a
+# demo persona; the others are named principals with no app login, so nobody in the demo can CDSE-ack them.
+DAM_CDSE = {"CRD": "cdse.crd@demo.local", "BFK": "cdse.bfk@demo.local", "HLD": "cdse.hld@demo.local",
+            "PHR": "cdse.phr@demo.local", "STC": "cdse.stc@demo.local"}
+# ref.project_membership role 'CDSE' grants (none in the demo beyond cdse_id; the lookup supports them)
+CDSE_MEMBERSHIP: list[dict] = []
 
 
 SEED_USERS = [
@@ -422,6 +431,7 @@ SEED_USERS = [
     ("engineer.crd@demo.local", "Casey Engineer (CRD, HLD)", False),
     ("viewer.bfk@demo.local", "Vic Viewer (BFK)", False),
     ("dso.phr@demo.local", "Dana DSO (PHR, STC)", False),
+    ("cdse.crd@demo.local", "Chris CDSE (CDSE of CRD; engineer on HLD)", False),
     ("nobody@demo.local", "No Access", False),
 ]
 SEED_ROLES = [
@@ -430,4 +440,6 @@ SEED_ROLES = [
     ("viewer.bfk@demo.local", "BFK", "viewer"),
     ("dso.phr@demo.local", "PHR", "dam_admin"),
     ("dso.phr@demo.local", "STC", "dso"),
+    ("cdse.crd@demo.local", "CRD", "engineer"),
+    ("cdse.crd@demo.local", "HLD", "engineer"),
 ]

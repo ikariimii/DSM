@@ -163,7 +163,7 @@ def _signoffs(st, recs: list[dict]) -> list[dict]:
 
 
 def _review(rec: dict | None, label: str, record_id: str, body: BiasReviewBody, inst: dict, request: Request,
-            c: Ctx, st) -> dict:
+            c: Ctx, st, an=None) -> dict:
     if body.decision not in so.DECISIONS:
         raise HTTPException(422, f"decision must be one of {', '.join(so.DECISIONS)}")
     rationale = sg.rationale_of(body.rationale)
@@ -187,7 +187,7 @@ def _review(rec: dict | None, label: str, record_id: str, body: BiasReviewBody, 
         raise HTTPException(403, "The reviewer must not be the author of the proposal")
     base = so.build(rec, inst["dam_id"], body.decision, rationale, who["reviewer_id"], body.reviewer_pe_license,
                     sg.now_utc(), action_type="bias_review" if is_bias else "data_correction_review",
-                    review_level=sg.review_level(c, inst["dam_id"]), reviewer_email=who["reviewer_email"],
+                    review_level=sg.review_level(c, inst["dam_id"], an), reviewer_email=who["reviewer_email"],
                     reviewer_sub=who["reviewer_sub"])
     row = sg.append(st, request, base)
     st.audit(c.email, "bias_proposal_review" if is_bias else "data_correction_review", inst["dam_id"], record_id,
@@ -211,7 +211,7 @@ def review_bias_proposal(instrument_id: str, survey_id: str, record_id: str, bod
     Never updates ref.incl_correction and never applies a correction: applying stays with the engine (§5.5)."""
     inst = _incl(an, c, instrument_id)
     rec = next((r for r in an.incl_bias_proposals(instrument_id, survey_id) if r.get("record_id") == record_id), None)
-    return _review(rec, f"bias proposal for {instrument_id} survey {survey_id}:", record_id, body, inst, request, c, st)
+    return _review(rec, f"bias proposal for {instrument_id} survey {survey_id}:", record_id, body, inst, request, c, st, an)
 
 
 @router.post("/instruments/{instrument_id}/incl/surveys/{survey_id}/corrections/{record_id}/review")
@@ -222,4 +222,4 @@ def review_correction(instrument_id: str, survey_id: str, record_id: str, body: 
     inst = _incl(an, c, instrument_id)
     rec = next((r for r in an.incl_corrections([record_id]) if r.get("record_id") == record_id
                 and r.get("instrument_id") == instrument_id and r.get("survey_id") == survey_id), None)
-    return _review(rec, f"correction for {instrument_id} survey {survey_id}:", record_id, body, inst, request, c, st)
+    return _review(rec, f"correction for {instrument_id} survey {survey_id}:", record_id, body, inst, request, c, st, an)

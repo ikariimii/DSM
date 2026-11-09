@@ -35,8 +35,13 @@ CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_lev
                 "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
                 "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
                 "prev_hash")
-# app role -> review_level (Ch.14 roles). PROPOSAL for the DA/lead to confirm (SCHEMA_CONTRACT §7 item 9).
-ROLE_LEVEL = {"engineer": "engineer", "dso": "CDSE", "dam_admin": "CDSE", "admin": "CDSE"}
+# app role -> review_level (Genie-confirmed 2026-11-09; DA SCHEMA_CONTRACT v1.6 ROLE-LEVEL). An app role NEVER
+# confers CDSE: dso, dam_admin and platform admin get no review elevation. CDSE_LEVEL is recorded only for the
+# principal named by ref.dam.cdse_id (or a direct ref.project_membership CDSE grant) for that dam - FERC Ch.14 App K
+# 14-K-4 treats the Chief Dam Safety Engineer as a named person (routers/signoffs.is_cdse). Records written under the
+# earlier proposal keep their stored review_level and still verify (only new records change).
+CDSE_LEVEL = "CDSE"
+ROLE_LEVEL = {"engineer": "engineer", "dso": "engineer", "dam_admin": "engineer", "admin": "engineer"}
 
 
 class Signer(Protocol):

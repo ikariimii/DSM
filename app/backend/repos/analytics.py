@@ -38,6 +38,7 @@ class Analytics(Protocol):
     def incl_installations(self, instrument_id: str) -> list[dict]: ...
     def alarm_events(self, dam_ids: list[str], since: str | None = None) -> list[dict]: ...
     def pfms(self, dam_id: str) -> list[dict]: ...
+    def cdse_principals(self, dam_id: str) -> list[str]: ...
 
 
 # ============================================================== demo
@@ -48,6 +49,13 @@ class MockAnalytics:
 
     def sites(self):
         return copy.deepcopy(self.d["sites"])
+
+    def cdse_principals(self, dam_id):
+        """Demo ref.dam.cdse_id + direct ref.project_membership CDSE grants for exactly this dam (not exposed in sites)."""
+        out = [self.d.get("dam_cdse", {}).get(dam_id)]
+        out += [m["principal"] for m in self.d.get("project_membership", [])
+                if m.get("dam_id") == dam_id and (m.get("role") or "").upper() == "CDSE" and not m.get("revoked_ts")]
+        return [p for p in out if p]
 
     def structures(self, dam_id):
         return [dict(s) for s in self.d["structures"] if s["dam_id"] == dam_id]
@@ -217,6 +225,15 @@ class SqlAnalytics:
 
     def sites(self):
         return self.q(f"SELECT * FROM {self.t('ref', 'site')} ORDER BY dam_id")
+
+    def cdse_principals(self, dam_id):
+        """ref.dam.cdse_id (the named Chief Dam Safety Engineer, FERC Ch.14 App K 14-K-4) plus active direct
+        ref.project_membership role 'CDSE' grants for exactly this dam. ref.site does not expose cdse_id, so ref.dam is
+        read directly (as the user, OBO, like every analytics read). '*' and group principals are not resolved."""
+        rows = self.q(f"SELECT cdse_id AS principal FROM {self.t('ref', 'dam')} WHERE dam_id = :dam_id "
+                      f"UNION SELECT principal FROM {self.t('ref', 'project_membership')} WHERE dam_id = :dam_id "
+                      "AND upper(role) = 'CDSE' AND revoked_ts IS NULL", {"dam_id": dam_id})
+        return [r["principal"] for r in rows if r.get("principal")]
 
     def structures(self, dam_id):
         return self.q(f"SELECT * FROM {self.t('ref', 'structure')} WHERE dam_id = :dam_id ORDER BY structure_id",
