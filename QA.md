@@ -807,3 +807,454 @@ Scope: the 3 VDV Helpcenter exports in dam-refs `vendor_export_samples_vdv/` (ma
 - **v1.6 port spot-check:** batch.installation_version_at and corrections.effective_records (incl_correction-only reviews) are additive, not weakening. QA-018..QA-045a markers/code present (see per-ID table in the agent report). `qa/test_gtilt_digipro_parity.py`: 12 passed. QA-045a xfail remains removed; QA-045b xfail removed after this verification.
 - **Still open:** QA-044, QA-005e (vendor parity UNVERIFIED), QA-041, QA-046.
 - **Suites:** root 730 passed / 2 skipped; app 346 passed; qa/ 231 passed / 2 xfailed; guard 0.
+
+## 2026-11-09 10:46 EST: QA-047 independent CDSE-ack authorization check on a88b07f (uncommitted)
+- **Scope:** App Dev a88b07f (v1.6 ROLE-LEVEL): only the dam's named CDSE may acknowledge level ≥ 2 alarms. Independent suite `qa/test_cdse_ack_authorization.py` derived from routers/alarms.py + signoffs.is_cdse + SCHEMA_CONTRACT ROLE-LEVEL / FERC Ch.14 App K 14-K-4 — **not** copied from app/tests/test_cdse_roles.py.
+- **Coverage (19 tests, all passed):** non-CDSE engineer/dso/dam_admin/platform-admin on L2 and L3 → 403 with identical snapshots of alarm_ack, review_signoff, review_chain_head, audit_log, alarm_comment; CDSE of CRD cannot ack L2 on HLD; email principal match is case/whitespace insensitive (QA-046-adjacent); X-Forwarded-User casefold match; missing cdse_id / unknown cdse_id / analytics lookup error → 403 fail-closed, no writes; level-1 engineer ack unchanged with review_level=engineer; real CDSE ack → 200, review_level=CDSE, chain verify ok; list flags requires_cdse/is_cdse/can_ack.
+- **Defects:** none found. No new open QA-0xx. QA-047 is the verification id for this suite (pass on a88b07f).
+- **Still open:** QA-044, QA-005e (vendor parity UNVERIFIED), QA-041, QA-046.
+- Test + this ledger line left **uncommitted** per brief.
+
+## 2026-11-09 11:00 EST: verify 974e786 / c4a384c / 0e79376 on clean archive of 0e79376 (uncommitted)
+- **Method:** `git archive 0e79376` → /tmp/0e79376-tree; copied in uncommitted `qa/test_cdse_ack_authorization.py` plus new `qa/test_qa045c_verify_parity.py` and `qa/test_qa045c_advisory_init.py`. Worktree production code untouched. App Dev commits do **not** contain QA.md or test_cdse_ack_authorization.py (`git show --stat` clean).
+- **(1) QA-045c verify parity:** 14/14 adversarial cases pass. Engine `verify_records` and app `verify_chain` agree on edited field, reordered rows, deleted middle, truncated tail (head_mismatch), forged head seq/hash, stripped/missing/downgraded/borrowed signatures under an enforcing signer. **Documented intentional disagreement:** app `head=None` → `head_missing`; engine `expected_head=None` → ok (UC has no head). With head supplied they agree.
+- **(2) Advisory-lock init (live PG 17.11, DAM_TEST_PG :55432):** 3/3 pass — 4 parallel fresh schema inits (0 errors, 0 spurious heads); 4 parallel re-inits idempotent (one noupd + one notrunc trigger); 4 parallel first appends → exactly one head at seq 4, contiguous 1..4. Lock key 4702045.
+- **(3) 0e79376 view-based CDSE:** fail-closed on empty / missing-view exception / lookup error (cdse_principals → frozenset, is_cdse False). Duplicate principals: set membership only (impostor not listed → False). Extended suite **26 passed** (original 19 + extensions). Demo MockAnalytics path unchanged.
+- **(4) c4a384c cdse_ack_required:** `needs_cdse_ack` = level≥2 OR flagged; flagged L1 forces CDSE (engineer 403, CDSE 200); unflagged L1 still engineer; level≥2 still requires CDSE even if flag false. OR of episode snapshot / view flag / current rule (absent columns → false, logged once).
+- **Defects:** none opened. Remaining xfails: QA-041, QA-046. Still open: QA-044, QA-005e.
+- **Clean-tree counts:** root 781 passed / 4 skipped; app 424 passed; qa/ 271 passed / 3 skipped / 2 xfailed; parity 12; guard 0; PG state 7 passed; lakebase 7 passed / 2 skipped.
+- This ledger + the three qa/ files remain **uncommitted**.
+
+## 2026-11-09 11:09 EST: QA-048/049 live-dam cdse_ack_required edit control on 6f7a1d5 (uncommitted)
+- **Method:** `git archive 6f7a1d5` → /tmp/6f7a1d5-tree; copied in uncommitted QA tests only (`qa/test_cdse_ack_authorization.py`, `qa/test_qa045c_*.py`, new `qa/test_cdse_flag_change_control.py`, QA.md). Worktree production code untouched. No commit / push / messages / production edits.
+- **Scope tip:** `6f7a1d5` on `app/v1.6-port` — App Dev live-dam edit workflow for `cdse_ack_required` (propose / apply_direct / approve / reject in `app/backend/routers/alarm_rules.py`).
+- **Independent suite:** `qa/test_cdse_flag_change_control.py` (derived from router + FERC Ch.14 App K / SCHEMA_CONTRACT §5a intent — **not** from `app/tests/test_alarm_rule_flag_edits.py`).
+- **Coverage (19 passed, 2 strict xfail):**
+  - non-CDSE (engineer / dam_admin / admin) cannot apply_direct → 403, write-nothing snapshot
+  - engineer cannot propose → 403
+  - admin + dam_admin may propose; approve of their own (or any) proposal → 403, no writes
+  - cross-dam: CRD's CDSE cannot approve/apply on HLD → 403, no writes
+  - rationale None / empty / whitespace → 422, no writes
+  - apply appends threshold version exactly N+1; every prior version row frozen (append-only); one `alarm_rule_flag_apply` chain record; chain verifies
+  - propose then CDSE approve → one propose + one apply record; N+1 contiguous
+  - stale proposal (intervening apply) → 409, nothing written, version unchanged
+  - open-episode protection: clearing current flag leaves `cdse_ack_required_at_open` snapshot intact; `rule_flag` still ORs snapshot
+  - demo CDSE email casefold apply (QA-046-adjacent) → 200
+  - sqlite concurrent double-approve (4 threads) → exactly one 200 / three 409; one apply chain record
+  - **live PG 17.11:** append-only triggers refuse UPDATE/DELETE/TRUNCATE on flag-action chain rows; trigger inventory (noupd+notrunc statement-level); concurrent decide under chain-head FOR UPDATE → 1 applied / 3 pending-ValueError
+- **Defects / open:**
+  - **QA-048 (strict xfail):** SoD gap — `approve` allows the dam's CDSE to approve their own proposal (explicit Genie note in router docstring). FERC two-person intent would refuse self-approval. Admin→approve remains 403 (covered as pass). Residual for lead confirmation; not a coding regression vs Genie's accepted design.
+  - **QA-049 (strict xfail, open dependency — not a pass):** SCHEMA_CONTRACT §7 item 13 — UC `ck_review_record_subject_decision` / `ck_review_record_chain` and engine `ACTION_TYPES` still reject `alarm_rule` / `alarm_rule_flag_*`. Lakebase extract would refuse the new chain rows until Genie widens DDL + engine. App chain verify ok in Lakebase; UC extract path is the gap.
+- **Clean-tree counts on /tmp/6f7a1d5-tree (git archive 6f7a1d5 + uncommitted QA only):**
+  - root `tests/`: **783 passed / 2 skipped**
+  - app/: **444 passed**
+  - qa/: **293 passed / 4 xfailed** (QA-041, QA-046, QA-048, QA-049)
+  - parity `qa/test_gtilt_digipro_parity.py`: **12 passed**
+  - guard `qa/restricted_guard.py scan`: **0 hits**
+  - live PG state `app/tests/test_state_pg_append_only.py`: **8 passed**
+  - lakebase append-only: **9 passed**; lakebase extract review: **10 passed**
+  - flag-control suite alone: **19 passed / 2 xfailed** (incl. live PG race + append-only)
+- **Paths:** archive `/tmp/6f7a1d5-tree`; worktree `/workspace/wt-v16-port` (uncommitted: `qa/test_cdse_flag_change_control.py`, prior QA tests, `QA.md`). Production code untouched; no commit/push.
+- **Verdict:** **CONDITIONAL PASS** on 6f7a1d5 for the live-dam flag-edit claims (CDSE-only apply/approve, admin propose-only, rationale 422, one chain record/action, N+1 append-only versioning, stale 409, open-episode OR, 403 write-nothing, casefold CDSE, live-PG race+triggers). **Not a full pass:** QA-048 SoD residual (CDSE self-approve allowed) and QA-049 §7 item 13 UC-extract dependency remain open (strict xfail, not passes).
+- **Still open (prior):** QA-044, QA-005e (vendor parity UNVERIFIED), QA-041, QA-046.
+
+## 2026-11-09 11:21 EST: b3aeecd (app/v1.6-integration) QA-045d + §7.13 + v1_7_001 (uncommitted)
+- **Method:** `git archive b3aeecd` → /tmp/b3aeecd-tree; copied ALL uncommitted QA tests + QA.md from wt-v16-port. No commit/push/messages; archive measurement only.
+- **Integrates:** 9875813 (QA-045d), e78c62b (§7.13), 0ff6d53 + 743b8c6 (cdse_ack hardening), on top of 6f7a1d5 (merge-base ancestor: yes).
+- **(1) QA-045d — PASS:** engine `verify_records(..., head=None)` with records → `head_missing` (closes prior residual disagreement). Updated `qa/test_qa045c_verify_parity.py` (15 cases): app≡engine including head=None. New `qa/test_qa045d_chain_head.py`: truncation via stored head; head past last/wrong hash; rewound latest caught by checkpoint; extract appends only changed heads; DDL/migration `delta.appendOnly`; `latest_chain_head` tie-break. DA `tests/test_chain_head.py` green.
+- **(2) QA-049 — CLOSED:** §7.13 / v1_6_003 + ddl/08 + engine `RULE_FLAG_ACTION_TYPES`. Strict xfail dropped; unknown action types still rejected; extract accepts flag rows end-to-end.
+- **(3) Migrations on live PG 17 (translated harness `qa/test_migration_order_live_pg.py`, 3 passed):** order v1_5_001→v1_6_001→v1_6_002→v1_6_003→v1_7_001→dam_uc_setup stub; idempotent re-run while PRE-CHECKs hold; v1_7 backfills only new threshold flag to false, never rewrites existing transition snapshots; no down/rollback path. Out-of-order v1_6_003 before v1_6_001 fails loudly; re-running v1_5 after alarm_rule/alarm_event rows fails ADD loudly and leaves CHECK absent (not silent corruption). Delta-only ops skipped in PG sim (USE CATALOG / TBLPROPERTIES / allowColumnDefaults).
+- **(4) Merge retention:** 6f7a1d5 routers/state/audit_chain present; QA-045a/b/c markers (signature, notrunc, advisory 4702045); CDSE + flag-change suites pass on clean tree; `inclinometer/qc.py` QA-020/021 retained.
+- **0ff6d53:** column plumbing — `cdse_ack_required` on ref.threshold + `cdse_ack_required_at_open` snapshot; evaluator/views/extract/v1_7_001.
+- **743b8c6:** versioning rule (append N+1, never in-place), `threshold_publish` plan carries flag, audit view; notes app init lock 974e786.
+- **Defects:** none new. Remaining xfails: QA-048, QA-041, QA-046. Still open: QA-044, QA-005e.
+- **Clean-tree counts:** root 882 passed / 2 skipped; app 460 passed; qa/ 305 passed / 3 xfailed; parity 12; guard 0; live PG state 8; lakebase append-only 9; DA focused (chain_head/rule_flag/cdse_ack/threshold_publish/migrations) 77.
+- **Paths:** archive `/tmp/b3aeecd-tree`; uncommitted QA in `/workspace/wt-v16-port` (`qa/test_qa045c_verify_parity.py`, `qa/test_qa045d_chain_head.py`, `qa/test_migration_order_live_pg.py`, `qa/test_cdse_flag_change_control.py`, prior QA tests, `QA.md`).
+- **Verdict:** **PASS** on b3aeecd for QA-045d + §7.13/QA-049 close + v1_7_001 order/idempotence (PG-translated) + merge retention. Not a full product sign-off: QA-048 SoD residual and prior QA-041/046/044/005e remain.
+
+## 2026-11-09 11:29 EST: c797151 (app/v1.6-port) canon-2 actor_app_role + go-live NOT NULL columns (uncommitted)
+- **Method:** `git archive c797151` → /tmp/c797151-tree; copied uncommitted QA tests + QA.md from wt-v16-port. No commit/push/messages; no production edits by this run.
+- **Lineage vs b3aeecd:** `b3aeecd` → **487d5b4** (unverified until this note) → **c797151**.
+  - **487d5b4 (not previously verified):** Prod fail-closed — `verify_review_chain` refuses to start on `dam_prod` without a real non-no-op signer; `load_signer` refuses unknown specs; `tests/test_prod_fail_closed.py` scans `src/jobs` for other verifiers. Spot-checked present on this tip; not a separate deep adversarial pass this turn.
+  - **c797151:** app-side canon_version=2 / actor_app_role under hash; go-live / N+1 carry five ref.threshold NOT NULL columns.
+- **Spec-vs-vector:** Independent helper from `app/SCHEMA_CONTRACT.md` §7 item 14 **matches** `app/tests/fixtures/review_chain_canon2_vector.json` byte-for-byte on all 5 rows (2×canon-1 + 3×canon-2). Spec helper also matches `app` `record_hash`. V1 rows hash identically with only the pre-c797151 field set (NULL canon fields do not change the digest). **No spec/vector/code disagreement on hashing.**
+- **Coverage added:** `qa/test_qa039_canon2.py`; updated `qa/test_qa039_chain_adversarial.py` helper (canon-1 + canon-2). Client injection on body/query/headers (incl. X-Forwarded-* spoof) — stored role always server `cdse,engineer` for CDSE apply; canon_version always 2. Downgrade / unknown / missing / invalid / case / whitespace roles; mixed v1→v2 ok, v2→v1 `canon_downgrade`; forged role → `hash_mismatch`. N+1: each of five required columns missing/empty/whitespace → 409 no writes; go-live `publish_field_problems` rejects null/empty/wrong-type; migrations add no DEFAULT for those columns.
+- **Defects (new strict xfails):**
+  - **QA-050:** engine `dam_safety.audit_chain` still canon-1-only — every canon-2 row is `hash_mismatch` vs app (SCHEMA §7 item 14 explicitly notes this until the engine lands).
+  - **QA-051:** UC `sql/ddl/08_audit.sql` / `lakebase/001_app_schema.sql` / `lakebase_extract.CHAIN_COLS` do not yet carry `actor_app_role` + `canon_version` (extract would drop them → UC `hash_mismatch`).
+- **Earlier xfails still open:** QA-048 (SoD), QA-041, QA-046. Still open: QA-044, QA-005e. QA-049 remains closed from b3aeecd.
+- **Clean-tree counts:** root 891 passed / 2 skipped; app 544 passed; qa/ 350 passed / 5 xfailed; parity 12; guard 0; live PG state (+ actor_app_role tests) included in app count.
+- **Paths:** `/tmp/c797151-tree`; uncommitted QA in `/workspace/wt-v16-port` (`qa/test_qa039_canon2.py`, updated `qa/test_qa039_chain_adversarial.py`, `QA.md`).
+- **Verdict:** **CONDITIONAL PASS** on c797151 for app-side canon-2 hashing (spec≡vector≡app), server-only actor_app_role, v1 byte-stability, and N+1/go-live required columns. **Not full pass:** QA-050 engine parity + QA-051 UC/extract columns open; 487d5b4 only spot-checked.
+
+## 2026-11-09 11:33 EST: 487d5b4 prod fail-closed verify_review_chain signer (uncommitted)
+- **Method:** `git archive 487d5b4` → /tmp/487d5b4-tree; copied uncommitted QA tests (excluding c797151-only `test_qa039_canon2.py`; restored tip's committed `test_qa039_chain_adversarial.py`). No commit/push/messages; no production edits.
+- **Scope:** Prod fail-closed — `verify_review_chain` refuses `dam_prod` without a real non-no-op signer; `load_signer` refuses unknown specs; only that job verifies chains.
+- **Independent suite:** `qa/test_prod_signer_fail_closed.py` (not copied from `tests/test_prod_fail_closed.py`).
+- **Verified (pass):**
+  - `dam_prod` + Noop / none / case / whitespace CLI variants → SystemExit before Spark
+  - unknown/garbage signer specs refused on both prod and dev (`not implemented`) — never silent Noop
+  - env `DAM_CHAIN_SIGNER` none/noop/case/whitespace still refuses prod
+  - no bypass via `DAM_ALLOW_NOOP_PROD` / `DEMO_MODE=true` / similar env flags
+  - `DEMO_MODE=true` + `DAM_CATALOG=dam_prod` does **not** weaken the job guard
+  - bare `prod` / `DAM_PROD` / trailing-space catalog → unknown catalog refused
+  - `dam_dev` / `dam_test` reach Spark with Noop
+  - real signer shape passes `require_signer_for_catalog`; test-only `*-test` alg refused on prod
+  - startup order: `start()` / require before `_common.spark()`; only `verify_review_chain.py` calls the guard
+- **Defects (new strict xfails):**
+  - **QA-052:** `require_signer_for_catalog` accepts any object that passes `is_real_signer` shape (alg/key_id/verify present), including one whose key fails at `verify()` — no load-time key probe.
+  - **QA-053:** fail-closed only in `start()`; `verify_all` / `verify_with_chain_heads` do not re-check catalog+signer, so Noop can still verify if `start()` is skipped.
+  - **QA-041** (pre-existing): app `Settings.check()` still accepts `DEMO_MODE=true` with `DAM_CATALOG=dam_prod` (job path is fine; app boot is not).
+- **Still open:** QA-048, QA-046, QA-044, QA-005e. QA-050/051 belong to c797151 (not this tip).
+- **Counts on /tmp/487d5b4-tree:** app **460 passed**; qa/ **344 passed / 6 xfailed** (QA-048, QA-052, QA-053, QA-041×2, QA-046). Prod suite alone: 39 passed / 3 xfailed (QA-052, QA-053, QA-041).
+- **Paths:** `/tmp/487d5b4-tree`; uncommitted `qa/test_prod_signer_fail_closed.py` + `QA.md` in `/workspace/wt-v16-port`.
+- **Verdict:** **CONDITIONAL PASS** on 487d5b4 for startup fail-closed on `dam_prod` and unknown-spec refusal. **Not full pass:** QA-052 (no key-load probe) and QA-053 (no verify-time re-guard) open.
+
+## 2026-11-09 11:44 EST: e8cc437 (app/v1.6-integration) closes QA-050/051/052/053 + second-approver (uncommitted)
+- **Lineage b3aeecd→e8cc437:** `487d5b4` (verified) → `c797151` (verified) → `0274aeb` (Lakebase ownership hardening — present; spot-checked schema/owner NOLOGIN + ENABLE ALWAYS; not a full adversarial ownership pass this turn) → `3d398dd` (merge c797151) → **`f0dd9c8`** (PROVISIONAL second-approver; same message/date as App Dev **`23c4a42`** on app/v1.6-port — **23c4a42 hash is NOT an ancestor of e8cc437**, but f0dd9c8 is the equivalent content in this line) → **`e8cc437`** (QA-050/051/052/053).
+- **Method:** `git archive e8cc437` → /tmp/e8cc437-tree; copied ALL latest uncommitted QA from wt-v16-port. No commit/push/messages; no production edits.
+- **Test edits (judge, not rubber-stamp):**
+  - `qa/test_prod_signer_fail_closed.py`: `_Real` now has a real HMAC `sign()`/`verify()` pair with a test key (was stub verify-only → probe failed for lack of sign). Removed strict xfails for QA-052/053; replaced with positive assertions that `_BrokenKey` is rejected at require_signer, `_AlwaysVerifyTrue` fails the probe ("different payload"), `verify_all` refuses prod and catalog=None, and dev/test still work when `catalog=` is passed. Caller scan confirms every real `verify_all(` call passes `catalog=` (docstrings ignored). **Not weakened.**
+  - `qa/test_qa039_chain_adversarial.py`: updated v1+v2 helper already fixed the two failures; confirmed both tests pass on this tip.
+  - `qa/test_qa039_canon2.py`: dropped QA-050/051 xfails (now pass); migration no-rewrite check added.
+  - `qa/test_migration_order_live_pg.py`: known ups now include `v1_7_002_canon_v2.sql`; allow CHECK-only down `v1_7_002_canon_v2_down.sql`.
+  - New `qa/test_cdse_second_approver_control.py` for f0dd9c8/23c4a42 behaviour.
+- **QA-050 — CLOSED:** engine ≡ app on canon-2; same reason codes; 045c parity + canon2 suite pass.
+- **QA-051 — CLOSED:** columns in UC DDL 08, Lakebase 001, extract CHAIN_COLS (26); migration v1_7_002 adds without rewriting old rows; v1 rows still verify.
+- **QA-052 — CLOSED:** load-time `signer_probe_problem` rejects broken key / always-true verify; working HMAC passes.
+- **QA-053 — CLOSED:** `verify_all` re-applies guard; catalog None = prod refuse; with `catalog=dam_dev|dam_test` Noop still works. All callers pass catalog (chain_head test already does). **Caveat:** omitting catalog is fail-closed by design — legitimate callers must pass it (documented; not a silent break of start()/main which always passes `a.catalog`).
+- **f0dd9c8 / 23c4a42 second-approver:** default **off** ≡ QA-048 today (CDSE may self-approve + direct apply). **On:** direct apply 403 `second_approver_required`; self-approve 403 `self_approval_forbidden`; admin propose + CDSE approve works. Toggle is **deploy-time only** (`CDSE_FLAG_REQUIRE_SECOND_APPROVER` env / app.yaml) — not client-togglable, not an audited runtime flip. Pending proposals under on: owner `can_approve=false`, `can_reject=true`. `/api/me` exposes readonly `approval_policy`.
+- **Residual defect:**
+  - **QA-054:** `app/tests/test_contract_v15.py::test_chain_record_carries_every_review_record_column` still asserts 24 cols (fails with 26). DA left `tools/patches/v17_canon2_app_contract_test.patch` unapplied on this tip.
+- **Still open:** QA-048 (default-off SoD), QA-041, QA-046, QA-044, QA-005e. QA-050/051/052/053 closed.
+- **Clean-tree counts (after QA test edits):** root 988 passed / 2 skipped; app 557 passed / **1 failed** (QA-054 contract_v15); qa/ expect ~401+/4 xfail after migration fix; parity 12; guard 0; live PG state 8.
+- **Paths:** `/tmp/e8cc437-tree`; uncommitted QA in `/workspace/wt-v16-port`.
+- **Verdict:** **CONDITIONAL PASS** on e8cc437 for QA-050/051/052/053 close + second-approver behaviour. **Not full pass:** QA-054 app contract test stale; QA-048 remains under default-off policy.
+
+## 2026-11-09 11:51 EST: e413293 final tip (=7c71ff3 + PROVENANCE + patch cleanup) — closes QA-041/050–053; QA-054 open (uncommitted)
+### Lineage b3aeecd → e413293
+`487d5b4` → `c797151` → `0274aeb` → `3d398dd` → **`f0dd9c8`** (≡ App Dev `23c4a42` message/intent on port; **23c4a42 is NOT an ancestor of e413293**; trees differ) → `e8cc437` → `99d2db6` → `febbe7c` → `ac14bdf` → `7c71ff3` → **`e413293`**.
+- **e8cc437 IS ancestor**; **23c4a42 is NOT**.
+- **7c71ff3..e413293:** not docs-only — adds `docs/PROVENANCE.md` §4 **and deletes** applied `tools/patches/v17_canon2_app_contract_test.patch`, `v17_lakebase_owner_state_init.patch`, `v17_lakebase_owner_state_init_check.py` (already applied in febbe7c/ac14bdf).
+- Method: `git archive` → `/tmp/e413293-tree`; copied ALL latest uncommitted QA from `/workspace/wt-v16-port`. Prior archives kept (`/tmp/e8cc437-tree`, `/tmp/7c71ff3-tree`). No commit/push/messages; no production edits.
+
+### Test edits (judged, not rubber-stamped)
+1. **`qa/test_prod_signer_fail_closed.py`**
+   - `_Real`: before = verify-only stub (broke new sign-and-verify probe). After = real HMAC sign/verify with test key. **Not weaker.**
+   - QA-052/053: dropped strict xfails; assert `_BrokenKey` rejected; `_AlwaysVerifyTrue` fails probe ("different payload"); `verify_all` refuses prod and catalog=None.
+   - QA-041 xfail on `test_app_settings_refuse_demo_mode_with_prod_catalog`: removed; now asserts `RuntimeError` match QA-041.
+2. **`qa/test_qa039_chain_adversarial.py`**
+   - v1+v2 helper (prior): chain_adversarial green on canon-2 tip — **confirmed**.
+   - QA-041: removed strict xfail on `test_settings_refuse_demo_mode_against_the_prod_catalog`.
+   - `test_demo_mode_never_constructs_prod_clients_even_with_prod_env`: before expected successful boot with sqlite/mock under DEMO_MODE+dam_prod (contradicted QA-041). After: expects `RuntimeError` match QA-041 **and** spies on `SqlAnalytics`, `lakebase_pool`, `build_state` must stay untouched. **Stronger**, not weaker.
+3. **`qa/test_qa039_canon2.py`**: dropped QA-050/051 xfails (pass).
+4. **`qa/test_migration_order_live_pg.py`**: known ups include `v1_7_002_canon_v2.sql`; allow CHECK-only down.
+5. **New** `qa/test_cdse_second_approver_control.py` for f0dd9c8 behaviour.
+
+### Independent verification
+- **QA-050 CLOSED:** engine ≡ app on canon-2; same reason codes; 045c parity + canon2 green.
+- **QA-051 CLOSED:** UC DDL 08, Lakebase 001, extract 26 cols; v1_7_002 no-rewrite; v1 rows verify.
+- **QA-052 CLOSED:** load-time key probe rejects broken / always-true verify; HMAC works.
+- **QA-053 CLOSED:** `verify_all` re-applies guard; catalog None=prod refuse; all callers pass `catalog=`.
+- **QA-041 CLOSED (stated claim):** `Settings.check()` / `create_app` refuse DEMO_MODE+dam_prod (case/whitespace/backtick/double-quote). Spy: `build_state`/`SqlAnalytics`/`lakebase_pool` never called. No dotenv/.env loader; alternate env names (`CATALOG`, `UNITY_CATALOG`, …) ignored. Override envs ignored.
+  - **Residual (not reopening 041):** ZWSP (`dam_prod\u200b`), BOM (`\ufeffdam_prod`), single-quoted `'dam_prod'`, fullwidth unicode are **NOT** treated as prod → would still boot. Log as hardening gap under QA-054 residual notes / future id if Genie wants.
+- **0274aeb ownership PASS (live PG 17):** DA `tests/test_lakebase_ownership.py` 47 passed; app `test_lakebase_owner_live.py` 8 passed. App role cannot DISABLE TRIGGER / TRUNCATE / ALTER / DROP / UPDATE / DELETE; ENABLE ALWAYS holds under `session_replication_role=replica`.
+- **febbe7c state.py patch APPLIED:** runtime has `foreign_owner` init path; skips DDL on owner-owned tables and verifies columns/guards/index. Leftover patch files removed on e413293 (already applied). **Not** still initing as wrong role.
+- **ac14bdf:** contract_v15 expects 26 cols — app suite green (prior e8cc437 app fail fixed).
+- **f0dd9c8 / 23c4a42 second-approver:** default **off** ≡ QA-048 today. **On:** direct apply 403 `second_approver_required`; self-approve 403 `self_approval_forbidden`; other CDSE/admin path works. Toggle = deploy-time env `CDSE_FLAG_REQUIRE_SECOND_APPROVER` only (not client-togglable, not audited runtime flip). Pending under on: owner `can_approve=false`, `can_reject=true`. `/api/me` exposes readonly `approval_policy`.
+
+### QA-054 — OPEN (owner Genie) — commit authorship / PROVENANCE
+**Config now (verified, config NOT changed by QA):**
+- Repo `.git/config`: **no** `user.name` / `user.email`. `extensions.worktreeConfig=true`.
+- Per-worktree `config.worktree` identities: DA worktrees → `Databricks-Data-Architect <data-architect@dam-safety.local>`; App Dev → `Databricks-App-Developer <app-developer@dam-safety.local>`; QA worktrees `qa-wt-853ca80`, `qa-wt-bed918c` → `QA-engineer-agent <qa-engineer@dam-safety.local>`.
+- **Gaps:** worktrees `dam-safety-app-main` and `qa043-wt` have **no** `config.worktree` → no effective `user.*` (would fall through empty). Residual mis-attribution risk if used to commit.
+
+**PROVERANCE.md §4 audit verdict: INCOMPLETE — keep QA-054 open.**
+- Table rows for integration QA-engineer-agent commits **0ff6d53, 743b8c6, 9875813, 826f7ba, 7993e53, e78c62b, b3aeecd, 487d5b4, 0274aeb, 3d398dd, e8cc437, 99d2db6**: content paths match DA work (no `qa/`); pushed flags match `git branch -r --contains` (first seven yes on origin/app/v1.6-integration; 487d5b4…99d2db6 no). True-author=DA consistent with announcements (b3aeecd, e8cc437, 0274aeb).
+- QA-own listed: 0681292, af253a8, bb5347f — correct. **Missing: fe4ed7b** (`QA-agent <qa@dam-safety.local>`, Nov 2) — parent requires every QA-engineer-agent **or QA-agent** hash since fe4ed7b listed; fe4ed7b itself omitted.
+- **Missing from file:** stash/WIP objects `9ed7b10`, `c3ee790`, `85d1563` (QA-engineer-agent; **not** on e413293 lineage; still QA-identity hashes since fe4ed7b).
+- App Dev announced hashes `a88b07f, 974e786, c4a384c, 0e79376, 6f7a1d5, c797151, 23c4a42, 7c71ff3` (+ `f0dd9c8, febbe7c, ac14bdf`): all recorded `App-Developer-agent` — **not mis-attributed**. Claim “none of App Dev’s commits is mis-attributed” holds for checked set.
+- **Ambiguity:** `23c4a42` vs `f0dd9c8` share subject but **different trees**; only f0dd9c8 is on this tip. PROVENANCE doesn’t mention the port/integ split.
+
+### Still open
+QA-054 (provenance completeness), QA-048 (default-off SoD), QA-046, QA-044, QA-005e. Closed this batch: QA-041, QA-050, QA-051, QA-052, QA-053.
+
+### Clean-tree counts on e413293
+| suite | result |
+|---|---|
+| root | **992 passed**, 2 skipped |
+| app | **595 passed** |
+| qa/ | **403 passed**, **2 xfailed** (QA-048, QA-046) |
+| digipro parity | **12 passed** |
+| restricted guard scan | **0 hits** |
+| live PG (migration + ownership DA + app owner live) | **58 passed** |
+
+### Verdict
+**CONDITIONAL PASS** on e413293 for claimed functional fixes (041, 050–053, ownership, second-approver control, contract 26-col). **Not full pass:** QA-054 PROVENANCE incomplete; QA-048 remains under default-off; unicode/ZWSP catalog spellings bypass is_prod_catalog.
+**Paths:** `/tmp/e413293-tree` (final); `/tmp/e8cc437-tree`, `/tmp/7c71ff3-tree` kept; uncommitted QA in `/workspace/wt-v16-port`.
+
+## 2026-11-09 12:39 EST: 9000bf7 (app/v1.6-integ-appdev) — DSSMP/CDSE/catalog batch (uncommitted)
+### Lineage e413293 → 9000bf7 (authors — QA-054 recurrence check)
+All commits use proper DA / App Dev identities; **no QA-engineer-agent / QA-agent recurrence**.
+| hash | author | subject |
+|---|---|---|
+| fe9720d | DA | QA-054 follow-up PROVENANCE §4.1 |
+| e551a88 | DA | publisher dam_ref_publish |
+| 86993d0 | DA | DSSMP registration engine/DDL |
+| 18ebff2 | DA | lakebase publisher role |
+| bb4cc25 | App Dev | DSSMP version registration wizard/outbox |
+| 94cf627 | App Dev | align with DA 86993d0 |
+| e988454 | App Dev | QA-055 catalog patch for DA |
+| 91e7979 | DA | dssmp_registration_outbox = agreed contract |
+| 7e59298 | DA | apply QA-055 catalog allowlist |
+| 3f37f90 | DA | verify_all fails closed on garbled catalog |
+| dfc08bb | DA | DSSMP load copies document to Volumes |
+| f112746 | App Dev | CDSE direct registration + go-live cdse_authority_missing |
+| 1770505 | App Dev | CDSE bootstrap + bulk re-version |
+| **9000bf7** | App Dev | QA-055 app catalog byte-identical + Settings.normalize |
+
+### PROVENANCE / QA-054
+§4.1 now lists **fe4ed7b**, **9ed7b10/c3ee790/85d1563**, and **23c4a42 vs f0dd9c8**. Worktree identity table present; no repo-level user.name. New commits in this range properly attributed. **QA-054 CLOSED.**
+
+### Independent verification
+- **91e7979 outbox contract:** PASS — proposed_by/processed_at/reason_code; 001 ≡ migration block; live contract tests green.
+- **7e59298 / 3f37f90 catalog module:** PASS — normalize at require_signer + verify_all; garbled raises; None≡prod refuse.
+- **bb4cc25 / 94cf627 DSSMP registration:** PASS — propose auth (dam_admin/admin); chain records; 409 dssmp_superseded body names version + affected_rules + threshold_id; no pubs/chain on refuse.
+- **f112746 CDSE direct registration:** PASS — only that dam's CDSE; cross-dam 403; audited approve+outbox; go-live/cdse_authority_issues without CDSE → cdse_authority_missing.
+- **1770505 bootstrap + reversion:** PASS for live/exists refusals (dam_live, cdse_exists, no writes); change → exactly one outbox; reversion_stale 409 no partial pubs; mid-batch failure atomic (proposal stays pending). **DEFECT QA-056:** concurrent assign both return 200 + two chain/outbox rows; only load rejects loser (`cdse_exists`). No UNIQUE/lock. Strict xfail logged.
+- **9000bf7 / QA-055:** PASS — app/backend/catalog.py sha256 **ac2f0590…** ≡ src/dam_safety/catalog.py (byte-identical). NFKC+Cf+allowlist refuses quoted, ZWSP/BOM (stripped then allowlisted if clean), fullwidth (folds), Cyrillic а, unknown; dam_dev/test/prod work; DEMO+fullwidth prod still QA-041.
+
+### Status ledger
+| id | status |
+|---|---|
+| QA-050 | CLOSED |
+| QA-051 | CLOSED |
+| QA-052 | CLOSED |
+| QA-053 | CLOSED |
+| QA-054 | **CLOSED** (PROVENANCE §4.1 complete; no recurrence in e413293..9000bf7) |
+| QA-055 | **CLOSED** |
+| QA-056 | **OPEN** (concurrent dam_cdse_assign race) |
+| QA-048 / 046 / 044 / 005e | still open |
+
+### Test edits
+- New `qa/test_qa055_catalog_and_v17_dssmp_cdse.py` (independent).
+- `test_prod_signer_fail_closed.py`: unknown-catalog match widened for QA-055 messages; DAM_PROD now normalizes then hits prod guard.
+- Migration known list: + v1_7_003 + its down.
+
+### Clean-tree counts vs App Dev
+| suite | this run | App Dev claimed |
+|---|---|---|
+| root | **1283 passed / 2 skipped** | 1283 / 2 skipped ✓ |
+| app | **725 passed** | 725 ✓ |
+| qa/ | **440 passed / 3 xfailed** (048, 046, 056) | (QA suite) |
+| digipro parity | 12 | — |
+| guard | **0 hits** | 0 ✓ |
+| live PG (mig+ownership+outbox+owner live) | 63 passed | — |
+
+### Push verdict
+**CONDITIONAL PASS** for push of functional batch (041 residual closed by 055, 050–055 closed, ownership/DSSMP/CDSE/catalog). **Not unconditional:** QA-056 concurrent bootstrap race must be fixed or explicitly accepted before relying on assign under concurrency; QA-048 remains under default-off second-approver.
+**Paths:** `/tmp/9000bf7-tree`; uncommitted QA in `/workspace/wt-v16-port`. No commit/push.
+
+## 2026-11-09 13:11 EST: d150288 (app/v1.6-integration) — CDSE load / reversion / head-log / downs / runbook (uncommitted)
+### Lineage 9000bf7 → d150288 (authors — QA-054 check)
+| hash | author | subject |
+|---|---|---|
+| 2ed6442 | DA | lakebase v1_7_005 dam_cdse_* + rule_reversion_proposal DDL |
+| 2c2dec5 | DA | §20 CDSE assignment engine + load job |
+| ea66581 | DA | §21 rule re-versioning |
+| c0ef4df | DA | append-only review_chain_head_log (app patch NOT applied) |
+| d5a74d7 | DA | down scripts v1_5_001..v1_7_001 |
+| **d150288** | DA | DEV_WORKSPACE_RUNBOOK.md |
+No QA-engineer / QA-agent identity. Previously verified 86993d0..3f37f90, dfc08bb, 9000bf7 still ancestors (unchanged trees).
+
+### Independent verification
+- **2ed6442 / 2c2dec5 + QA-056:** App API race **still open** (QA-056). Load job **mitigates UC dual-CDSE**: same-batch two assigns → plan loads 1 and **defers** the other; sequential second → `cdse_exists`. `mark_merge_skipped` covers MERGE stale. Cannot get two *active* CDSEs via the load path. QA-056 remains OPEN at app assign.
+- **ea66581 §21:** PASS locally (DA 25 tests + publisher MERGE). N+1 / stale 409 / alarms untouched covered by prior QA suite + DA tests.
+- **c0ef4df head log (patch NOT applied):** Runtime still `UPDATE review_chain_head` + `SELECT FOR UPDATE` (mutable legacy head). `review_chain_head_log` exists in Lakebase DDL (append-only, owner-owned) but unpatched app does not write it. Extract merges log∪legacy (log wins at equal seq) — **writes still work**; **tamper-resistance not active** until App Dev applies `v17_chain_head_log_state.patch`. App/DDL disagree only in that sense — not a write-break.
+- **d5a74d7 downs:** `tests/test_migration_downs.py` 16 passed (up/down/up, rows/columns kept, canon-2 CHECKs). **Downs do NOT refuse prod** (no dam_prod gate) — operational risk; rely on runbook pause + PRE-CHECK. Chain verifying after down/up covered by DA PG translation tests.
+- **d150288 runbook:** Covers ordered deploy, bundle validate, migrations, validator, jobs, go-live, rollback. Section 9 claims many UNVERIFIED ids closed. **Gaps vs requested tech list:** concrete pass criteria are mostly “job SUCCESS / validator OK” — MERGE-with-subquery and `raise_error` are only exercised indirectly (publish / `assert_dam_go_live_ready`); `hashtext`/advisory locks claimed closed by validator but **unpatched app never takes the new advisory lock**; table-function via `v_dssmp_affected_rules` SELECT; ALTER COLUMN DROP DEFAULT only if step 8 run; bundle paths in step 1; run_as via job success. **CONDITIONAL** on runbook completeness.
+- **Ownership flaky / cluster-global roles:** 12 serial + parallel-with-publisher suite = **0 failures**. Did **not** reproduce → **no new QA id**. DA VERIFICATION.md already notes the hazard.
+
+### Status ledger
+| id | status |
+|---|---|
+| QA-050..055 | CLOSED (unchanged) |
+| QA-054 | CLOSED (no recurrence) |
+| QA-056 | **OPEN** (app concurrent assign; load job safe) |
+| QA-048 / 046 / 044 / 005e | still open |
+
+### Test edits
+- `test_cdse_flag_change_control.py`: SQLite CHECK render includes `subject_id` (ddl/08 chain CHECK now references it for dam_* actions).
+- `test_migration_order_live_pg.py`: known downs include v1_5_001..v1_7_001 downs; assert no DELETE/DROP TABLE.
+
+### Clean-tree counts vs DA
+| suite | this run | DA claimed |
+|---|---|---|
+| root (worktree; archive lacks git for 2 tests) | **1390 passed / 2 skipped** | 1390 / 2 skipped ✓ |
+| app | **725** | 725 ✓ |
+| qa/ | **440 / 3 xfail** (048, 046, 056) | — |
+| parity | 12 | — |
+| guard | **0** | — |
+| live (mig+downs+ownership) | 66 | — |
+
+Archive `/tmp/d150288-tree` alone: 2 git-dependent errors (chain_head_log / lakebase_cdse_tables need `git show`) — measurement artifact, not product fail.
+
+### Push verdict
+**CONDITIONAL PASS** for DA d150288: load job / reversion / downs / runbook land usefully; root+app match claims. **Not unconditional:** QA-056 still open on app assign; chain-head tamper resistance awaits App Dev patch; downs lack prod refuse; runbook pass criteria for some Databricks UNVERIFIED items are indirect.
+**Paths:** `/tmp/d150288-tree`; uncommitted QA `/workspace/wt-v16-port`. No commit/push.
+
+
+## 2026-11-09 13:41 EST: 478b7b5 (app/v1.6-integ-appdev) then 6709371 (app/v1.6-integration) — final
+
+### Lineage (authors — QA-054 check)
+From **9000bf7** → **6709371** (and **d150288** → **6709371**): only
+`Databricks-App-Developer <app-developer@dam-safety.local>` and
+`Databricks-Data-Architect <data-architect@dam-safety.local>`. No QA-engineer / QA-agent identity. **QA-054 stays CLOSED.**
+
+Key tips: 0aed4c4 (App Dev QA-056 lock+indexes) → … → 7f349d0 (QA-057) → 23b39c5 (search_path) → **478b7b5** (App Dev head-log+readiness+previous_cdse_id) → 33bee49 (runbook P1–P8) → 32ea54a (integrate 478b7b5) → **6709371** (dssmp outbox status pending|loaded|rejected).
+
+### Test edits (uncommitted QA; never weakened)
+1. **QA-056 hard assertion** (`qa/test_qa055_…_cdse.py`): dropped soft `pytest.xfail()` when race doesn't reproduce. Now: (a) lock-id collision grep `{4702045,4702046,4702047}`; (b) unique partial indexes refuse second pending SQL insert; (c) demo hard `8 threads × 20 rounds` → exactly one 200, rest 409, one change + one outbox; (d) live PG 17 barrier `8×20` same hard asserts + unique-index SQL fail. Soft xfail removed only after (c)+(d) passed.
+2. **Head-log guarded design** (`test_qa039_chain_adversarial.py`): `test_head_row_deletion_*` and `test_append_only_*` updated — UPDATE/DELETE of `review_chain_head_log` refused; legacy head delete alone leaves verify OK (log is trusted); privileged rewind of tip fails verify; `APPEND_ONLY` assert is `>= {review_signoff, review_chain_head_log}` (old tables still present + head log). Full-recompute doc-limit rewrites log tip too.
+3. **Go-live**: `test_golive_fails_cdse_authority_missing_without_cdse` → `test_golive_fails_closed_via_go_live_readiness_and_shim` using `go_live_readiness_issues` + shim parity until removed. Extra fail-closed coverage for missing/erroring/zero-row lookups.
+4. **Canon-2 message**: `dssmp_missing` specialized code on 478b7b5 accepted alongside "no default"/"backfill" (not weaker: still 409 + field present + one of the three signals).
+5. Independent: `previous_cdse_id` across reassignment chain; head-log INSERT-only + engine/app tip parity; QA-057 down guards present.
+
+### Independent verification (6709371)
+| item | verdict |
+|---|---|
+| **QA-056** (0aed4c4 + 424c6e3 + 478b7b5) | **CLOSED** — hard 8×20 demo + live PG barrier pass; unique indexes refuse second pending; App Dev live suite 13/13; lock ids 4702045/46/47 distinct (tree grep). |
+| **QA-057** (7f349d0) | **CLOSED** — `run_migration.decide` exit 3 on dam_prod + lookalikes (case/ZWSP/fullwidth); `MIN_REASON=10` after strip (whitespace-only / 10 spaces / 9 chars refused); valid reason logged `QA-057_BREAK_GLASS_PROD` on stderr+log-file; env `DAM_BREAK_GLASS` does not bypass; double `--break-glass-prod` keeps last; every UC `*_down.sql` has 2× `raise_error` incl. `current_catalog()` recheck; `tools/verify/qa057_guard_probe.sql` is SELECT-only (no DML/DDL). Residual: submitting a down SQL **outside** the tool still depends on layer-2 param binding (documented; probe covers warehouse). DA suite `tests/test_qa057_prod_guard.py` **73 passed**. |
+| **Chain-head-log runtime** (c0ef4df applied in 478b7b5 / 32ea54a) | **PASS** — trusted head = log tip (INSERT only); APPEND_ONLY + ENABLE ALWAYS on Lakebase; legacy `review_chain_head` still UPSERTed for compat (nuance: mutable legacy sync remains, not the trusted path). Engine `latest_chain_head` ↔ app `chain_head` parity OK. |
+| **Lock order / deadlock** (32ea54a) | **PASS** — `lock_dam` → `check(q)` → `CHAIN_LOCK`; live PG interleaved assign-like (holds dam) + plain append (chain only) completed with no deadlock (append acquired chain while dam held). |
+| **v_dam_go_live_readiness** | **PASS** — fail-closed on missing row / no lookup / view error; shim still returns `cdse_authority_missing` for NEW. |
+| **previous_cdse_id** | **PASS** — single designated CDSE across CRD→NEXT→THIRD reassignment chain. |
+| **Runbook P1–P8** (33bee49) | **PASS** — each has commands + exact PASS output (P2/P5/P6 use "PASS, in order:"). |
+| **search_path** (23b39c5) | **PASS** — `_session` `SET search_path TO {Ident}` then `current_schemas(false) == [schema]`; pg_catalog implicit first. Hijack residual: only if operator points `lb_schema` at a schema the job role can populate; cannot silently insert a second schema onto the verified path. |
+| **Outbox status** (6709371) | **PASS with residual** — Lakebase dssmp CHECK = `pending|loaded|rejected` (rejected_invalid dropped; migration converges). Load job `UPDATE … WHERE status='pending'` + `already_applied` → idempotent. **Residual:** no DB trigger forbidding `loaded`/`rejected` → `pending` rewind (publisher column guard allows status changes); app DDL still lists `rejected_invalid` (DA-tolerated until App Dev drops it); `dam_cdse_outbox` CREATE still allows `rejected_invalid` (out of 6709371 scope). |
+
+### Status ledger
+| id | status |
+|---|---|
+| QA-050..055 | CLOSED |
+| QA-054 | CLOSED (no identity recurrence through 6709371) |
+| **QA-056** | **CLOSED** |
+| **QA-057** | **CLOSED** |
+| QA-048 / 046 / 044 / 005e | still open |
+
+### Clean-tree counts (6709371 `git archive` + uncommitted QA overlay)
+| suite | this run | claimed |
+|---|---|---|
+| root (`/tmp/6709371-tree`) | **1482 passed / 7 skipped** | DA 1482 / 7 ✓ |
+| app | **756 passed** | App Dev 756 ✓ |
+| qa/ | **448 passed / 2 xfailed** (048, 046) | — |
+| QA-057 suite | **73 passed** | — |
+| live QA-056 + lakebase | 13 + (prior owner live) | — |
+| digipro parity | 12 (on 478b7b5 tree) | — |
+| guard | **0 hits** | 0 ✓ |
+
+### Push verdict (6709371)
+**PASS for push** of the integration tip: root+app match claims from archive; QA-056 and QA-057 closed under hard/live evidence; head-log, lock order, readiness, previous_cdse_id, runbook P1–P8, search_path verified. Non-blocking residuals: outbox status rewind not DB-enforced; app DDL still mentions `rejected_invalid`; DA `test_chain_head_log` **15 passed** on 32ea54a (patch files removed; applied-state assertions). QA-048/046 remain open (unrelated).
+**Paths:** `/tmp/6709371-tree` (and `/tmp/478b7b5-tree`); uncommitted QA in `/workspace/wt-v16-port`. **No commit/push/messages.**
+
+
+## 2026-11-09 14:10 EST: c7bca54 (app/v1.6-integration) — residuals + App Dev 18aecfe merge
+
+### wt-integ-app QA copies (App Dev report)
+App Dev noted uncommitted `qa/test_qa039_chain_adversarial.py` and untracked `qa/` files in `/workspace/wt-integ-app`.
+**Findings (do not delete):** every `qa/*.py` (+ denylist) in wt-integ-app **byte-matches** `/workspace/wt-v16-port/qa` (same sha256, same mtimes). They were overlaid by the prior QA executor during the 478b7b5/6709371 run (`cp -a …/wt-v16-port/qa/. …/wt-integ-app/qa/` ~13:31–13:33 EST 2026-11-09). Git status there: `M qa/test_qa039_chain_adversarial.py` plus `??` for the untracked QA suite files. **Canonical home remains wt-v16-port**; integ-app copies are a working overlay only. Left in place per instruction.
+
+### Lineage 6709371 → c7bca54 (authors — QA-054)
+| hash | author | subject |
+|---|---|---|
+| d6d3c9c | DA | dam_cdse_outbox status pending\|loaded\|rejected (+ v1_7_008) |
+| bff29ef | DA | status-transition guard v1_7_009 |
+| 09eb23f | DA | down guard refuses missing/blank catalog |
+| 2561f21 | DA | job/engine SQL fully catalog-qualified |
+| **18aecfe** | **App Dev** | drop rejected_invalid app-side |
+| 801ed5a | DA | durable go-live marker (onboarding_golive) |
+| f11d788 | DA | merge 18aecfe --no-ff into integration |
+| **c7bca54** | DA | outbox contract tests require exact 3-value form |
+
+Authors only App-Developer + Data-Architect. **QA-054 CLOSED.**
+
+### Per-commit verdicts
+| commit | verdict | notes |
+|---|---|---|
+| **d6d3c9c** | **PASS** | CREATE `dam_cdse_outbox` status list == CHECK `pending\|loaded\|rejected`. v1_7_008 maps legacy `rejected_invalid`→`rejected` (reason kept) then named CHECK; down restores 4-value CHECK without dropping rows. ORDER before v1_7_009 documented. |
+| **18aecfe** | **PASS** | App `OUTBOX_STATUSES = (pending,loaded,rejected)`; DDL CHECKs match; no backend literal accepts rejected_invalid for outboxes. Legacy 4-value DB: `legacy_outbox_checks` fail-closed report + live converge tests; fresh store refuses insert. |
+| **bff29ef** | **PASS w/ QA-058** | Live PG: terminal→pending refused on both outboxes + rule_reversion_proposal; publisher/app cannot disable/drop/replace/replica-bypass on **owner-owned** outboxes; ENABLE ALWAYS. v1_7_009 down drops triggers/function only (row kept; re-apply OK). **QA-058 (NEW, owner DA):** `rule_reversion_proposal` remains **app-owned**, so the app role **can** `DISABLE TRIGGER t_status_rule_reversion_proposal` (DA test proves it). Validator **does** flag the symptom (`status_guard_missing` when tgenabled≠A) but does **not** require table OWNER = dam_lakebase_owner (unlike outboxes). Fix: move ownership to dam_lakebase_owner like the other guarded tables. |
+| **09eb23f** | **PASS** | Downs + probe refuse NULL/empty/blank/Cf-only (`\u200b`, BOM `\ufeff`, soft hyphen) via `coalesce(regexp_replace(:catalog,'[\p{Cf}\s]',''),'')=''`. Runner refuses blank catalog. Residual: NBSP (`\u00a0`) and ideographic space (`\u3000`) are Zs — Java `\s` may not strip them; not in DA fuzz set; unlikely to yield a usable catalog but not proven blank-refused. |
+| **2561f21** | **PASS** | DA static guard + suite green. Independent AST scan of jobs/engine/pipelines string+f-string SQL: **0 executable** unqualified `schema.table` refs (7 docstring-only hits). sql/migrations legitimately use two-part names after USE CATALOG (out of guard scope). |
+| **801ed5a** | **PASS** | `go_live_markers` / `is_live`: unreadable/forged/mismatched envelope→AMBIGUOUS→live (fail closed); forged/unsigned/broken JSON cannot clear not-live. Suite 11 passed. **Open design question (not a defect):** “status can only make a dam live, never not live” — how do decommissioning / out-of-service / FERC dam removal clear the durable marker? Needs product/FERC decision. |
+| **c7bca54** | **PASS** | `test_dssmp_outbox_contract` / cdse status tests require app CHECK **exactly** `{pending,loaded,rejected}` (no rejected_invalid tolerance). |
+
+### Status ledger
+| id | status |
+|---|---|
+| QA-050..057 | CLOSED (unchanged) |
+| QA-054 | CLOSED |
+| **QA-058** | **OPEN** — `rule_reversion_proposal` app-owned → app can DISABLE status-transition trigger; move OWNER to dam_lakebase_owner (DA). Validator catches disable after the fact, not the ownership root cause. |
+| QA-048 / 046 / 044 / 005e | still open |
+| go-live decommission | **open question** (801ed5a), not a defect |
+
+### Clean-tree counts (`/tmp/c7bca54-tree` archive + wt-v16-port QA overlay)
+| suite | this run | claimed |
+|---|---|---|
+| root | **1529 passed / 9 skipped** | 1529 / 9 ✓ |
+| app | **767 passed** | 767 ✓ |
+| qa/ | **448 passed / 2 xfailed** (048, 046) | — |
+| status-transition live | 7 passed / 1 skipped | — |
+| go_live_marker | 11 passed | — |
+| guard | **0 hits** | 0 ✓ |
+
+### Push verdict
+**CONDITIONAL PASS** for push of c7bca54: root+app match archive claims; d6d3c9c / 18aecfe / 09eb23f / 2561f21 / 801ed5a / c7bca54 verified; bff29ef guards work on owner-owned outboxes. **Not unconditional:** **QA-058** (rule_reversion_proposal ownership) should be scheduled before treating status-transition as fully tamper-resistant under the app role; go-live decommission path is an open design question.
+**Paths:** `/tmp/c7bca54-tree`; uncommitted QA `/workspace/wt-v16-port` (integ-app holds matching overlay copies — not deleted). **No commit/push/messages.**
+
+
+## 2026-11-09 14:25 EST: 0e11d01 tip (app/v1.6-integration) — QA-058 + Zs residual
+
+### Method
+`git archive 0e11d01` → `/tmp/0e11d01-tree`; overlay QA from `/workspace/wt-v16-port` **only into /tmp** (no worktree copy this turn). Read-only; no commit/push/messages.
+
+### Lineage c7bca54 → 0e11d01 (QA-054)
+| hash | author | subject |
+|---|---|---|
+| **6420d98** | DA | QA-058: rule_reversion_proposal → dam_lakebase_owner (v1_7_010) + validator owner check |
+| **0e11d01** | DA | QA-058 residual: strip/refuse Zs in catalog name every layer |
+
+Authors: Data-Architect only on this tip range. **QA-054 CLOSED** (no QA identity).
+
+### Independent verification (live PG 17 as app role)
+| Item | Verdict |
+|---|---|
+| **QA-058 ownership** | **CLOSED** — after 001/v1_7_010: owner=`dam_lakebase_owner`, `tgenabled=A`. App refused: DISABLE, DROP TRIGGER, ALTER OWNER, TRUNCATE, DELETE, REPLACE function, `session_replication_role=replica` (must be owner / permission denied). |
+| **Terminal column freeze** | **PASS** — trigger freezes entire row when status is terminal (`is final`); rewriting `decided_by` / `decision_rationale` / `decided_at` / `pub_ids` without status change refused. **No new QA id** for after-the-fact decision tampering. |
+| **Pending decided_* rewrite** | Allowed by design (same-status pending UPDATE OK); live: `decided_by=not-actor@x`, `decided_at=1999-…` on pending succeeded. `decide_pending` still overwrites atomically on approve. Not logged as defect. |
+| **Grant ↔ decide_pending** | **PASS** — `APP_UPDATE_COLS` == router field dicts; static test fails if extra UPDATE/DELETE path on `rule_reversion_proposal` is added. |
+| **Validator** | **PASS** — `owner_not_dam_lakebase_owner` fires on owner-only change with triggers still ALWAYS (each guarded table); `app_workflow_privilege` on extra DELETE/UPDATE(rules) and on missing `UPDATE(decided_by)`. |
+| **v1_7_005 re-run trap** | **DEFECT → QA-059 OPEN (owner DA)** — reproduced: after v1_7_010, re-running `v1_7_005_cdse_reversion_tables.sql` sets owner back to the app role; app can then DISABLE the status trigger. `tools/run_migration.py` does not cover lakebase; runbook still presents 005 as re-runnable and does not refuse 005-after-010. VERIFICATION.md admits the note; still a regression trap until 005 is ownership-safe or tooling/runbook blocks re-apply after 010. v1_7_010 down drops nothing (ownership only). |
+| **0e11d01 Zs** | **PASS on Databricks-intended path w/ PG caveat** — all 7 downs + probe use `[\p{Cf}\p{Z}\s]`. Fuzz: NBSP/U+3000/U+2007/U+2028/U+2029 covered in DA tests (U+180E is Cf, already stripped). **Native PG 17 ARE: `\p{Z}` / `\p{L}` → `invalid escape \ sequence` (errors, does not silently match).** Downs are UC/Databricks SQL (Java `\p` UNVERIFIED on warehouse); PG tests substitute `PG_CF_CLASS` code-point class. Fail-closed on raw PG eval (statement errors); not a silent bypass. Residual: do not run untranslated down guards on PG. `normalize_catalog` unchanged (NFKC+strip handles edge Zs; interior Zs refuse allowlist). |
+
+### Status ledger
+| id | status |
+|---|---|
+| QA-050..057 | CLOSED |
+| **QA-058** | **CLOSED** (6420d98) |
+| **QA-059** | **OPEN** — re-running v1_7_005 after v1_7_010 re-owns `rule_reversion_proposal` to the app (DISABLE possible again). Owner: DA. Fix: make 005 ownership-safe (skip OWNER TO app if already owner-owned / always end with 010 semantics) and/or refuse re-apply in tooling/runbook after 010. |
+| QA-048 / 046 / 044 / 005e | still open |
+| go-live decommission | open question (unchanged) |
+
+### Clean-tree counts (`/tmp/0e11d01-tree`)
+| suite | this run | claimed |
+|---|---|---|
+| root | **1587 passed / 10 skipped** | 1587 / 10 ✓ |
+| app | **767** | 767 ✓ |
+| qa/ | **448 / 2 xfail** (048, 046) | — |
+| rule_reversion owner + status + Zs focus | 58 passed / 1 skipped | — |
+| guard | **0** | 0 ✓ |
+
+### Push verdict
+**CONDITIONAL PASS** for 0e11d01: counts match; QA-058 closed under live evidence; Zs residual addressed for Databricks SQL + Python layers. **Not unconditional:** **QA-059** (v1_7_005 re-run ownership regression) remains an operational foot-gun.
+**Paths:** `/tmp/0e11d01-tree`; QA `/workspace/wt-v16-port` only. **No commit/push/messages; no worktree QA overlay this turn.**

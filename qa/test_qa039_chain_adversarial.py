@@ -35,10 +35,19 @@ ADMIN, ENG, VIEWER, DSO, NOBODY = ("admin@demo.local", "engineer.crd@demo.local"
                                    "dso.phr@demo.local", "nobody@demo.local")
 IID = "CRD-IN-1"
 BODY = {"decision": "approve", "rationale": "QA adversarial: independent check of the proposal"}
-SPEC_CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
-                     "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
-                     "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
-                     "prev_hash")
+# SCHEMA_CONTRACT.md §5a / §7 item 14 (written spec only — not copied from app code):
+# Canon 1 (canon_version NULL/absent): hash exactly SPEC_CHAIN_FIELDS_V1.
+# Canon 2: hash SPEC_CHAIN_FIELDS_V1 + (actor_app_role, canon_version) with canon_version as int.
+SPEC_CHAIN_FIELDS_V1 = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
+                        "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
+                        "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
+                        "prev_hash")
+SPEC_CHAIN_FIELDS = SPEC_CHAIN_FIELDS_V1  # back-compat alias for v1-field tamper params
+SPEC_ACTOR_ROLE_FIELD = "actor_app_role"
+SPEC_CANON_FIELD = "canon_version"
+SPEC_CHAIN_FIELDS_V2 = SPEC_CHAIN_FIELDS_V1 + (SPEC_ACTOR_ROLE_FIELD, SPEC_CANON_FIELD)
+SPEC_ACTOR_ROLES = ("viewer", "engineer", "dso", "dam_admin", "admin", "cdse")
+SPEC_HASH_EXCLUDED = frozenset({"record_hash", "signature", "sig_alg", "key_id"})
 
 
 def _h(user, uid=None, **extra):
@@ -125,7 +134,8 @@ def _three(tc, sid):
 
 
 def _unguard(st):
-    for t in ("t_noupdate_review_signoff", "t_nodelete_review_signoff"):
+    for t in ("t_noupdate_review_signoff", "t_nodelete_review_signoff",
+              "t_noupdate_review_chain_head_log", "t_nodelete_review_chain_head_log"):
         st.execute(f"DROP TRIGGER IF EXISTS {t}")
 
 
@@ -152,22 +162,51 @@ def test_qa040_no_uppercase_ZA_anywhere_in_inclinometer_api_json(demo):
 
 
 # ============================================================ hash chain: independent re-derivation
+def _spec_canon_of(row):
+    """§7 item 14: NULL/absent → canon 1; otherwise int(canon_version). None if not an int."""
+    v = row.get(SPEC_CANON_FIELD)
+    if v is None or (isinstance(v, str) and str(v).strip() == ""):
+        return 1
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _my_hash(row):
-    doc = {f: (int(row[f]) if f == "chain_seq" else engine_canonical_value(row[f])) for f in SPEC_CHAIN_FIELDS}
+    """Independent re-derivation from SCHEMA_CONTRACT §7 item 14. Keeps v1 for legacy rows."""
+    canon = _spec_canon_of(row)
+    if canon == 1:
+        fields = SPEC_CHAIN_FIELDS_V1
+    else:
+        # unknown canon hashed with v2 field set (verifier then reports canon_unknown)
+        fields = SPEC_CHAIN_FIELDS_V2
+    doc = {}
+    for f in fields:
+        if f == "chain_seq":
+            doc[f] = None if row.get(f) is None else int(row[f])
+        elif f == SPEC_CANON_FIELD:
+            doc[f] = canon
+        else:
+            doc[f] = engine_canonical_value(row.get(f))
     return hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                                      default=str).encode("utf-8")).hexdigest()
 
 
 def test_chain_fields_match_the_contract_and_hash_rederives_independently(demo):
     tc, app, sid = demo
-    assert tuple(ac.CHAIN_FIELDS) == SPEC_CHAIN_FIELDS
-    assert set(ac.HASH_EXCLUDED) == {"record_hash", "signature", "sig_alg", "key_id"}
+    # V1 field set is unchanged; V2 appends the two new hashed fields (§7 item 14)
+    assert tuple(ac.CHAIN_FIELDS) == SPEC_CHAIN_FIELDS_V1
+    assert set(ac.HASH_EXCLUDED) == SPEC_HASH_EXCLUDED
+    assert ac.CHAIN_FIELDS_V2 == SPEC_CHAIN_FIELDS_V2
     _three(tc, sid)
     rows = sorted(app.state.store.chain_rows("CRD"), key=lambda r: int(r["chain_seq"]))
     assert [int(r["chain_seq"]) for r in rows] == [1, 2, 3]
     prev = "0" * 64
     for r in rows:
         assert r["chain_id"] == "CRD" == r["dam_id"] and r["prev_hash"] == prev
+        assert int(r.get("canon_version") or 0) == 2
+        assert r.get("actor_app_role")
         assert re.fullmatch(r"[0-9a-f]{64}", r["record_hash"]) and r["record_hash"] == _my_hash(r)
         prev = r["record_hash"]
     head = app.state.store.chain_head("CRD")
@@ -237,12 +276,26 @@ def test_link_and_ordering_attacks_are_detected(demo):
 
 
 def test_head_row_deletion_and_forged_unlinked_append_are_detected(demo):
+    """Guarded head-log design: deleting/updating/truncating the head log is refused; rewind of the latest head fails verify."""
     tc, app, sid = demo
     _three(tc, sid)
     st = app.state.store
-    st.execute("DELETE FROM review_chain_head WHERE chain_id = 'CRD'")  # head is not append-only (it is the lock)
+    # head log is append-only: UPDATE / DELETE refused by the DB guard
+    for sql in ("UPDATE review_chain_head_log SET head_hash = '" + ("00" * 32) + "' WHERE chain_id = 'CRD'",
+                "DELETE FROM review_chain_head_log WHERE chain_id = 'CRD' AND chain_seq = 3",
+                "DELETE FROM review_chain_head_log WHERE chain_id = 'CRD'"):
+        with pytest.raises(Exception, match="append-only"):
+            st.execute(sql)
+    assert _verify(tc).json()["ok"] is True
+    # legacy mutable head alone can still be deleted (compat row); trusted head is the log, so verify stays ok
+    st.execute("DELETE FROM review_chain_head WHERE chain_id = 'CRD'")
+    assert _verify(tc).json()["ok"] is True
+    # privileged rewind of the latest head-log entry (drop guards) must fail the chain
+    _unguard(st)
+    st.execute("DELETE FROM review_chain_head_log WHERE chain_id = 'CRD' AND chain_seq = 3")
+    st.execute("DELETE FROM review_chain_head WHERE chain_id = 'CRD'")  # keep legacy out of the way
     v = _verify(tc).json()
-    assert (v["ok"], v["reason"]) == (False, "head_missing"), v
+    assert v["ok"] is False and v["reason"] in ("head_mismatch", "head_missing"), v
 
 
 def test_full_recompute_by_privileged_actor_is_a_documented_limit(demo):
@@ -261,7 +314,11 @@ def test_full_recompute_by_privileged_actor_is_a_documented_limit(demo):
         st.execute("UPDATE review_signoff SET decision=%s, prev_hash=%s, record_hash=%s WHERE chain_id='CRD' AND "
                    "chain_seq=%s", (r["decision"], prev, h, int(r["chain_seq"])))
         prev = h
-    st.execute("UPDATE review_chain_head SET head_hash=%s WHERE chain_id='CRD'", (prev,))
+    # rewrite both the legacy head and the append-only log tip (guards already dropped)
+    st.execute("DELETE FROM review_chain_head_log WHERE chain_id='CRD'")
+    st.execute("INSERT INTO review_chain_head_log (chain_id, chain_seq, head_hash, updated_ts) VALUES (%s,%s,%s,%s)",
+               ("CRD", 3, prev, "2099-01-01T00:00:00Z"))
+    st.execute("UPDATE review_chain_head SET head_hash=%s, chain_seq=3 WHERE chain_id='CRD'", (prev,))
     assert _verify(tc).json()["ok"] is True   # undetectable without a key: logged as a doc gap under QA-045
 
 
@@ -271,7 +328,9 @@ def test_append_only_in_the_database_and_no_mutating_routes(demo):
     _three(tc, sid)
     st = app.state.store
     for sql in ("UPDATE review_signoff SET comment = 'x'", "DELETE FROM review_signoff",
-                "UPDATE review_signoff SET record_hash = prev_hash WHERE chain_seq = 3"):
+                "UPDATE review_signoff SET record_hash = prev_hash WHERE chain_seq = 3",
+                "UPDATE review_chain_head_log SET head_hash = '00' WHERE chain_id = 'CRD'",
+                "DELETE FROM review_chain_head_log WHERE chain_id = 'CRD'"):
         with pytest.raises(Exception, match="append-only"):
             st.execute(sql)
     row = dict(sorted(st.chain_rows("CRD"), key=lambda r: int(r["chain_seq"]))[1])
@@ -285,9 +344,12 @@ def test_append_only_in_the_database_and_no_mutating_routes(demo):
         p, methods = getattr(r, "path", ""), getattr(r, "methods", set()) or set()
         if re.search(r"signoff|/review$|/ack$|/close$|audit", p):
             assert methods <= {"GET", "POST", "HEAD"}, (p, methods)
-    # the Postgres path installs the same guard (row-level BEFORE UPDATE OR DELETE trigger)
+    # Postgres path: same guards; APPEND_ONLY still covers the old tables PLUS the head log (nothing silently dropped)
+    from backend.repos.state import APPEND_ONLY
     src = (ROOT / "app" / "backend" / "repos" / "state.py").read_text()
-    assert "BEFORE UPDATE OR DELETE ON" in src and 'APPEND_ONLY = ("review_signoff",)' in src
+    assert "BEFORE UPDATE OR DELETE ON" in src
+    assert "review_signoff" in APPEND_ONLY and "review_chain_head_log" in APPEND_ONLY
+    assert set(APPEND_ONLY) >= {"review_signoff", "review_chain_head_log"}
 
 
 # ============================================================ identity: 401 outside demo mode
@@ -407,22 +469,28 @@ def test_verify_and_review_acl_by_dam(request, mode):
 
 # ============================================================ demo mode can never reach prod
 def test_demo_mode_never_constructs_prod_clients_even_with_prod_env(tmp_path, monkeypatch):
+    """QA-041: DEMO_MODE + dam_prod must RuntimeError at startup AND never construct prod clients.
+    Before 7c71ff3 this booted sqlite/mock against a prod catalog (seed data risk); now it must refuse
+    before build_state / SqlAnalytics / lakebase_pool. Spy stays — refusal alone is not enough if a
+    future change builds clients then raises."""
     for k, v in {"DAM_CATALOG": "dam_prod", "PGHOST": "prod-lakebase.invalid", "PGDATABASE": "databricks_postgres",
                  "PGUSER": "sp", "DATABRICKS_WAREHOUSE_ID": "prodwh", "DATABRICKS_HOST": "https://prod.invalid"}.items():
         monkeypatch.setenv(k, v)
 
-    def boom(*a, **k):
-        raise AssertionError("demo mode touched a production client")
-    monkeypatch.setattr(app_main, "SqlAnalytics", boom)
-    monkeypatch.setattr(app_main, "lakebase_pool", boom)
+    touched = []
+    def boom(name):
+        def _(*a, **k):
+            touched.append(name)
+            raise AssertionError(f"demo+prod touched {name}")
+        return _
+    monkeypatch.setattr(app_main, "SqlAnalytics", boom("SqlAnalytics"))
+    monkeypatch.setattr(app_main, "lakebase_pool", boom("lakebase_pool"))
+    monkeypatch.setattr(app_main, "build_state", boom("build_state"))
     s = Settings(demo_mode=True, static_dir=str(tmp_path))
     assert s.catalog == "dam_prod"
-    app = app_main.create_app(s)
-    tc = TestClient(app)
-    assert app.state.store.kind == "sqlite" and isinstance(app.state.analytics_factory("tok"), MockAnalytics)
-    for url in ("/api/me", f"/api/instruments/{IID}/incl/surveys", "/api/dams/CRD/audit/signoffs/verify"):
-        assert tc.get(url, headers=_h(ENG)).status_code == 200, url
-    app.state.store._conn.close()
+    with pytest.raises(RuntimeError, match="QA-041"):
+        app_main.create_app(s)
+    assert touched == [], touched  # refused before any client / state construction
 
 
 def test_every_bundle_target_deploys_with_demo_mode_off():
@@ -438,9 +506,9 @@ def test_every_bundle_target_deploys_with_demo_mode_off():
     assert not re.search(r"DEMO_MODE\W+(true|1|yes)", dbx, re.I)
 
 
-@pytest.mark.xfail(strict=True, reason="QA-041: Settings.check() accepts DEMO_MODE=true with DAM_CATALOG=dam_prod")
 def test_settings_refuse_demo_mode_against_the_prod_catalog():
-    with pytest.raises(RuntimeError):
+    # QA-041 closed on 7c71ff3: refused at Settings.check() / create_app before any client.
+    with pytest.raises(RuntimeError, match="QA-041"):
         Settings(demo_mode=True, catalog="dam_prod").check()
 
 
