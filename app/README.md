@@ -73,7 +73,9 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
   (`record_hash` covers the content plus `prev_hash`); appends are serialized (Postgres `SELECT … FOR UPDATE` on
   `review_chain_head`, sqlite `BEGIN IMMEDIATE`, `UNIQUE (chain_id, chain_seq)`). Verify with
   `GET /api/audit/signoffs/verify` (admin) or `GET /api/dams/{dam_id}/audit/signoffs/verify` (engineer+ on the dam):
-  `ok`, or the first broken `chain_seq` and the reason. No key-based signature in-app (lead/FERC decision); nullable
+  `ok`, or the first broken `chain_seq` and the reason. Every new record also hashes `actor_app_role` (the user's
+  raw app roles on the dam, derived server-side, never client-supplied) under `canon_version = 2`; older records
+  verify unchanged as canon 1 (§5a). No key-based signature in-app (lead/FERC decision); nullable
   `signature`/`sig_alg`/`key_id` and a no-op `Signer` hook are kept. PDF/certificate signing of the DSSMR and
   PE-sealed exports is in [docs/BACKLOG.md](docs/BACKLOG.md).
 - **DA contract v1.5 (SCHEMA_CONTRACT §7 items 1–6, 8f, 10):** approval state is read from

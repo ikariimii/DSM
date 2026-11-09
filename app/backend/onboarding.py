@@ -37,6 +37,10 @@ CSV_REQUIRED = ("instrument_id", "structure_id", "instrument_type", "formula_id"
 CSV_FLOATS = ("station_m", "offset_m", "tip_el_m", "top_el_m")
 LIMIT_TYPES = ("magnitude", "rate", "cyclic")      # §4 ref.threshold.limit_type
 DIRECTIONS = ("upper", "lower", "abs")              # §4 ref.threshold.direction
+# ref.threshold NOT NULL columns the go-live publication (and the flag-apply N+1 copy) must carry. The wizard collects
+# them; go-live is refused without them. The app NEVER invents a default (DA follow-up 2, v1.6).
+PUBLISH_REQUIRED = ("dssmp_version_id", "tier", "deadband", "persistence_on", "persistence_off")
+TIER_RE = re.compile(r"^(DESIGN_BASIS|THRESHOLD|AL[1-9][0-9]*)$")  # sql/ddl/02 ref.threshold.tier
 METHOD_FORMULAS = ("VW_PIEZO",)  # linear (G) or polynomial (A, B) per calibration 'method'
 SOURCE_TYPES = ("logger_file", "manual", "api", "survey_file")
 
@@ -243,6 +247,7 @@ def validate(draft: dict, existing_dam_ids: set[str], formula_catalog: list[dict
             out.append(issue("thresholds", "error", f"limit_type must be one of {'|'.join(LIMIT_TYPES)}", ref))
         if t.get("direction") not in DIRECTIONS:
             out.append(issue("thresholds", "error", f"direction must be one of {'|'.join(DIRECTIONS)}", ref))
+        out.extend(issue("thresholds", "error", m, ref) for m in publish_field_problems(t))
         if not _isnum(t.get("value")):
             out.append(issue("thresholds", "error", "limit value must be numeric", ref))
             continue
@@ -333,6 +338,9 @@ def golive_payload(draft: dict) -> dict:
                              "approved_by": c.get("approved_by"), "approved_at": c.get("approved_at")})
     thresholds = []
     for n, t in enumerate(map(_canonical_threshold, draft.get("thresholds") or []), start=1):
+        bad = publish_field_problems(t)
+        if bad:  # validate() already refuses go-live on these; never publish a defaulted value
+            raise ValueError(f"threshold {t.get('threshold_id') or rule_key(t)}: {'; '.join(bad)}")
         inst = next(i for i in instruments if i["instrument_id"] == t["instrument_id"])
         # canonical ref.threshold columns (SCHEMA_CONTRACT v1.1 §4)
         thresholds.append({"threshold_id": t.get("threshold_id") or f"{t['instrument_id']}-T{t['level']}-{n}",
@@ -343,6 +351,10 @@ def golive_payload(draft: dict) -> dict:
                            "effective_from": t.get("effective_from") or datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z"),
                            "effective_to": None, "is_current": True, "pfm_id": t.get("pfm_id"),
                            "required_actions": t.get("required_actions"),
+                           # NOT NULL ref.threshold columns, exactly as entered (validate() refuses go-live without them)
+                           "dssmp_version_id": str(t["dssmp_version_id"]).strip(), "tier": str(t["tier"]).strip(),
+                           "deadband": _f(t["deadband"]), "persistence_on": int(t["persistence_on"]),
+                           "persistence_off": int(t["persistence_off"]),
                            # ref.threshold.cdse_ack_required (DA-owned, NOT NULL DEFAULT false)
                            "cdse_ack_required": t.get("cdse_ack_required") is True})
     return {"dam_id": did, "sites": [site], "structures": structures, "instruments": instruments,
@@ -372,6 +384,35 @@ def cdse_flag_changes(old_rules: list[dict] | None, new_rules: list[dict] | None
     for k, was in old.items():
         if was and k not in {rule_key(t) for t in new_rules or [] if isinstance(t, dict)}:
             out.append({"rule": k, "from": True, "to": None})   # flagged rule removed from the draft
+    return out
+
+
+def _posint(x) -> bool:
+    if isinstance(x, bool) or not _isnum(x):
+        return False
+    return float(x) == int(float(x)) and int(float(x)) >= 1
+
+
+def publish_field_problems(t: dict) -> list[str]:
+    """Problems with the ref.threshold NOT NULL publication columns of one rule (empty = publishable). Units: deadband
+    in the rule's own unit, persistence in consecutive readings."""
+    unit = t.get("unit") or "rule unit"
+    out = []
+    if not str(t.get("dssmp_version_id") or "").strip():
+        out.append("dssmp_version_id is required (the DSSMP version this limit is set under)")
+    if not str(t.get("tier") or "").strip():
+        out.append("tier is required (DESIGN_BASIS, THRESHOLD or AL1..ALn)")
+    elif not TIER_RE.match(str(t["tier"]).strip()):
+        out.append(f"tier {t['tier']!r} must be DESIGN_BASIS, THRESHOLD or AL1..ALn")
+    if t.get("deadband") in (None, ""):
+        out.append(f"deadband ({unit}) is required")
+    elif not _isnum(t["deadband"]) or float(t["deadband"]) < 0:
+        out.append(f"deadband ({unit}) must be a number >= 0")
+    for k, what in (("persistence_on", "to raise"), ("persistence_off", "to clear")):
+        if t.get(k) in (None, ""):
+            out.append(f"{k} (consecutive readings {what}) is required")
+        elif not _posint(t[k]):
+            out.append(f"{k} (consecutive readings {what}) must be a whole number >= 1")
     return out
 
 

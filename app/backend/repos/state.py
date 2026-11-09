@@ -66,7 +66,9 @@ DDL = [
         action_type TEXT NOT NULL, reviewer_email TEXT, reviewer_sub TEXT,
         original_value TEXT NOT NULL, corrected_value TEXT NOT NULL,
         chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL, prev_hash TEXT NOT NULL, record_hash TEXT NOT NULL,
-        signature TEXT, sig_alg TEXT, key_id TEXT)""",
+        signature TEXT, sig_alg TEXT, key_id TEXT, actor_app_role TEXT, canon_version INTEGER,
+        CONSTRAINT ck_review_signoff_canon CHECK (canon_version IS NULL OR (canon_version = 2
+            AND actor_app_role IS NOT NULL AND length(trim(actor_app_role)) > 0)))""",
     # Live-dam alarm-rule flag edits (cdse_ack_required): proposals (workflow state; the chained review_signoff
     # records are the evidence) and the outbox the DA publish job turns into a NEW ref.threshold version.
     """CREATE TABLE IF NOT EXISTS {s}alarm_rule_flag_proposal (
@@ -91,7 +93,10 @@ APPEND_ONLY = ("review_signoff",)
 INIT_LOCK_KEY = 4702045
 # columns the v2 chain adds to a review_signoff table created earlier by lakebase/001 (v1 columns)
 SIGNOFF_V2_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id",
-                   "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
+                   "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role",
+                   "canon_version")
+# canon 2 (audit_chain.CANON_VERSION): actor_app_role / canon_version, NULL on pre-v2 (canon-1) records.
+_INT_SIGNOFF_COLS = ("chain_seq", "canon_version")
 
 
 class StateStore:
@@ -200,11 +205,18 @@ class StateStore:
             have = {r["name"] for r in self.execute("PRAGMA table_info(review_signoff)")}
             for col in SIGNOFF_V2_COLS:
                 if col not in have:  # pragma: no cover - only a pre-v2 local sqlite file
-                    self.execute(f"ALTER TABLE review_signoff ADD COLUMN {col} {'INTEGER' if col == 'chain_seq' else 'TEXT'}")
+                    self.execute(f"ALTER TABLE review_signoff ADD COLUMN {col} {'INTEGER' if col in _INT_SIGNOFF_COLS else 'TEXT'}")
         else:
             for col in SIGNOFF_V2_COLS:
                 self.execute(f"ALTER TABLE {{s}}review_signoff ADD COLUMN IF NOT EXISTS {col} "
-                             f"{'BIGINT' if col == 'chain_seq' else 'TEXT'}")
+                             f"{'BIGINT' if col == 'chain_seq' else 'INTEGER' if col == 'canon_version' else 'TEXT'}")
+            # canon-2 shape check on a pre-existing table (CREATE TABLE above carries it for new ones).
+            if not self.execute("SELECT 1 FROM pg_constraint WHERE conname = 'ck_review_signoff_canon' "
+                                "AND conrelid = to_regclass(%s)", (f'"{self.schema}".review_signoff' if self.schema
+                                                                   else "review_signoff",)):
+                self.execute("ALTER TABLE {s}review_signoff ADD CONSTRAINT ck_review_signoff_canon CHECK "
+                             "(canon_version IS NULL OR (canon_version = 2 AND actor_app_role IS NOT NULL "
+                             "AND length(trim(actor_app_role)) > 0))")
         self.execute("CREATE UNIQUE INDEX IF NOT EXISTS review_signoff_chain_seq ON {s}review_signoff (chain_id, chain_seq)")
         self._append_only_guards()
 
@@ -475,7 +487,7 @@ class StateStore:
     SIGNOFF_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
                     "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
                     "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
-                    "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
+                    "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role", "canon_version")
 
     def append_chained(self, chain_id: str, genesis: str, finalize, also=None) -> dict:
         """Append one record to `chain_id` atomically. Under the chain-head lock (Postgres: SELECT ... FOR UPDATE on

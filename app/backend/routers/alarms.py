@@ -207,7 +207,7 @@ def ack(event_id: str, request: Request, body: AckBody | None = None, c: Ctx = D
     base = _chain_base(ev, prior, "alarm_ack", "acknowledge", "acknowledged", rationale, c, request, an)
     out = {}
     try:  # the state change and its chained record commit together (or not at all)
-        row = sg.append(st, request, base, also=lambda q: out.update(st.acknowledge(event_id, ev["dam_id"], c.email, q)))
+        row = sg.append(st, request, base, also=lambda q: out.update(st.acknowledge(event_id, ev["dam_id"], c.email, q)), c=c, an=an)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     st.add_comment(event_id, ev["dam_id"], c.email, rationale)
@@ -228,7 +228,7 @@ def close(event_id: str, body: CloseBody, request: Request, c: Ctx = Depends(ctx
     out = {}
     try:
         row = sg.append(st, request, base,
-                        also=lambda q: out.update(st.close_alarm(event_id, ev["dam_id"], c.email, rationale, q)))
+                        also=lambda q: out.update(st.close_alarm(event_id, ev["dam_id"], c.email, rationale, q)), c=c, an=an)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     st.audit(c.email, "alarm_close", ev["dam_id"], event_id, {"reason": rationale, "chain_seq": row["chain_seq"],

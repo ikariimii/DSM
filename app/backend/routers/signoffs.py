@@ -69,8 +69,28 @@ def review_level(c: Ctx, dam_id: str, an=None) -> str:
     return ac.ROLE_LEVEL["admin" if c.is_admin else c.role(dam_id)]
 
 
-def append(st, request: Request, base: dict, also=None) -> dict:
+def actor_app_role(c: Ctx, dam_id: str, an) -> str:
+    """The acting user's RAW app roles on this dam at the time of the action, derived server-side from the stored
+    grants (never from the request body): 'admin' for a platform admin, their stored per-dam role (viewer / engineer /
+    dso / dam_admin) and 'cdse' when they are the dam's named CDSE (is_cdse; fails closed). Sorted, comma-joined."""
+    roles = set()
+    if c.is_admin:
+        roles.add("admin")
+    own = (c.roles or {}).get(dam_id)
+    if own in ac.ACTOR_ROLES:
+        roles.add(own)
+    if is_cdse(c, dam_id, an):
+        roles.add("cdse")
+    if not roles:  # pragma: no cover - every chained action requires dam access first
+        raise HTTPException(403, f"{c.email} has no app role on dam {dam_id}")
+    return ",".join(sorted(roles))
+
+
+def append(st, request: Request, base: dict, also=None, *, c: Ctx, an) -> dict:
+    """Append one canon-2 record: actor_app_role and canon_version are set HERE from the server-side identity,
+    overriding anything in `base` (which is itself built server-side; request bodies never carry them)."""
     signer = getattr(request.app.state, "signer", None) or ac.NoopSigner()
+    base = {**base, ac.ACTOR_ROLE_FIELD: actor_app_role(c, base["dam_id"], an), ac.CANON_FIELD: ac.CANON_VERSION}
     return st.append_chained(base["dam_id"], ac.GENESIS, ac.finalizer(base, signer), also)
 
 

@@ -189,7 +189,7 @@ def _review(rec: dict | None, label: str, record_id: str, body: BiasReviewBody, 
                     sg.now_utc(), action_type="bias_review" if is_bias else "data_correction_review",
                     review_level=sg.review_level(c, inst["dam_id"], an), reviewer_email=who["reviewer_email"],
                     reviewer_sub=who["reviewer_sub"])
-    row = sg.append(st, request, base)
+    row = sg.append(st, request, base, c=c, an=an)
     st.audit(c.email, "bias_proposal_review" if is_bias else "data_correction_review", inst["dam_id"], record_id,
              {"review_id": row["review_id"], "decision": body.decision, "signature_hash": row["signature_hash"],
               "chain_seq": row["chain_seq"],
