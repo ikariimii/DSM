@@ -109,6 +109,10 @@ vocabulary; `silver.incl_reduced` + `depth_reference`, `baseline_survey_id`, `co
 Run the pre-check queries in `sql/migrations/v1_5_001_contract.sql`, then the migration (idempotent; SQL warehouse with
 SQL scripting, `catalog` parameter) **before** `dam_uc_setup`. Fresh installs skip it. UNVERIFIED (VERIFICATION MIGRATION-1).
 
+## Upgrading to contract v1.6
+After v1.5, run `sql/migrations/v1_6_001_audit_chain.sql` (idempotent; pre-check in its header) **before**
+`dam_uc_setup`. Never re-run v1_5_001 after it (if you did, re-run v1_6_001). UNVERIFIED (VERIFICATION MIGRATION-2).
+
 ## Deploy (NOT RUN — needs user approval)
 ```
 databricks bundle validate -t dev

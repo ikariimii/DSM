@@ -75,6 +75,22 @@ Ownership rules: SCHEMA_CONTRACT §7.2. Lakebase is never the system of record f
 App-originated or manual non-ACK alarm transitions (if the app ever writes one) must fill `value`, `metric_value` and `reading_id` (CHECK `ck_alarm_transition_value`, SCHEMA_CONTRACT §4 v1.5).
 SUSPECT is a review ranking, not a rejection: show both PROPOSED and SUSPECT_CROSSCHECK proposals, ranked AGREE first.
 
+### 4.2 Review and audit-chain endpoints (v1.6; app SCHEMA_CONTRACT §5a, §7 10e; paths from `app/backend/routers/*.py`)
+| Method + path | Who | Request | Response / errors |
+|---|---|---|---|
+| `POST /api/instruments/{instrument_id}/incl/surveys/{survey_id}/corrections/{record_id}/review` | engineer+ on the dam; reviewer ≠ author | `{decision: "approve"\|"reject", rationale: 1..8000 chars, reviewer_pe_license?}` | appends one chained `review_signoff` (`action_type='data_correction_review'`, `subject_type='incl_correction'`); 422 bad decision / empty rationale, 403 self-review, 409 record not `proposed` or integrity error, 400 not an inclinometer, 404 unknown record |
+| `POST /api/instruments/{instrument_id}/incl/surveys/{survey_id}/bias-proposals/{record_id}/review` | same | same | same, `action_type='bias_review'` |
+| `POST /api/alarms/{event_id}/ack`, `/close` | engineer+ | (app schema) | chained `review_signoff` `alarm_event` / `acknowledge`\|`close` (`alarm_ack` / `alarm_close`) |
+| `GET /api/audit/signoffs/verify` | platform admin (`require_admin`) | – | `{ok, chains: [chain], genesis, scope: "per-dam", verified_utc}` |
+| `GET /api/dams/{dam_id}/audit/signoffs/verify` | engineer+ on that dam (dam ACL) | – | `chain` + `genesis`, `scope`, `verified_utc` |
+
+`chain` = `{chain_id, records, ok, first_broken_seq, reason, detail, signed_records}` plus `head_seq`, `head_hash` when
+`ok`; `reason` ∈ `gap | prev_mismatch | hash_mismatch | signature_invalid | head_missing | head_mismatch`.
+Discrepancies (flagged to the App Developer): app §7 10e lists `POST /api/instruments/{id}/incl/corrections/{record_id}/review`
+and the lead's request named `/api/dams/{dam_id}/incl/corrections/{record_id}/review`; neither exists in the router,
+which has the `…/incl/surveys/{survey_id}/corrections/{record_id}/review` path above. §7 10e names the record count `n`;
+the code returns `records`. The UC copy can be re-verified without the app (`dam_safety.audit_chain`, SCHEMA_CONTRACT §5.5.2).
+
 ## 5. Change rule
 Renames/removals → new contract version + App Developer and QA sign-off. Additive nullable columns → allowed,
 announced in SCHEMA_CONTRACT's change list.

@@ -6,28 +6,62 @@ USE CATALOG IDENTIFIER(:catalog);
 CREATE TABLE IF NOT EXISTS audit.review_record (
   review_id           STRING NOT NULL,
   dam_id              STRING NOT NULL,
-  subject_type        STRING NOT NULL COMMENT 'reading | exceedance | dssmr | threshold | commentary | rule_finding | incl_correction',
+  subject_type        STRING NOT NULL COMMENT 'reading | exceedance | dssmr | threshold | commentary | rule_finding | incl_correction | alarm_event',
   subject_id          STRING NOT NULL,
   review_level        STRING NOT NULL COMMENT 'technician | engineer | CDSE | IC',
-  decision            STRING NOT NULL COMMENT 'incl_correction: approve | reject (lowercase)',
-  comment             STRING COMMENT 'incl_correction: the reviewer rationale (required)',
+  decision            STRING NOT NULL COMMENT 'incl_correction: approve | reject; alarm_event: acknowledge | close (lowercase)',
+  comment             STRING COMMENT 'incl_correction / alarm_event: the reviewer rationale (required, non-blank)',
   reviewer_id         STRING NOT NULL,
   reviewer_pe_license STRING,
   signed_ts           TIMESTAMP NOT NULL,
   signature_hash      STRING NOT NULL COMMENT 'sha256 of the reviewed content/artifact; incl_correction: SCHEMA_CONTRACT §5.5 canonical record',
   source              STRING COMMENT 'APP (Lakebase extract)',
+  -- v1.6 (QA-039 v2, App Dev §7 9b): per-dam hash chain of reviewer actions (nullable: rows that are not app
+  -- reviewer actions carry none, and ck_review_record_chain requires them whenever action_type is set).
+  action_type         STRING COMMENT 'bias_review | data_correction_review | alarm_ack | alarm_close',
+  reviewer_email      STRING COMMENT 'X-Forwarded-Email at signing',
+  reviewer_sub        STRING COMMENT 'unverified sub claim of the user token (identity label only)',
+  original_value      STRING COMMENT 'canonical JSON; the value before the action, never overwritten',
+  corrected_value     STRING COMMENT 'canonical JSON; the proposed / resulting value',
+  chain_id            STRING COMMENT 'per-dam chain (= dam_id)',
+  chain_seq           BIGINT COMMENT '1-based position in chain_id',
+  prev_hash           STRING COMMENT 'record_hash of chain_seq-1; GENESIS = 64 x 0',
+  record_hash         STRING COMMENT 'sha256 canonical JSON of all columns except record_hash, signature, sig_alg, key_id (SCHEMA_CONTRACT §5.5.2)',
+  signature           STRING COMMENT 'reserved (future key-based signature), NULL',
+  sig_alg             STRING,
+  key_id              STRING,
   CONSTRAINT pk_review PRIMARY KEY (review_id)
 ) TBLPROPERTIES (delta.appendOnly = true);
 
--- v1.5 (QA-039): subject_type / decision domain. 'incl_correction' rows come from the app's Lakebase
--- review_signoff (job dam_lakebase_extract) with decision 'approve' or 'reject' (lowercase) and a rationale.
--- The pre-v1.5 uppercase decisions of the other subject types stay allowed. Migration for an existing table:
--- sql/migrations/v1_5_001_contract.sql.
+-- v1.5 (QA-039) / v1.6 (QA-039 v2): subject_type / decision domain. 'incl_correction' rows (decision 'approve' or
+-- 'reject') and 'alarm_event' rows (decision 'acknowledge' or 'close') come from the app's Lakebase review_signoff
+-- (job dam_lakebase_extract), lowercase, with a non-blank rationale in comment. The pre-v1.5 uppercase decisions of
+-- the other subject types stay allowed. Migrations for an existing table: sql/migrations/v1_5_001_contract.sql,
+-- then sql/migrations/v1_6_001_audit_chain.sql.
 ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_subject_decision;
 ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_subject_decision CHECK (
-  subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction')
+  subject_type IN ('reading', 'exceedance', 'dssmr', 'threshold', 'commentary', 'rule_finding', 'incl_correction',
+                   'alarm_event')
   AND (subject_type <> 'incl_correction'
-       OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
+       OR (decision IN ('approve', 'reject') AND comment IS NOT NULL AND length(trim(comment)) > 0))
+  AND (subject_type <> 'alarm_event'
+       OR (decision IN ('acknowledge', 'close') AND comment IS NOT NULL AND length(trim(comment)) > 0)));
+
+-- v1.6 (QA-039 v2): a chained reviewer action carries every required chain field (signature, sig_alg, key_id,
+-- reviewer_email and reviewer_sub stay nullable), its action matches its subject and decision, the chain is the
+-- dam's, and every alarm_event record is a chained action. Rows with action_type NULL (pre-v1.6 incl_correction
+-- extracts, other subject types) are not affected.
+ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_chain;
+ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
+  (subject_type <> 'alarm_event' OR action_type IS NOT NULL)
+  AND (action_type IS NULL OR (
+    action_type IN ('bias_review', 'data_correction_review', 'alarm_ack', 'alarm_close')
+    AND original_value IS NOT NULL AND corrected_value IS NOT NULL AND chain_id IS NOT NULL
+    AND chain_seq IS NOT NULL AND chain_seq >= 1 AND prev_hash IS NOT NULL AND record_hash IS NOT NULL
+    AND chain_id = dam_id
+    AND ((action_type IN ('bias_review', 'data_correction_review') AND subject_type = 'incl_correction')
+         OR (action_type = 'alarm_ack' AND subject_type = 'alarm_event' AND decision = 'acknowledge')
+         OR (action_type = 'alarm_close' AND subject_type = 'alarm_event' AND decision = 'close')))));
 
 -- Generic event log: alarm transitions, acks, threshold/calibration changes, logins of note.
 CREATE TABLE IF NOT EXISTS audit.event_log (

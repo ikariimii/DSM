@@ -19,6 +19,7 @@ import _common  # noqa: F401
 from _common import args, spark as get_spark
 
 from dam_safety.alarms import evaluate_sensor_batch
+from dam_safety.inclinometer.batch import installation_version_at
 from dam_safety.spark.engine import fq
 
 a = args(("lookback_days", "7"))
@@ -62,7 +63,32 @@ for r in spark.sql(f"""
     if tag not in applied:
         acks[r.sensor_id].append({"ts": r.event_ts, "actor": r.actor, "comment": tag})
 
-dam_of = {r.sensor_id: r.dam_id for r in spark.table(fq(C, "ref", "sensor")).select("sensor_id", "dam_id").collect()}
+sens_rows = spark.table(fq(C, "ref", "sensor")).select("sensor_id", "dam_id", "instrument_id").collect()
+dam_of = {r.sensor_id: r.dam_id for r in sens_rows}
+# v1.6 (app SCHEMA_CONTRACT §7 10d): inclinometer alarms carry installation_version = effective_from of the
+# ref.incl_installation row valid at the reading's ts (half-open; same rule as the reduction, batch.installation_row_at).
+# A sensor is an inclinometer sensor when its instrument has ref.incl_installation rows. No covering row -> NULL
+# (the app then withholds the value, LINEAGE_INCOMPLETE) and an issue is logged; overlapping rows -> logged, NULL.
+inst_of = {r.sensor_id: r.instrument_id for r in sens_rows}
+incl_rows = defaultdict(list)
+for r in spark.table(fq(C, "ref", "incl_installation")).select("instrument_id", "effective_from", "effective_to").collect():
+    incl_rows[r.instrument_id].append(r.asDict())
+
+
+def inst_version(sid, ts, log):
+    rows = incl_rows.get(inst_of.get(sid))
+    if not rows:
+        return None
+    try:
+        v = installation_version_at(rows, ts)
+    except ValueError as e:
+        log.append({"sensor_id": sid, "issue": f"installation_version: {e}"})
+        return None
+    if v is None:
+        log.append({"sensor_id": sid, "issue": f"installation_version: no ref.incl_installation row valid at {ts}"})
+    return v
+
+
 tr_rows, ex_rows, st_rows, log = [], [], [], []
 for sid in sensors:
     rows = readings.get(sid, [])
@@ -81,10 +107,11 @@ for sid in sensors:
         tid = hashlib.sha256(f"{t.key}|{t.ts}|{t.event}|{t.to_state}|{t.comment}".encode()).hexdigest()
         src = by_ts.get(t.ts, {}) if t.event != "ACK" else {}
         rid = src.get("reading_id")
+        iv = inst_version(sid, t.ts, log) if t.event != "ACK" else None
         tr_rows.append((tid, t.key, dam_of[sid], sid, t.ts, t.event, t.from_state, t.to_state, t.value, t.metric_value,
                         t.threshold_id, t.threshold_version, t.actor, t.comment, rid, run_id, now,
                         src.get("calib_id"), src.get("cal_version"), src.get("formula_id"), src.get("formula_version"),
-                        src.get("recompute_batch_id"), src.get("qa_flag")))
+                        src.get("recompute_batch_id"), src.get("qa_flag"), iv))
         if t.event in ("RAISE", "ESCALATE") and rid:
             spec = next(s for s in ok_specs if s["threshold_id"] == t.threshold_id)
             ex_rows.append((f"ex-{tid[:32]}", dam_of[sid], rid, tid, t.threshold_id, t.threshold_version, t.ts,

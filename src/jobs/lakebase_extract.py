@@ -3,7 +3,8 @@
 * manual_reading -> CSV file in the landing volume (/Volumes/<cat>/raw/landing/<dam>/readings/),
   so manual readings take exactly the same Auto Loader -> LDP -> reduce path as ADAS data
   (one validation path; KB rec 'single ingestion path').
-* review_signoff (insert-only, column-compatible) -> audit.review_record (v1.5, QA-039): one UC row per sign-off,
+* review_signoff (insert-only, column-compatible) -> audit.review_record (v1.5, QA-039; v1.6 all 24 columns incl. the
+  per-dam hash chain, in chain_id, chain_seq order): one UC row per sign-off,
   deduplicated on review_id, signature_hash copied unchanged (the reduction job re-verifies it), source
   'APP:lakebase:review_signoff'. This is the approval the reduction job requires for an applied correction.
 * Other immutable app tables (exceedance_status, audit_log, alarm_comment, pfm_review, inspection_note)
@@ -56,9 +57,20 @@ def manual_rows_to_csv(rows):
     return {k: v.getvalue() for k, v in out.items()}
 
 
+# v1.6 (QA-039 v2, app SCHEMA_CONTRACT §7 10b): the 12 per-dam hash-chain columns, so the UC copy can be re-verified
+# (dam_safety.audit_chain.verify_records). 12 -> 24 columns, same order as sql/ddl/08_audit.sql.
+CHAIN_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id",
+              "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
 REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
-                      "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "source")
+                      "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "source", *CHAIN_COLS)
+# NOT NULL on extract (mirrors the DDL NOT NULLs and ck_review_record_chain). Nullable: comment (the CHECKs require it
+# for incl_correction / alarm_event), reviewer_pe_license, source (set here), reviewer_email, reviewer_sub,
+# signature, sig_alg, key_id.
+REVIEW_REQUIRED = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "reviewer_id",
+                   "signed_ts", "signature_hash", "action_type", "original_value", "corrected_value", "chain_id",
+                   "chain_seq", "prev_hash", "record_hash")
 REVIEW_SOURCE = "APP:lakebase:review_signoff"
+REVIEW_ORDER_SQL = "ORDER BY chain_id, chain_seq"
 
 
 def _utc(ts):
@@ -67,14 +79,15 @@ def _utc(ts):
 
 
 def review_rows_to_records(rows, known_ids=()):
-    """Lakebase review_signoff rows -> audit.review_record rows (v1.5, QA-039). Skips review_ids already in UC
-    (at-least-once re-extract) and duplicates within the batch. signed_ts text -> UTC TIMESTAMP: the signature's
-    canonical form normalises timestamps, so the hash still verifies (tests/test_review_signature.py). A row missing
-    a NOT NULL column raises instead of being dropped silently."""
+    """Lakebase review_signoff rows -> audit.review_record rows (v1.5 QA-039, v1.6 chain columns). Skips review_ids
+    already in UC (at-least-once re-extract) and duplicates within the batch. signed_ts text -> UTC TIMESTAMP: the
+    canonical form normalises timestamps, so signature_hash and record_hash still verify (tests/test_review_signature.py,
+    tests/test_audit_chain.py). A row missing a REVIEW_REQUIRED column raises instead of being dropped silently.
+    Output is in chain order (chain_id, chain_seq). No approval rule runs here: corrections.approval_problem is for
+    incl_correction rows only and is applied by the reduction job, never to alarm_event rows."""
     seen, out = set(known_ids), []
     for r in rows:
-        missing = [c for c in REVIEW_RECORD_COLS if c not in ("comment", "reviewer_pe_license", "source")
-                   and r.get(c) in (None, "")]
+        missing = [c for c in REVIEW_REQUIRED if r.get(c) in (None, "")]
         if missing:
             raise ValueError(f"review_signoff {r.get('review_id')}: missing {missing}")
         if r["review_id"] in seen:
@@ -82,8 +95,10 @@ def review_rows_to_records(rows, known_ids=()):
         seen.add(r["review_id"])
         rec = {c: r.get(c) for c in REVIEW_RECORD_COLS}
         rec["signed_ts"] = _utc(r["signed_ts"])
+        rec["chain_seq"] = int(r["chain_seq"])
         rec["source"] = REVIEW_SOURCE
         out.append(rec)
+    out.sort(key=lambda x: (str(x["chain_id"]), x["chain_seq"]))
     return out
 
 
@@ -179,7 +194,7 @@ def main():
 
         # review_signoff -> audit.review_record (>= watermark: app timestamps are second precision; dedup on review_id)
         wr = wm("review_signoff")
-        cur.execute("SELECT * FROM review_signoff WHERE signed_ts >= %s ORDER BY signed_ts, review_id",
+        cur.execute("SELECT * FROM review_signoff WHERE signed_ts >= %s " + REVIEW_ORDER_SQL,
                     (wr["last_ts"] or "",))
         rs = cur.fetchall()
         if rs:

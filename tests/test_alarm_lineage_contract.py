@@ -157,3 +157,34 @@ def test_v15_alarm_episode_carries_erroneous_mark_with_who_and_when():
     assert "LEFT JOIN mk ON mk.reading_id = g.reading_id" in ep                                 # never drops episodes
     assert "ops.reading " not in ep.replace("ops.reading_erroneous_mark", "")
     assert {"marked_by", "marked_ts", "erroneous_reason"} <= set(_cols("07_ops.sql", "ops.reading_erroneous_mark"))
+
+
+# ---- v1.6 (app SCHEMA_CONTRACT §7 10d): inclinometer installation_version on alarms ----
+def test_v16_installation_version_column_view_and_evaluator():
+    cols = _cols("07_ops.sql", "ops.alarm_transition")
+    assert cols[-1] == "installation_version"                     # appended: positional tuple + additive migration
+    v = open(os.path.join(ROOT, "sql", "ddl", "11_gold_views.sql")).read()
+    ev = v[v.index("CREATE OR REPLACE VIEW ops.alarm_event"):]
+    assert "installation_version" in ev[:ev.index(";")]
+    ep = v[v.index("CREATE OR REPLACE VIEW ops.alarm_episode"):]
+    ep = ep[:ep.index(";")]
+    assert "max_by(installation_version, CASE WHEN reading_id IS NOT NULL THEN event_ts END) AS installation_version" in ep
+    src = open(os.path.join(ROOT, "src", "jobs", "alarm_evaluator.py")).read()
+    assert 'src.get("qa_flag"), iv))' in src and 'inst_version(sid, t.ts, log) if t.event != "ACK" else None' in src
+    assert '"ref", "incl_installation"' in src
+
+
+def test_v16_installation_version_at_is_the_row_valid_at_reading_time():
+    import sys
+    from datetime import datetime
+    import pytest
+    sys.path.insert(0, os.path.join(ROOT, "src"))
+    from dam_safety.inclinometer.batch import installation_version_at
+    rows = [dict(instrument_id="I1", effective_from="2025-01-01T00:00:00Z", effective_to="2026-01-01T00:00:00Z"),
+            dict(instrument_id="I1", effective_from="2026-01-01T00:00:00Z", effective_to=None)]
+    assert installation_version_at(rows, datetime(2025, 6, 1)) == datetime(2025, 1, 1)
+    assert installation_version_at(rows, "2026-01-01T00:00:00Z") == datetime(2026, 1, 1)   # half-open
+    assert installation_version_at(rows, "2024-12-31T23:59:59Z") is None
+    with pytest.raises(ValueError):
+        installation_version_at(rows + [dict(instrument_id="I1", effective_from="2025-06-01", effective_to=None)],
+                                "2026-02-01")

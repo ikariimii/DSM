@@ -106,8 +106,13 @@ def test_chain_record_carries_every_review_record_column():
     except Exception as e:                                  # pragma: no cover - DA module needs Spark
         pytest.skip(f"lakebase_extract not importable here: {e}")
     rec = {"record_id": "P1", "parameter_name": "c", "auto_value": -6.0, "before_value": None}
-    row = so.build(rec, "CRD", "approve", "ok", "rev", None, "2026-11-02T00:00:00Z")
+    base = so.build(rec, "CRD", "approve", "ok", "rev", None, "2026-11-02T00:00:00Z")
+    # v1.6: the extract carries all 24 columns (incl. the chain columns the finalizer adds under the chain lock)
+    row = ac.finalizer(base)(1, ac.GENESIS)
+    assert len(cols) == 24 and set(ext.CHAIN_COLS) <= set(cols)
     for c in cols:
         if c != "source":
             assert c in row
-            assert c in ac.CHAIN_FIELDS
+            # covered by record_hash, except the hash itself and the (optional) signature columns
+            assert (c in ac.HASH_EXCLUDED) != (c in ac.CHAIN_FIELDS)
+    assert set(ext.REVIEW_REQUIRED) <= {c for c in cols if row.get(c) not in (None, "")}

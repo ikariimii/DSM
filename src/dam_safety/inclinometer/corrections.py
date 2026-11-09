@@ -200,7 +200,8 @@ def effective_records(rows, review_rows):
       survey is reported. Rows that fail CorrectionRecord validation raise to the caller as before."""
     rows = list(rows)
     by_id = {r.get("record_id"): r for r in rows}
-    reviews = {r.get("review_id"): r for r in (review_rows or ())}
+    # v1.6: only incl_correction review rows are approvals; alarm_event (ack/close) records never reach approval_problem
+    reviews = {r.get("review_id"): r for r in (review_rows or ()) if r.get("subject_type") == REVIEW_SUBJECT_TYPE}
     newer = {r["supersedes"]: r["record_id"] for r in rows if r.get("supersedes")}
     out, problems = [], {}
     for r in rows:

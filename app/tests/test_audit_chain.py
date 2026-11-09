@@ -528,3 +528,18 @@ def test_state_race_inside_transaction_rolls_back(c, monkeypatch):
     assert c.post(f"/api/alarms/{eid}/close", user=ADMIN, json={"reason": "again"}).status_code == 409
     assert [r["action_type"] for r in st.chain_rows("CRD")] == ["alarm_ack", "alarm_close"]
     assert c.get("/api/dams/CRD/audit/signoffs/verify", user=ENG).json()["ok"]
+
+
+# ------------------------------------------------------------------ v1.6 interop with the engine verifier
+def test_app_hash_and_verify_match_engine_v16_vector():
+    """The DA's tests/fixtures/review_chain_vector.json (v1.6, engine dam_safety.audit_chain) was generated with this
+    module; the QA-045a signature rules must not change record_hash or the no-op verification of an unsigned chain."""
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "review_chain_vector.json"
+    vec = json.loads(path.read_text(encoding="utf-8"))
+    assert set(ac.CHAIN_FIELDS) | set(ac.HASH_EXCLUDED) == set(vec["rows"][0])
+    for r in vec["rows"]:
+        assert ac.record_hash(r) == r["record_hash"], r["review_id"]
+    assert ac.verify_chain(vec["rows"], vec["head"])["ok"]
+    v = ac.verify_chain(vec["rows"], vec["head"], _FakeSigner())  # unsigned UC rows never pass a real signer
+    assert (v["ok"], v["first_broken_seq"], v["reason"]) == (False, 1, "signature_missing")
