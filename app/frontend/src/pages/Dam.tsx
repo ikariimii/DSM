@@ -25,6 +25,7 @@ export default function Dam({ me }: { me: Me }) {
         <Link to={`/dams/${damId}/dssmp`}>DSSMP / PFMs</Link>
         <Link to={`/dams/${damId}/reports`}>DSSMR reports</Link>
         <Link to={`/alarms?dam_id=${damId}`}>Alarms</Link>
+        <Link to={`/dams/${damId}/alarm-rules`}>Alarm rules</Link>
       </div>
       <Card title="Structures">
         <table><thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Stations (m)</th></tr></thead><tbody>

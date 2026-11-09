@@ -84,8 +84,22 @@ class MockAnalytics:
         return copy.deepcopy(self.d["formulas"])
 
     def thresholds(self, dam_id, instrument_id=None):
-        return [ct.threshold(t) for t in self.d["thresholds"] if t["dam_id"] == dam_id
-                and (instrument_id is None or t["instrument_id"] == instrument_id)]
+        """Current rule rows: the highest threshold_version per threshold_id (SCD2; like SqlAnalytics' is_current).
+        Older versions stay in the dataset unchanged (a live flag edit appends a version, never edits one)."""
+        latest: dict[str, dict] = {}
+        for t in self.d["thresholds"]:
+            if t["dam_id"] != dam_id or (instrument_id is not None and t["instrument_id"] != instrument_id):
+                continue
+            if t.get("is_current", True) is False:
+                continue
+            cur = latest.get(t["threshold_id"])
+            if cur is None or int(t.get("threshold_version") or 1) > int(cur.get("threshold_version") or 1):
+                latest[t["threshold_id"]] = t
+        return [ct.threshold(copy.deepcopy(t)) for t in latest.values()]
+
+    def threshold_versions(self, threshold_id):
+        """Every stored version of one rule (demo/test inspection)."""
+        return [copy.deepcopy(t) for t in self.d["thresholds"] if t["threshold_id"] == threshold_id]
 
     def latest_readings(self, dam_id):
         ids = {i["instrument_id"] for i in self.d["instruments"] if i["dam_id"] == dam_id}
@@ -173,6 +187,10 @@ class MockAnalytics:
 
     def pfms(self, dam_id):
         return [ct.pfm(copy.deepcopy(p)) for p in self.d["pfms"] if p["dam_id"] == dam_id]
+
+    # demo-only: a live alarm-rule flag edit appends the new ref.threshold version immediately (the DA job in prod)
+    def apply_threshold_version(self, payload: dict) -> None:
+        self.d["thresholds"].append(copy.deepcopy(payload["insert"]))
 
     # demo-only: go-live adds the onboarded project to the in-memory dataset
     def apply_publication(self, payload: dict) -> None:

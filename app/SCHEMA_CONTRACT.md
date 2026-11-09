@@ -83,7 +83,9 @@ without issues, and its QC flag is not BAD/MISSING. Statuses: `VERIFIED`, `UNVER
 
 ## 4. Lakebase (`dam_app`, service principal)
 Created by `backend/repos/state.py` (mirrored in `../lakebase/001_app_schema.sql`): `app_user, dam_role, alarm_ack,
-alarm_comment, onboarding_draft, onboarding_publication, report_draft, pfm_review, audit_log`. Connection: injected
+alarm_comment, onboarding_draft, onboarding_publication, report_draft, pfm_review, audit_log`, and (v1.6, live
+alarm-rule flag edits, app-only so far) `alarm_rule_flag_proposal` (workflow state: pending → applied | rejected) and
+`ref_change_publication` (outbox for the DA publish job, §7 item 13). Connection: injected
 `PG*` env + `ENDPOINT_NAME` (bundle v1.4: `${resources.postgres_endpoints.dam_lakebase_primary.id}`; the app requires the full `projects/<p>/branches/<b>/endpoints/<e>` name and fails fast otherwise), `generate_database_credential` per new pooled connection, TCP keepalives and retry for HA
 failover. Identity is keyed on `X-Forwarded-User`; the user token is never logged and never used for Lakebase.
 
@@ -115,6 +117,9 @@ advisory locks.
 | `data_correction_review` | `POST /api/instruments/{iid}/incl/surveys/{sid}/corrections/{record_id}/review` (engineer+; any proposed ref.incl_correction record; a bias record is typed `bias_review`) | `incl_correction` / `approve\|reject` | as above |
 | `alarm_ack` (CDSE acknowledgement at level ≥ 2, or on a rule flagged `cdse_ack_required`) | `POST /api/alarms/{event_id}/ack` (level 2 Evaluate and level 3 Act: **the dam's CDSE only**; level 1 Verify: engineer+, unless the rule is flagged `cdse_ack_required`, then the dam's CDSE only; see below) | `alarm_event` / `acknowledge` | `{event_id, dam_id, instrument_id, level, value, unit, event_ts, state:"open"}` → `{state:"acknowledged", measured_value_changed:false}` |
 | `alarm_close` | `POST /api/alarms/{event_id}/close` (dso+) | `alarm_event` / `close` | same alarm snapshot with `state:"acknowledged"` → `{state:"closed", measured_value_changed:false}` |
+| `alarm_rule_flag_propose` | `POST /api/dams/{dam_id}/alarm-rules/{threshold_id}/cdse-flag/proposals` (dam_admin, platform admin or the dam's CDSE) | `alarm_rule` / `propose` | `{threshold_id, threshold_version, cdse_ack_required}` (current rule) → `{cdse_ack_required, proposal_id, state:"pending"}` |
+| `alarm_rule_flag_apply` | `POST /api/dams/{dam_id}/alarm-rules/proposals/{proposal_id}/approve` or `POST /api/dams/{dam_id}/alarm-rules/{threshold_id}/cdse-flag` (direct set/clear) (**the dam's CDSE only**) | `alarm_rule` / `apply` | current rule as above → `{cdse_ack_required, threshold_version: N+1, proposal_id, publication_id, proposed_by}` |
+| `alarm_rule_flag_reject` | `POST /api/dams/{dam_id}/alarm-rules/proposals/{proposal_id}/reject` (**the dam's CDSE only**) | `alarm_rule` / `reject` | current rule as above → `{cdse_ack_required, proposal_id, state:"rejected", proposed_by}` |
 
 Review bodies: `{decision, rationale, reviewer_pe_license?}`; ack: `{rationale}` (`comment` accepted as the older name);
 close: `{reason}`. **The rationale is required and must be non-empty after trimming** (422 otherwise; DB CHECK
@@ -139,6 +144,25 @@ checkbox (default off), saved through `PUT /api/onboarding/drafts/{id}/steps/thr
 `ref.threshold.cdse_ack_required` at go-live. Every change of the flag in a draft is an audited admin action
 (`audit_log.action = alarm_rule_cdse_ack_required`, detail `{rule, instrument_id, level, from, to}`), and go-live logs
 the flagged rules. Demo: `CRD-IN-1-T1` (level 1) is flagged.
+
+**Live-dam edits of `cdse_ack_required` (Genie decision, v1.6).** Page `/dams/{dam_id}/alarm-rules`, API
+`GET /api/dams/{dam_id}/alarm-rules` (viewer+: current rules with flag and version, pending and decided proposals,
+`is_cdse` / `can_propose` / `can_apply`) plus the three POST actions above.
+- Only the dam's CDSE (`signoffs.is_cdse`, live: `ref.v_dam_reviewer_authority`, fail closed) may apply a set or
+  clear, either directly or by approving a proposal. The CDSE may also approve their own proposal.
+- dam_admin and platform admin may only propose. Their proposal stays pending until that dam's CDSE approves or
+  rejects it; they can never approve one, including their own. engineer, dso and viewer get 403 on every action.
+  The CDSE of another dam gets 403.
+- Each propose, apply and reject needs a non-empty rationale (422 otherwise, nothing written). Each appends one
+  chained record (table above) atomically with the proposal state and, for an apply, the outbox row.
+- An apply never edits a `ref.threshold` row. It queues `ref.threshold` version N+1: the current row's canonical
+  columns with the new flag, `effective_from` = apply time (server UTC), `effective_to` NULL, `is_current` true and
+  `set_by` = the CDSE. In demo mode the version is appended at once.
+- Approval is refused with 409 (stale) when the rule changed since the proposal: another version, another flag, or
+  an applied change still waiting to be published. A stale proposal can still be rejected.
+- Open episodes keep their protection. The ack rule ORs the episode snapshot `cdse_ack_required_at_open` with the
+  current flag, so clearing a flag never weakens an episode that is already open, and setting one applies to open
+  episodes immediately.
 
 **CDSE identity (v1.6 ROLE-LEVEL, FERC Ch.14 App K 14-K-4).** The CDSE is a named person, not an app role. A caller is
 the CDSE of dam D when their X-Forwarded-User id or X-Forwarded-Email equals (case-insensitive, trimmed)
@@ -396,3 +420,31 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - the Lakebase/UC extract carries it;
     - document whether a new `threshold_version` is required when the flag changes (the app treats the flag as a
       property of the current rule plus the episode snapshot, so either choice is safe).
+13. **Live-dam `cdse_ack_required` edits: what the DA's side needs (proposal; the app writes no DA SQL).** Threshold
+    versioning (`threshold_version`, `effective_from` / `effective_to`, `is_current`, `set_by` in `ref.threshold`,
+    `sql/ddl/02`) and the publish into `ref.*` are DA-owned. The app does the following:
+    - It writes one `dam_app.ref_change_publication` row per apply:
+      - `kind = 'ref.threshold.new_version'`, `status = 'pending'` (demo: `'applied'`), `proposal_id`, `requested_by`;
+      - `payload = {kind, threshold_id, dam_id, supersedes_version: N, insert: {every canonical ref.threshold column of
+        version N, with threshold_version: N+1, cdse_ack_required: <new>, effective_from: <apply time, UTC ISO-8601>,
+        effective_to: null, is_current: true, set_by: <CDSE email>}}`.
+    - It never edits version N.
+
+    The DA publish job should, in one transaction:
+    - if the current version of `threshold_id` is not `supersedes_version`, set `status = 'rejected_stale'` with a
+      `message` and write nothing (the app checks this too, but UC is the authority);
+    - otherwise INSERT `insert` as version N+1, close version N with the existing SCD2 pattern (`effective_to = N+1's
+      effective_from`, `is_current = false`; it's the DA's decision whether that close-out counts as "editing" N), and
+      set `status = 'applied'` and `applied_at`.
+
+    The app's alarm reads then see N+1 through `is_current`. Further asks:
+    - **Evaluator:** episodes keep their raising `(threshold_id, threshold_version)`. New episodes use N+1 and snapshot
+      its flag into `cdse_ack_required_at_open`. The app ORs the snapshot with the current flag (§5a), so a clear
+      never weakens an open episode.
+    - **UC `audit.review_record`:** `ck_review_record_subject_decision` must allow `subject_type = 'alarm_rule'` with
+      `decision IN ('propose', 'apply', 'reject')`. The engine's `ACTION_TYPES` and the extract must accept
+      `alarm_rule_flag_propose`, `alarm_rule_flag_apply` and `alarm_rule_flag_reject` (app: `audit_chain.APP_ACTION_TYPES`).
+      Until then the extract would refuse these chain rows. The hash and verify rules are unchanged.
+    - **Lakebase:** mirror `alarm_rule_flag_proposal` and `ref_change_publication` in `lakebase/001_app_schema.sql` if
+      the DA wants the data-layer script to own them. The app creates them itself (`state.py`).
+    - **Permissions:** the publish job runs as the setup service principal. Signed-in users never write `ref.*`.

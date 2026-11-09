@@ -7,6 +7,7 @@ import Dam from "./pages/Dam";
 import InstrumentDetail from "./pages/InstrumentDetail";
 import Alarms from "./pages/Alarms";
 import Dssmp from "./pages/Dssmp";
+import AlarmRules from "./pages/AlarmRules";
 import Reports from "./pages/Reports";
 import Onboarding from "./pages/Onboarding";
 import Admin from "./pages/Admin";
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="/" element={<Portfolio />} />
             <Route path="/dams/:damId" element={<Dam me={me} />} />
             <Route path="/dams/:damId/dssmp" element={<Dssmp />} />
+            <Route path="/dams/:damId/alarm-rules" element={<AlarmRules />} />
             <Route path="/dams/:damId/reports" element={<Reports me={me} />} />
             <Route path="/instruments/:instrumentId" element={<InstrumentDetail />} />
             <Route path="/alarms" element={<Alarms />} />

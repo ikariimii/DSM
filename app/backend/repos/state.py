@@ -67,6 +67,18 @@ DDL = [
         original_value TEXT NOT NULL, corrected_value TEXT NOT NULL,
         chain_id TEXT NOT NULL, chain_seq INTEGER NOT NULL, prev_hash TEXT NOT NULL, record_hash TEXT NOT NULL,
         signature TEXT, sig_alg TEXT, key_id TEXT)""",
+    # Live-dam alarm-rule flag edits (cdse_ack_required): proposals (workflow state; the chained review_signoff
+    # records are the evidence) and the outbox the DA publish job turns into a NEW ref.threshold version.
+    """CREATE TABLE IF NOT EXISTS {s}alarm_rule_flag_proposal (
+        proposal_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL, threshold_id TEXT NOT NULL,
+        base_threshold_version INTEGER NOT NULL, base_flag BOOLEAN NOT NULL, new_flag BOOLEAN NOT NULL,
+        proposed_by TEXT NOT NULL, proposed_by_id TEXT, proposed_at TEXT NOT NULL,
+        rationale TEXT NOT NULL CHECK (length(trim(rationale)) > 0), status TEXT NOT NULL,
+        decided_by TEXT, decided_by_id TEXT, decided_at TEXT, decision_rationale TEXT, pub_id TEXT,
+        new_threshold_version INTEGER)""",
+    """CREATE TABLE IF NOT EXISTS {s}ref_change_publication (
+        pub_id TEXT PRIMARY KEY, kind TEXT NOT NULL, dam_id TEXT NOT NULL, proposal_id TEXT, payload TEXT NOT NULL,
+        requested_by TEXT NOT NULL, requested_at TEXT NOT NULL, status TEXT NOT NULL, applied_at TEXT, message TEXT)""",
     # chain head: the serialization point for appends (row lock / sqlite write lock) and the tail anchor that makes a
     # deleted LAST record detectable. Updated only inside the append transaction.
     """CREATE TABLE IF NOT EXISTS {s}review_chain_head (
@@ -364,6 +376,49 @@ class StateStore:
         rows = self.execute("SELECT pub_id, draft_id, dam_id, requested_by, requested_at, status, applied_at, message "
                             "FROM {s}onboarding_publication ORDER BY requested_at DESC")
         return rows
+
+    # ------------------------------------------------------------ live alarm-rule flag edits
+    def flag_proposals(self, dam_id: str, status: str | None = None, threshold_id: str | None = None) -> list[dict]:
+        sql, args = "SELECT * FROM {s}alarm_rule_flag_proposal WHERE dam_id = %s", [dam_id]
+        if status:
+            sql, args = sql + " AND status = %s", args + [status]
+        if threshold_id:
+            sql, args = sql + " AND threshold_id = %s", args + [threshold_id]
+        return [_bools(r, "base_flag", "new_flag") for r in self.execute(sql + " ORDER BY proposed_at, proposal_id", args)]
+
+    def flag_proposal(self, proposal_id: str) -> dict | None:
+        r = self.execute("SELECT * FROM {s}alarm_rule_flag_proposal WHERE proposal_id = %s", (proposal_id,))
+        return _bools(r[0], "base_flag", "new_flag") if r else None
+
+    @staticmethod
+    def insert_flag_proposal(q, row: dict) -> None:
+        cols = list(row)
+        q(f"INSERT INTO {{s}}alarm_rule_flag_proposal ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))})",
+          tuple(row[c] for c in cols))
+
+    @staticmethod
+    def decide_flag_proposal(q, proposal_id: str, status: str, by: str, by_id: str, at: str, rationale: str,
+                             pub_id: str | None = None, new_version: int | None = None) -> None:
+        """Pending -> applied | rejected, re-checked inside the chain transaction (a concurrent decision -> 409)."""
+        cur = q("SELECT status FROM {s}alarm_rule_flag_proposal WHERE proposal_id = %s", (proposal_id,))
+        if not cur or cur[0]["status"] != "pending":
+            raise ValueError(f"proposal {proposal_id} is no longer pending")
+        q("UPDATE {s}alarm_rule_flag_proposal SET status = %s, decided_by = %s, decided_by_id = %s, decided_at = %s, "
+          "decision_rationale = %s, pub_id = %s, new_threshold_version = %s WHERE proposal_id = %s AND status = 'pending'",
+          (status, by, by_id, at, rationale, pub_id, new_version, proposal_id))
+
+    @staticmethod
+    def insert_ref_publication(q, pub_id: str, kind: str, dam_id: str, proposal_id: str | None, payload: dict,
+                               actor: str, status: str) -> None:
+        q("INSERT INTO {s}ref_change_publication (pub_id, kind, dam_id, proposal_id, payload, requested_by, "
+          "requested_at, status, applied_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+          (pub_id, kind, dam_id, proposal_id, json.dumps(payload, sort_keys=True, default=str), actor, now_iso(),
+           status, now_iso() if status == "applied" else None))
+
+    def ref_publications(self, dam_id: str) -> list[dict]:
+        rows = self.execute("SELECT * FROM {s}ref_change_publication WHERE dam_id = %s ORDER BY requested_at, pub_id",
+                            (dam_id,))
+        return [{**r, "payload": json.loads(r["payload"])} for r in rows]
 
     # ------------------------------------------------------------ reports, PFM reviews
     def save_report(self, dam_id: str, start: str, end: str, actor: str, content_md: str) -> dict:

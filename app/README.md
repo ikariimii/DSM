@@ -52,6 +52,10 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
   default off; every change is audited). Levels 2 Evaluate and 3 Act are our mapping of FERC high/critical and
   always need the CDSE. The episode snapshot `cdse_ack_required_at_open` keeps an open episode strict even if the rule is
   un-flagged later. Older schemas without the columns behave as unflagged. Demo: rule `CRD-IN-1-T1` is flagged.
+- **Changing the flag on a live dam** (page "Alarm rules" on each dam): dam_admin and admin may only propose a set or
+  clear. The dam's CDSE approves or rejects it, or sets or clears it directly. Every action needs a rationale and is
+  chained. An apply queues a new `ref.threshold` version and never edits the old one. A stale proposal (the rule
+  changed since) is refused. Engineers, DSOs and viewers can only look.
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
   `config.env` **for the first prod deploy only, then remove it from prod config** and redeploy once the first
   admin has signed in and granted roles in the Admin UI. Rules (`backend/bootstrap.py`):

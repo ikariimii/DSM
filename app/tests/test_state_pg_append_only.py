@@ -181,3 +181,26 @@ def test_qa045c_init_takes_the_shared_advisory_lock(pg_store):
     t.join(30)
     pool.close()
     assert done.is_set()
+
+
+def test_rule_flag_proposal_and_publication_commit_with_the_chain_record(pg_store):
+    """Live-dam cdse_ack_required edits on real Postgres: proposal + decision + outbox row commit atomically with the
+    chained record; a second decision of the same proposal fails inside the transaction and writes nothing."""
+    st, _, _ = pg_store
+    row = {"proposal_id": "RFP-1", "dam_id": "CRD", "threshold_id": "T1", "base_threshold_version": 1,
+           "base_flag": False, "new_flag": True, "proposed_by": "a@x", "proposed_by_id": "uid-a", "proposed_at": "t0",
+           "rationale": "why", "status": "pending"}
+    st.append_chained("CRD", ac.GENESIS, ac.finalizer(_row(1)), lambda q: st.insert_flag_proposal(q, row))
+
+    def decide(q):
+        st.decide_flag_proposal(q, "RFP-1", "applied", "cdse@x", "uid-c", "t1", "ok", "PUB-1", 2)
+        st.insert_ref_publication(q, "PUB-1", "ref.threshold.new_version", "CRD", "RFP-1", {"insert": {"v": 2}},
+                                  "cdse@x", "pending")
+    st.append_chained("CRD", ac.GENESIS, ac.finalizer(_row(2)), decide)
+    p = st.flag_proposal("RFP-1")
+    assert (p["status"], p["base_flag"], p["new_flag"], p["new_threshold_version"]) == ("applied", False, True, 2)
+    assert st.ref_publications("CRD")[0]["payload"] == {"insert": {"v": 2}}
+    with pytest.raises(ValueError, match="no longer pending"):
+        st.append_chained("CRD", ac.GENESIS, ac.finalizer(_row(3)), decide)
+    assert len(st.chain_rows("CRD")) == 2 and len(st.ref_publications("CRD")) == 1
+    assert ac.verify_chain(st.chain_rows("CRD"), st.chain_head("CRD"))["ok"]
