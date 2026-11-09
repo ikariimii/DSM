@@ -22,6 +22,7 @@ except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
 from dam_safety.audit_chain import (CHAIN_FIELDS_V2, PROD_CATALOGS, SignerConfigError, load_signer,
                                     require_signer_for_catalog, verify_with_chain_heads)
+from dam_safety.dssmp_authority import dssmp_authority_problems
 from dam_safety.rule_flag_authority import (SECOND_APPROVER_SETTING, rule_flag_authority_problems,
                                             second_approver_required)
 
@@ -67,6 +68,7 @@ def authority_failures(records, authority, app_roles=None, require_second_approv
     threshold_dssmp / dssmp_versions: DSSMP version of each applied rule must be approved and in effect (v1.7)."""
     probs = rule_flag_authority_problems(records, authority, app_roles, require_second_approver,
                                          threshold_dssmp=threshold_dssmp, dssmp_versions=dssmp_versions)
+    probs += dssmp_authority_problems(records, authority, app_roles)      # v1.7 dssmp_version propose/approve/reject
     return [p for p in probs if p["severity"] == "error"], [p for p in probs if p["severity"] != "error"]
 
 

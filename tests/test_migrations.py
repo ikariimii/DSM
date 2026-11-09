@@ -41,6 +41,8 @@ EXPECTED_COLS = {
     "v1_6_003_alarm_rule_flag.sql": [],
     "v1_7_001_cdse_ack.sql": [("ref.threshold", "cdse_ack_required"), ("ops.alarm_transition", "cdse_ack_required_at_open")],
     "v1_7_002_canon_v2.sql": [("audit.review_record", "actor_app_role"), ("audit.review_record", "canon_version")],
+    "v1_7_003_dssmp_registration.sql": [("ref.dssmp_version", c) for c in (
+        "document_sha256", "approved_by", "approved_at", "approval_record_hash", "loaded_from_outbox_id")],
 }
 EXPECTED_CKS = {
     "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
@@ -50,6 +52,8 @@ EXPECTED_CKS = {
     "v1_6_003_alarm_rule_flag.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
     "v1_7_001_cdse_ack.sql": set(),
     "v1_7_002_canon_v2.sql": {"ck_review_record_canon"},
+    "v1_7_003_dssmp_registration.sql": {"ck_dssmp_version_status", "ck_dssmp_version_approval",
+                                        "ck_review_record_subject_decision", "ck_review_record_chain"},
 }
 # The only data change any migration may make: backfilling a column the same file just added, marked by a
 # '-- backfill-new-column: <table>.<col>' line right above an UPDATE ... SET <col> = <literal> WHERE <col> IS NULL.

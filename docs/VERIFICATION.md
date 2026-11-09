@@ -175,3 +175,16 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   demo outbox row is rejected `unknown_columns` (live rows come from `SELECT t.*` on ref.threshold and lack it).
 - UNVERIFIED: Delta MERGE with the EXISTS subquery over the target (only PostgreSQL executed it); the run_as
   principal's MODIFY on ref.threshold; the Lakebase publisher grants on a deployed Lakebase.
+
+## DSSMP-REG (v1_7_003_dssmp_registration, v1.7)
+
+- Migration `sql/migrations/v1_7_003_dssmp_registration.sql` + `_down.sql`; DDL `sql/ddl/04` and `sql/ddl/08`
+  (dssmp_version subject on audit.review_record). Loader `src/jobs/load_dssmp_registrations.py`
+  (`dam_safety.dssmp_registration`), authority `dam_safety.dssmp_authority` (wired into verify_review_chain).
+  Contract: root SCHEMA_CONTRACT.md §7.1c.
+- Evidence: tests/test_dssmp_registration.py (plan cases, UC CHECKs executed in SQLite, MERGE executed on local
+  PostgreSQL 17: insert + close in one statement, idempotent re-run, in-statement stale re-check, first version),
+  tests/test_dssmp_authority.py, tests/test_migrations.py.
+- UNVERIFIED: not run on a workspace; Delta MERGE with subqueries in the USING source; ADD CONSTRAINT on a
+  ref.dssmp_version that already holds approved rows without approval fields fails by design (PRE-CHECK in the
+  header); the app side (outbox INSERT, dssmp_version chain records) does not exist yet - App Dev.

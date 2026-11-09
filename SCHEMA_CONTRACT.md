@@ -472,6 +472,38 @@ tables and has SELECT + INSERT only on the append-only ones. `lakebase/001_app_s
 columns, the chain index, `review_chain_head` and `app_user.user_id` so the app needs no DDL on owner-owned objects
 (state.py patch: `tools/patches/v17_lakebase_owner_state_init.patch`). Validate with `tools/validate_lakebase.py`.
 
+### 7.1c DSSMP registration and publication (v1.7, Genie 2026-11-09)
+- **`ref.dssmp_version`** (sql/ddl/04 + migration `v1_7_003_dssmp_registration`, down script alongside) gains
+  `document_sha256`, `approved_by`, `approved_at`, `approval_record_hash`, `loaded_from_outbox_id`;
+  `ck_dssmp_version_status` (status `draft | approved | superseded`, `version_no >= 1`, `effective_to > effective_from`)
+  and `ck_dssmp_version_approval` (an `approved` row carries approver, time, a sha256 document hash and the
+  approval record hash). App users get SELECT on it (per-dam row filter, both security modes; grant render).
+- **Who:** the dam's CDSE registers / approves a new dam's DSSMP version before go-live; `dam_admin` (and admin) may
+  only propose (`docs/DEV_WORKSPACE_RUNBOOK.md`).
+- **Chain records (proposed to App Dev):** `audit.review_record` / Lakebase `review_signoff` subject_type
+  `dssmp_version`, subject_id = dssmp_version_id, action_type `dssmp_version_propose | _approve | _reject`, decision
+  `propose | approve | reject`, non-blank rationale; corrected_value JSON `{dssmp_version_id, dam_id, version_no,
+  effective_from, document_uri, document_sha256[, proposal_id, proposed_by]}`, original_value JSON
+  `{supersedes_dssmp_version_id}`. UC CHECKs updated in v1_7_003. Authority (engine, `dam_safety.dssmp_authority`,
+  run by verify_review_chain): `dssmp_propose_no_authority`, `dssmp_propose_role_unverified` (warn),
+  `dssmp_{approve|reject}_not_cdse`, `_by_admin`, `_cdse_of_other_dam`, `_proposal_missing`,
+  `dssmp_subject_mismatch`, `dssmp_approval_fields_missing`, `dssmp_rationale_missing`,
+  `dssmp_decision_action_mismatch`.
+- **Outbox (Lakebase `dam_app.dssmp_registration_outbox`, lakebase/001; working name app.dssmp_registration_outbox):**
+  `outbox_id` PK, `dam_id`, `dssmp_version_id`, `version_no`, `effective_from`, `supersedes_dssmp_version_id` (NULL =
+  first version), `change_reason`, `source_ref`, `document_uri`, `document_sha256`, `approved_by`, `approved_at`
+  (= signed_ts of the approve record), `approval_record_hash`, `requested_by`, `requested_at`, `status` (`pending`),
+  `applied_at`, `message`. The app INSERTs after the CDSE's approve record is chained.
+- **Loader** (job `dam_ref_publish`, task `load_dssmp_registrations`, before `publish_ref_changes`;
+  `dam_safety.dssmp_registration`): one conditional MERGE inserts the new approved version and closes the previous
+  approved one (status superseded, effective_to = new effective_from), stale re-check inside the statement. Refusal
+  codes: `missing_required_column`, `invalid_value`, `approval_record_missing` (after 1 h; before that `deferred`),
+  `approval_record_wrong_action`, `approval_record_mismatch`, `approval_not_cdse`, `dssmp_version_exists`,
+  `version_not_newer`, `effective_from_not_after_current`, `rejected_stale`.
+- **Threshold publisher and §7.13 apply** refuse a DSSMP version that is not the dam's, approved and in effect
+  (`dam_safety.dssmp_check`): `dssmp_missing`, `dssmp_not_found`, `dssmp_other_dam`, `dssmp_draft`,
+  `dssmp_superseded`, `dssmp_not_yet_effective`, `dssmp_status_unknown`.
+
 ### 7.2 Ownership of writes (v1.1, app Q11)
 The app writes Lakebase only. `dam_lakebase_extract` is the **only** writer of `ALARM_ACK` rows to `audit.event_log`;
 the alarm evaluator is the **only** writer of `ACK` transitions (dedup tag `lakebase_ack:<event_id>`). `certified`/`submitted`

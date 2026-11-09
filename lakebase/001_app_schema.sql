@@ -40,6 +40,23 @@ CREATE TABLE IF NOT EXISTS pfm_review (id BIGSERIAL PRIMARY KEY, pfm_id TEXT NOT
   reviewed_by TEXT NOT NULL, reviewed_at TEXT NOT NULL, status TEXT NOT NULL, notes TEXT);
 CREATE TABLE IF NOT EXISTS audit_log (id BIGSERIAL PRIMARY KEY, ts TEXT NOT NULL, actor TEXT NOT NULL,
   action TEXT NOT NULL, dam_id TEXT, target TEXT, detail TEXT);
+-- v1.6 §7 item 13 publisher outbox (same DDL as state.py). The app only INSERTs; dam_ref_publish writes the outcome.
+CREATE TABLE IF NOT EXISTS ref_change_publication (pub_id TEXT PRIMARY KEY, kind TEXT NOT NULL, dam_id TEXT NOT NULL,
+  proposal_id TEXT, payload TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL,
+  status TEXT NOT NULL, applied_at TEXT, message TEXT);
+
+-- ---- v1.7 data-layer addition: DSSMP registration outbox (Genie 2026-11-09; working name
+-- app.dssmp_registration_outbox; NOT yet in state.py - App Dev adds the INSERT, see SCHEMA_CONTRACT.md). One row per
+-- CDSE-approved DSSMP version; approval_record_hash = record_hash of the chained dssmp_version_approve review_signoff
+-- row. The app only INSERTs; task load_dssmp_registrations (dam_safety.dssmp_registration) writes status / message /
+-- applied_at. ----
+CREATE TABLE IF NOT EXISTS dssmp_registration_outbox (outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL,
+  dssmp_version_id TEXT NOT NULL, version_no INTEGER NOT NULL, effective_from TEXT NOT NULL,
+  supersedes_dssmp_version_id TEXT, change_reason TEXT, source_ref TEXT, document_uri TEXT,
+  document_sha256 TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL,
+  approval_record_hash TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', applied_at TEXT, message TEXT,
+  CONSTRAINT ck_dssmp_outbox_status CHECK (status IN ('pending', 'applied', 'rejected_stale', 'rejected_invalid')));
 
 -- ---- data-layer additions (proposed in SCHEMA_CONTRACT.md §7; need App Dev agreement) ----
 CREATE TABLE IF NOT EXISTS inspection_note (
