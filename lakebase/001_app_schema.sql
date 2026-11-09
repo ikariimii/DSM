@@ -45,18 +45,60 @@ CREATE TABLE IF NOT EXISTS ref_change_publication (pub_id TEXT PRIMARY KEY, kind
   proposal_id TEXT, payload TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL,
   status TEXT NOT NULL, applied_at TEXT, message TEXT);
 
--- ---- v1.7 data-layer addition: DSSMP registration outbox (Genie 2026-11-09; working name
--- app.dssmp_registration_outbox; NOT yet in state.py - App Dev adds the INSERT, see SCHEMA_CONTRACT.md). One row per
--- CDSE-approved DSSMP version; approval_record_hash = record_hash of the chained dssmp_version_approve review_signoff
--- row. The app only INSERTs; task load_dssmp_registrations (dam_safety.dssmp_registration) writes status / message /
--- applied_at. ----
+-- ---- v1.7 DSSMP registration outbox: the agreed app contract (app SCHEMA_CONTRACT §7 item 19; same columns as
+-- app/backend/repos/state.py). One row per CDSE-approved DSSMP version, inserted by the app at 'pending' in the
+-- approve transaction; approval_record_hash = record_hash of the chained dssmp_version_approve record. Owned by
+-- dam_lakebase_owner below: the app may only INSERT / SELECT; the DSSMP load job (role dam_lakebase_publisher) sets
+-- status / reason_code / message / processed_at only. A table in the earlier DA 86993d0 shape is renamed in place by
+-- the v1_7_004 block (lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql + _down.sql). ----
 CREATE TABLE IF NOT EXISTS dssmp_registration_outbox (outbox_id TEXT PRIMARY KEY, dam_id TEXT NOT NULL,
-  dssmp_version_id TEXT NOT NULL, version_no INTEGER NOT NULL, effective_from TEXT NOT NULL,
-  supersedes_dssmp_version_id TEXT, change_reason TEXT, source_ref TEXT, document_uri TEXT,
-  document_sha256 TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL,
-  approval_record_hash TEXT NOT NULL, requested_by TEXT NOT NULL, requested_at TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending', applied_at TEXT, message TEXT,
-  CONSTRAINT ck_dssmp_outbox_status CHECK (status IN ('pending', 'applied', 'rejected_stale', 'rejected_invalid')));
+  dssmp_version_id TEXT NOT NULL, version_no INTEGER NOT NULL, effective_from TEXT NOT NULL, change_reason TEXT,
+  source_ref TEXT, document_uri TEXT, document_sha256 TEXT NOT NULL, proposed_by TEXT NOT NULL,
+  approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, approval_record_hash TEXT NOT NULL, status TEXT NOT NULL,
+  reason_code TEXT, message TEXT, processed_at TEXT,
+  CONSTRAINT ck_dssmp_outbox_status CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid')));
+-- BEGIN v1_7_004 block
+DO $$
+DECLARE has_col BOOLEAN;
+BEGIN
+  IF to_regclass('dam_app.dssmp_registration_outbox') IS NULL THEN RETURN; END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'dam_app'
+             AND table_name = 'dssmp_registration_outbox' AND column_name = 'requested_by')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'dam_app'
+             AND table_name = 'dssmp_registration_outbox' AND column_name = 'proposed_by') THEN
+    ALTER TABLE dam_app.dssmp_registration_outbox RENAME COLUMN requested_by TO proposed_by;
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'dam_app'
+             AND table_name = 'dssmp_registration_outbox' AND column_name = 'applied_at')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'dam_app'
+             AND table_name = 'dssmp_registration_outbox' AND column_name = 'processed_at') THEN
+    ALTER TABLE dam_app.dssmp_registration_outbox RENAME COLUMN applied_at TO processed_at;
+  END IF;
+  ALTER TABLE dam_app.dssmp_registration_outbox ADD COLUMN IF NOT EXISTS reason_code TEXT;
+  FOR has_col IN SELECT true FROM information_schema.columns WHERE table_schema = 'dam_app'
+                 AND table_name = 'dssmp_registration_outbox' AND column_name = 'requested_at' LOOP
+    IF EXISTS (SELECT 1 FROM dam_app.dssmp_registration_outbox WHERE requested_at IS NOT NULL) THEN
+      RAISE EXCEPTION 'dssmp_registration_outbox.requested_at holds values; not dropped (decide by hand)'
+        USING ERRCODE = 'object_in_use';
+    END IF;
+    ALTER TABLE dam_app.dssmp_registration_outbox DROP COLUMN requested_at;
+  END LOOP;
+  FOR has_col IN SELECT true FROM information_schema.columns WHERE table_schema = 'dam_app'
+                 AND table_name = 'dssmp_registration_outbox' AND column_name = 'supersedes_dssmp_version_id' LOOP
+    IF EXISTS (SELECT 1 FROM dam_app.dssmp_registration_outbox WHERE supersedes_dssmp_version_id IS NOT NULL) THEN
+      RAISE EXCEPTION 'dssmp_registration_outbox.supersedes_dssmp_version_id holds values; not dropped (decide by hand)'
+        USING ERRCODE = 'object_in_use';
+    END IF;
+    ALTER TABLE dam_app.dssmp_registration_outbox DROP COLUMN supersedes_dssmp_version_id;
+  END LOOP;
+  ALTER TABLE dam_app.dssmp_registration_outbox ALTER COLUMN status DROP DEFAULT;
+  ALTER TABLE dam_app.dssmp_registration_outbox DROP CONSTRAINT IF EXISTS ck_dssmp_outbox_status;
+  UPDATE dam_app.dssmp_registration_outbox SET status = 'loaded' WHERE status = 'applied';
+  UPDATE dam_app.dssmp_registration_outbox SET status = 'rejected' WHERE status = 'rejected_stale';
+  ALTER TABLE dam_app.dssmp_registration_outbox ADD CONSTRAINT ck_dssmp_outbox_status
+    CHECK (status IN ('pending', 'loaded', 'rejected', 'rejected_invalid'));
+END $$;
+-- END v1_7_004 block
 
 -- ---- data-layer additions (proposed in SCHEMA_CONTRACT.md §7; need App Dev agreement) ----
 CREATE TABLE IF NOT EXISTS inspection_note (
@@ -155,7 +197,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS app_user_user_id ON app_user (user_id);
 --     SCHEMA_CONTRACT §7 item 17 (c)). It is never widened beyond that.
 --   * v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox) are
 --     owned by dam_lakebase_owner: the app has SELECT + INSERT only. A separate NOLOGIN role dam_lakebase_publisher
---     has USAGE, SELECT and column-level UPDATE (status, message, applied_at) on exactly those tables and nothing
+--     has USAGE, SELECT and column-level UPDATE (status, message, applied_at; dssmp_registration_outbox: status,
+--     reason_code, message, processed_at) on exactly those tables and nothing
 --     else (no DELETE / INSERT / TRUNCATE, no default privileges). The dam_ref_publish job's login is made a member
 --     via SET dam.publisher_login (it must not be the app role, nor a member of dam_lakebase_owner).
 -- lakebase/validate_append_only.sql (tools/validate_lakebase.py) re-checks all of it after every deploy.
@@ -193,8 +236,10 @@ END $$;
 REVOKE ALL ON ALL TABLES IN SCHEMA dam_app FROM dam_lakebase_publisher;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA dam_app FROM dam_lakebase_publisher;
 GRANT USAGE ON SCHEMA dam_app TO dam_lakebase_publisher;
-GRANT SELECT, UPDATE (status, message, applied_at)
-  ON ref_change_publication, onboarding_publication, dssmp_registration_outbox TO dam_lakebase_publisher;
+GRANT SELECT, UPDATE (status, message, applied_at) ON ref_change_publication, onboarding_publication
+  TO dam_lakebase_publisher;
+GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox
+  TO dam_lakebase_publisher;
 DO $$
 DECLARE o RECORD;
 BEGIN

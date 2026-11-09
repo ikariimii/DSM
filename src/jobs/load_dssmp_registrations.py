@@ -6,7 +6,7 @@ approval_record_hash (UC audit.review_record, extracted from the app's chained r
 ref.v_dam_reviewer_authority; plan with dam_safety.dssmp_registration.plan (refuses rows without a matching CDSE
 dssmp_version_approve chain record, stale rows, duplicates); ONE conditional MERGE inserts each new approved version
 and closes the dam's previous approved one in the same statement; then the outcome is written back to the outbox
-(status / message / applied_at only: role dam_lakebase_publisher). A crash between the MERGE and the outbox update is
+(status / reason_code / message / processed_at only: role dam_lakebase_publisher). A crash between the MERGE and the outbox update is
 safe: the next run finds the version with loaded_from_outbox_id = outbox_id (already_applied -> applied).
 UNVERIFIED: never run on a workspace (Delta MERGE with subqueries in the USING source; the publisher Lakebase role on
 a deployed Lakebase; the run_as principal's MODIFY on ref.dssmp_version and SELECT on audit.review_record).
@@ -21,8 +21,8 @@ except ImportError:        # executed as a script by spark_python_task
 from dam_safety.dssmp_registration import DSSMP_COLS, OUTBOX_COLS, merge_source_rows, merge_sql, plan
 
 OUTBOX_SQL = (f"SELECT {', '.join(OUTBOX_COLS)} FROM dssmp_registration_outbox WHERE status = 'pending' "
-              "ORDER BY requested_at, outbox_id")
-UPDATE_SQL = ("UPDATE dssmp_registration_outbox SET status = %s, message = %s, applied_at = %s "
+              "ORDER BY approved_at, outbox_id")
+UPDATE_SQL = ("UPDATE dssmp_registration_outbox SET status = %s, reason_code = %s, message = %s, processed_at = %s "
               "WHERE outbox_id = %s AND status = 'pending'")
 SOURCE_VIEW = "dssmp_registration_merge_src"
 APPROVAL_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
@@ -31,7 +31,8 @@ APPROVAL_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_le
 
 
 def outbox_updates(decisions, now_iso):
-    return [(d["status"], d["message"], now_iso, d["outbox_id"]) for d in decisions if d["status"] is not None]
+    return [(d["status"], d["reason_code"], d["message"], now_iso, d["outbox_id"])
+            for d in decisions if d["status"] is not None]
 
 
 def main():
@@ -73,7 +74,7 @@ def main():
                     for r in dv.where(dv.dam_id.isin(dams)).select("dssmp_version_id", "loaded_from_outbox_id").collect()}
             for d in decisions:                   # the MERGE's own stale re-check skipped it
                 if d["decision"] == "applied" and live.get(d["insert"]["dssmp_version_id"]) != d["outbox_id"]:
-                    d.update(decision="rejected_stale", status="rejected_stale",
+                    d.update(decision="rejected_stale", status="rejected", reason_code="stale",
                              message="stale: skipped by the MERGE stale re-check (concurrent change)",
                              codes=["stale"])
         for u in outbox_updates(decisions, now.isoformat()):

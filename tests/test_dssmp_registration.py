@@ -29,13 +29,14 @@ V1 = {"dssmp_version_id": "DS-1", "dam_id": D, "version_no": 1, "effective_from"
       "approved_at": "2025-12-01T00:00:00Z", "approval_record_hash": "d0" * 32, "loaded_from_outbox_id": "OB-0"}
 
 
-def outbox(oid="OB-1", vid="DS-2", sup="DS-1", h=H1, **kw):
+def outbox(oid="OB-1", vid="DS-2", h=H1, **kw):
+    """Exactly the agreed app contract (app SCHEMA_CONTRACT §7 item 19)."""
     return {"outbox_id": oid, "dam_id": D, "dssmp_version_id": vid, "version_no": 2,
-            "effective_from": "2026-12-01T00:00:00Z", "supersedes_dssmp_version_id": sup,
-            "change_reason": "annual review", "source_ref": "DSSMR-2026", "document_uri": "/Volumes/x/dssmp.pdf",
-            "document_sha256": SHA, "approved_by": CDSE, "approved_at": "2026-11-09T15:00:00Z",
-            "approval_record_hash": h, "requested_by": CDSE, "requested_at": "2026-11-09T15:00:01Z",
-            "status": "pending", "applied_at": None, "message": None, **kw}
+            "effective_from": "2026-12-01T00:00:00Z", "change_reason": "annual review", "source_ref": "DSSMR-2026",
+            "document_uri": "lakebase:dam_app.dssmp_document/DOC-1", "document_sha256": SHA,
+            "proposed_by": "damadmin@example.org", "approved_by": CDSE, "approved_at": "2026-11-09T15:00:00Z",
+            "approval_record_hash": h, "status": "pending", "reason_code": None, "message": None,
+            "processed_at": None, **kw}
 
 
 def approve_rec(h=H1, who=CDSE, vid="DS-2", **kw):
@@ -62,18 +63,21 @@ def test_valid_registration_inserts_approved_and_closes_the_previous_version():
     assert d["insert"]["status"] == "approved" and d["insert"]["loaded_from_outbox_id"] == "OB-1"
     assert d["insert"]["approval_record_hash"] == H1 and d["insert"]["effective_to"] is None
     assert d["close"] == {"dssmp_version_id": "DS-1", "effective_to": dt.datetime(2026, 12, 1, tzinfo=dt.timezone.utc)}
-    assert job.outbox_updates([d], "T") == [("applied", d["message"], "T", "OB-1")]
+    assert d["status"] == "loaded" and d["reason_code"] is None
+    assert job.outbox_updates([d], "T") == [("loaded", None, d["message"], "T", "OB-1")]
 
 
 def test_first_version_of_a_new_dam_has_nothing_to_close():
-    d = one(outbox(sup=None), versions=[])
+    d = one(outbox(), versions=[])
     assert d["decision"] == "applied" and d["close"] is None
 
 
 def test_rows_without_a_cdse_approve_chain_record_are_refused():
     assert one(outbox(), approvals={}, now="2026-11-09T15:30:00Z")["decision"] == "deferred"     # extract lag
     d = one(outbox(), approvals={})
-    assert d["status"] == "rejected_invalid" and d["codes"] == ["approval_record_missing"]
+    assert d["status"] == "rejected" and d["codes"] == ["approval_record_missing"]
+    assert d["reason_code"] == "approval_record_missing"
+    assert job.outbox_updates([d], "T") == [("rejected", "approval_record_missing", d["message"], "T", "OB-1")]
 
 
 @pytest.mark.parametrize("rec,code", [
@@ -86,13 +90,13 @@ def test_rows_without_a_cdse_approve_chain_record_are_refused():
 ])
 def test_approve_record_must_match_the_outbox_row(rec, code):
     d = one(outbox(), approvals={H1: rec})
-    assert d["status"] == "rejected_invalid" and code in d["codes"], d
+    assert d["status"] == "rejected" and code in d["codes"], d
 
 
 def test_approver_must_hold_cdse_authority_admin_is_refused():
     d = one(outbox(approved_by=ADMIN), approvals={H1: approve_rec(who=ADMIN, canon_version=2,
                                                                    actor_app_role="admin")})
-    assert d["status"] == "rejected_invalid"
+    assert d["status"] == "rejected"
     assert "approval_not_cdse" in d["codes"] and "dssmp_approve_by_admin" in d["codes"]
 
 
@@ -103,7 +107,7 @@ def test_approver_must_hold_cdse_authority_admin_is_refused():
                                      (dict(effective_from="soon"), "invalid_value")])
 def test_outbox_row_validation(kw, code):
     d = one(outbox(**kw))
-    assert d["status"] == "rejected_invalid" and code in d["codes"]
+    assert d["status"] == "rejected" and code in d["codes"]
 
 
 def test_duplicate_id_version_order_and_effective_from():
@@ -116,16 +120,17 @@ def test_duplicate_id_version_order_and_effective_from():
 
 
 def test_stale_and_rerun():
-    assert one(outbox(sup="DS-0"))["decision"] == "rejected_stale"
-    assert one(outbox(sup=None))["decision"] == "rejected_stale"                # the dam already has one
+    two_open = [V1, {**V1, "dssmp_version_id": "DS-1B", "loaded_from_outbox_id": "OB-X"}]
+    d = one(outbox(), versions=two_open)
+    assert d["decision"] == "rejected_stale" and d["status"] == "rejected" and d["reason_code"] == "stale"
     applied = {**V1, "dssmp_version_id": "DS-2", "loaded_from_outbox_id": "OB-1", "version_no": 2}
     d = one(outbox(), versions=[{**V1, "status": "superseded", "effective_to": "2026-12-01T00:00:00Z"}, applied])
-    assert d["decision"] == "already_applied" and d["status"] == "applied"
+    assert d["decision"] == "already_applied" and d["status"] == "loaded"
 
 
 def test_second_row_for_the_same_dam_is_deferred():
-    ds = dr.plan([outbox(), outbox("OB-2", "DS-3", h=H2, requested_at="2026-11-09T15:10:00Z")], [V1],
-                 {H1: approve_rec(), H2: approve_rec(h=H2, vid="DS-3")}, AUTH, NOW)
+    ds = dr.plan([outbox("OB-2", "DS-3", h=H2, approved_at="2026-11-09T15:10:00Z"), outbox()], [V1],
+                 {H1: approve_rec(), H2: approve_rec(h=H2, vid="DS-3", signed_ts="2026-11-09T15:10:00Z")}, AUTH, NOW)
     assert [(d["outbox_id"], d["decision"]) for d in ds] == [("OB-1", "applied"), ("OB-2", "deferred")]
 
 
@@ -263,5 +268,5 @@ def test_merge_rechecks_staleness_and_first_version(pg):
     _put(pg, "s", dr.merge_source_rows(dr.plan([outbox()], [V1], {H1: approve_rec()}, AUTH, NOW)), SRC)
     assert _psql(pg, dr.merge_sql("v", "s")).returncode == 0 and _state(pg) == before        # stale: nothing
     assert _psql(pg, "DELETE FROM s; DELETE FROM v").returncode == 0
-    _put(pg, "s", dr.merge_source_rows(dr.plan([outbox(sup=None)], [], {H1: approve_rec()}, AUTH, NOW)), SRC)
+    _put(pg, "s", dr.merge_source_rows(dr.plan([outbox()], [], {H1: approve_rec()}, AUTH, NOW)), SRC)
     assert _psql(pg, dr.merge_sql("v", "s")).returncode == 0 and _state(pg) == ["DS-2:approved:-"]

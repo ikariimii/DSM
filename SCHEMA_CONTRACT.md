@@ -489,17 +489,29 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   `dssmp_{approve|reject}_not_cdse`, `_by_admin`, `_cdse_of_other_dam`, `_proposal_missing`,
   `dssmp_subject_mismatch`, `dssmp_approval_fields_missing`, `dssmp_rationale_missing`,
   `dssmp_decision_action_mismatch`.
-- **Outbox (Lakebase `dam_app.dssmp_registration_outbox`, lakebase/001; working name app.dssmp_registration_outbox):**
-  `outbox_id` PK, `dam_id`, `dssmp_version_id`, `version_no`, `effective_from`, `supersedes_dssmp_version_id` (NULL =
-  first version), `change_reason`, `source_ref`, `document_uri`, `document_sha256`, `approved_by`, `approved_at`
-  (= signed_ts of the approve record), `approval_record_hash`, `requested_by`, `requested_at`, `status` (`pending`),
-  `applied_at`, `message`. The app INSERTs after the CDSE's approve record is chained.
+- **Outbox (Lakebase `dam_app.dssmp_registration_outbox`; the agreed contract = app SCHEMA_CONTRACT §7 item 19, which
+  wins; fixed 2026-11-09 by Lakebase migration `lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql`, inlined in
+  lakebase/001, rollback `..._down.sql`):** exactly `outbox_id` PK, `dam_id`, `dssmp_version_id`, `version_no`,
+  `effective_from`, `change_reason`, `source_ref`, `document_uri`, `document_sha256` (NOT NULL), `proposed_by`,
+  `approved_by`, `approved_at` (= signed_ts of the approve record), `approval_record_hash`, `status`
+  (`pending | loaded | rejected | rejected_invalid`; the loader writes `loaded` / `rejected`, `rejected_invalid` is
+  accepted because §7.19 allows it), `reason_code` (`stale`, a loader code below or a `dssmp_*` code; NULL when
+  loaded), `message` (free text), `processed_at`. No `supersedes` column: the loader looks up the dam's current
+  approved version itself. The app INSERTs (as the app role, `StateStore.insert_dssmp_outbox`) in the same
+  transaction as the CDSE's approve record; the publisher role has SELECT + UPDATE on `(status, reason_code, message,
+  processed_at)` only (`ref_change_publication` / `onboarding_publication` keep `(status, message, applied_at)`).
+  Migration: renames `requested_by -> proposed_by`, `applied_at -> processed_at`, adds `reason_code`, maps
+  `applied -> loaded`, `rejected_stale -> rejected` (reason_code `stale`); drops the old-only `requested_at` /
+  `supersedes_dssmp_version_id` only when every value is NULL (otherwise it raises and changes nothing).
+  Rollback renames back, re-adds those two as nullable (`requested_at` filled from `approved_at`), maps statuses back
+  and keeps `reason_code`; it drops no column, table or row. The app-owned `dam_app.dssmp_registration` and
+  `dam_app.dssmp_document` (document bytes; `document_uri` = `lakebase:dam_app.dssmp_document/<id>`) are app DDL.
 - **Loader** (job `dam_ref_publish`, task `load_dssmp_registrations`, before `publish_ref_changes`;
   `dam_safety.dssmp_registration`): one conditional MERGE inserts the new approved version and closes the previous
   approved one (status superseded, effective_to = new effective_from), stale re-check inside the statement. Refusal
   codes: `missing_required_column`, `invalid_value`, `approval_record_missing` (after 1 h; before that `deferred`),
   `approval_record_wrong_action`, `approval_record_mismatch`, `approval_not_cdse`, `dssmp_version_exists`,
-  `version_not_newer`, `effective_from_not_after_current`, `rejected_stale`.
+  `version_not_newer`, `effective_from_not_after_current`, `stale` (all written to `reason_code`, status `rejected`).
 - **Threshold publisher and §7.13 apply** refuse a DSSMP version that is not the dam's, approved and in effect
   (`dam_safety.dssmp_check`): `dssmp_missing`, `dssmp_not_found`, `dssmp_other_dam`, `dssmp_draft`,
   `dssmp_superseded`, `dssmp_not_yet_effective`, `dssmp_status_unknown`.

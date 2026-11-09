@@ -23,16 +23,19 @@ OUTBOXES = ("ref_change_publication", "onboarding_publication", "dssmp_registrat
 def test_static_grants_are_column_level_and_never_default_for_the_publisher():
     ddl = open(DDL_PATH).read()
     assert "CREATE ROLE dam_lakebase_publisher NOLOGIN" in ddl
-    assert ("GRANT SELECT, UPDATE (status, message, applied_at)\n  ON ref_change_publication, onboarding_publication, "
-            "dssmp_registration_outbox TO dam_lakebase_publisher;") in ddl
+    assert ("GRANT SELECT, UPDATE (status, message, applied_at) ON ref_change_publication, onboarding_publication\n"
+            "  TO dam_lakebase_publisher;") in ddl
+    assert ("GRANT SELECT, UPDATE (status, reason_code, message, processed_at) ON dssmp_registration_outbox\n"
+            "  TO dam_lakebase_publisher;") in ddl
     assert "ALTER DEFAULT PRIVILEGES FOR ROLE dam_lakebase_owner IN SCHEMA dam_app GRANT SELECT ON TABLES" in ddl
     for line in ddl.splitlines():
         if "DEFAULT PRIVILEGES" in line:
             assert "publisher" not in line and "UPDATE" not in line
     import publish_ref_changes as pj
     import load_dssmp_registrations as lj
-    for sql in (pj.UPDATE_SQL, lj.UPDATE_SQL):
-        assert sql.split(" SET ")[1].split(" WHERE ")[0] == "status = %s, message = %s, applied_at = %s"
+    assert pj.UPDATE_SQL.split(" SET ")[1].split(" WHERE ")[0] == "status = %s, message = %s, applied_at = %s"
+    assert lj.UPDATE_SQL.split(" SET ")[1].split(" WHERE ")[0] == \
+        "status = %s, reason_code = %s, message = %s, processed_at = %s"
 
 
 def _psql(conninfo, *args, env_extra=None):
@@ -72,9 +75,9 @@ def _ins(e, table):
             "onboarding_publication": "(pub_id, draft_id, dam_id, payload, requested_by, requested_at, status) VALUES "
                                       f"('O-{n}', 'DR', 'D1', '{{}}', 'a', 't', 'pending')",
             "dssmp_registration_outbox": "(outbox_id, dam_id, dssmp_version_id, version_no, effective_from, "
-                                         "document_sha256, approved_by, approved_at, approval_record_hash, "
-                                         f"requested_by, requested_at) VALUES ('OB-{n}', 'D1', 'DS-{n}', 1, 't', 'h', "
-                                         "'c', 't', 'h', 'a', 't')"}[table]
+                                         "document_sha256, proposed_by, approved_by, approved_at, "
+                                         f"approval_record_hash, status) VALUES ('OB-{n}', 'D1', 'DS-{n}', 1, 't', "
+                                         "'h', 'a', 'c', 't', 'h', 'pending')"}[table]
     return _psql(e["as_app"], "-c", f"INSERT INTO dam_app.{table} {vals}")
 
 
@@ -93,12 +96,16 @@ def test_good_setup_passes_the_validator_with_extract_and_publisher(env):
 @live
 @pytest.mark.parametrize("table", OUTBOXES)
 def test_publisher_can_read_and_set_the_outcome_columns_only(env, table):
-    key = "outbox_id" if table == "dssmp_registration_outbox" else "pub_id"
+    dssmp = table == "dssmp_registration_outbox"
+    key = "outbox_id" if dssmp else "pub_id"
+    sets = ("status = 'loaded', reason_code = 'x', message = 'm', processed_at = 'now'" if dssmp
+            else "status = 'applied', message = 'm', applied_at = 'now'")
     ok = _psql(env["as_pub"], "-c", f"SELECT count(*) FROM dam_app.{table}",
-               "-c", f"UPDATE dam_app.{table} SET status = 'applied', message = 'm', applied_at = 'now' "
-                     f"WHERE {key} IS NOT NULL")
+               "-c", f"UPDATE dam_app.{table} SET {sets} WHERE {key} IS NOT NULL")
     assert ok.returncode == 0, ok.stderr
-    for col in ("dam_id", "requested_by", "requested_at", key):
+    others = ("dam_id", "proposed_by", "approved_by", "approved_at", key) if dssmp else \
+        ("dam_id", "requested_by", "requested_at", key)
+    for col in others:
         r = _psql(env["as_pub"], "-c", f"UPDATE dam_app.{table} SET {col} = 'x'")
         assert r.returncode != 0 and "permission denied" in r.stderr, (col, r.stderr)
     for stmt in (f"DELETE FROM dam_app.{table}", f"TRUNCATE dam_app.{table}",

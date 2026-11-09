@@ -212,3 +212,22 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   by the deployer), the publish job's login name; the ABAC tag on ref.dssmp_version.
 - Test hazard: roles are cluster-global, so the ownership tests that flip `dam_lakebase_owner` attributes can break
   another agent's run on the same PostgreSQL cluster (seen once on 2026-11-09; re-run passed).
+
+## OUTBOX-CONTRACT (dssmp_registration_outbox = app SCHEMA_CONTRACT §7 item 19, 2026-11-09)
+
+- Lakebase migration `lakebase/migrations/v1_7_004_dssmp_outbox_contract.sql` (block inlined verbatim in
+  lakebase/001, so a fresh or re-run 001 converges) + rollback `_down.sql` (renames back, no data dropped).
+  Loader `src/jobs/load_dssmp_registrations.py` writes `status loaded|rejected`, `reason_code`, `message`,
+  `processed_at`; root SCHEMA_CONTRACT.md §7.1c.
+- Evidence (local PostgreSQL 17.11): tests/test_dssmp_outbox_contract.py - column list equal in the app's state.py DDL,
+  the app router's INSERT dict, lakebase/001 and dssmp_registration.OUTBOX_COLS; an old DA-shaped table converted in
+  place by 001 (idempotent re-run); **the app's own `StateStore.insert_dssmp_outbox` (app/ at HEAD, connected as the
+  app role) inserts the router's row**; the load job's UPDATE_SQL succeeds as the publisher login; the publisher may not
+  touch proposed_by, the app may not touch status; old rows with requested_at values make the migration raise and
+  change nothing; migration -> rollback (twice) keeps every row and reason_code. tests/test_lakebase_publisher_role.py
+  (per-outbox column grants), tests/test_dssmp_registration.py (statuses / reason codes).
+- Differences between the steering list and §7.19 (§7.19 followed): the status set also allows `rejected_invalid`;
+  the app's own DDL leaves `document_sha256` nullable while lakebase/001 has NOT NULL (both lists say required).
+- Finding (pre-existing, not fixed here): the jobs' Lakebase SQL uses unqualified table names and
+  `lakebase_extract._connect` sets no search_path; the live test sets `search_path TO dam_app` explicitly.
+- UNVERIFIED: not run on a Lakebase instance.

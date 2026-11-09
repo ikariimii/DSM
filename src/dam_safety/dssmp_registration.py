@@ -1,16 +1,19 @@
 """v1.7 (Genie 2026-11-09): register a dam's CDSE-approved DSSMP version from the app outbox into ref.dssmp_version.
 
-Source: Lakebase dam_app.dssmp_registration_outbox (working name app.dssmp_registration_outbox; lakebase/001; the app
-INSERTs, the publisher role may only UPDATE status / message / applied_at). One row = one approved version:
-  outbox_id, dam_id, dssmp_version_id, version_no, effective_from, supersedes_dssmp_version_id (NULL = the dam's first
-  version), change_reason, source_ref, document_uri, document_sha256, approved_by, approved_at, approval_record_hash,
-  requested_by, requested_at, status ('pending'), applied_at, message.
+Source: Lakebase dam_app.dssmp_registration_outbox, the agreed app contract (app SCHEMA_CONTRACT §7 item 19;
+lakebase/001 + lakebase/migrations/v1_7_004). The app INSERTs at 'pending' in the CDSE approve transaction; the
+publisher role may only UPDATE status / reason_code / message / processed_at. Columns: outbox_id, dam_id,
+dssmp_version_id, version_no, effective_from, change_reason, source_ref, document_uri, document_sha256, proposed_by,
+approved_by, approved_at, approval_record_hash, status (pending | loaded | rejected; the app also accepts
+rejected_invalid, this job never writes it), reason_code, message, processed_at. The previous approved version is
+looked up in ref.dssmp_version (no supersedes column).
 Target: ref.dssmp_version (sql/ddl/04 + migration v1_7_003_dssmp_registration). ONE conditional MERGE per run inserts
 the new version as 'approved' (loaded_from_outbox_id = outbox_id) and, in the same statement, closes the dam's previous
 approved version (status 'superseded', effective_to = the new effective_from), re-checking inside the statement that
 the previous approved version is still the one the row supersedes (stale re-check).
 
-Refusals (`<code>: <detail>`, one code per case):
+Outcome: status 'loaded', or 'rejected' with reason_code = the first refusal code and message = every
+'<code>: <detail>' joined by '; '. Refusal codes:
   missing_required_column / invalid_value      the outbox row itself
   approval_record_missing                      no audit.review_record with record_hash = approval_record_hash after
                                                APPROVAL_WAIT (before that the row is `deferred`: the extract may lag)
@@ -21,7 +24,8 @@ Refusals (`<code>: <detail>`, one code per case):
                                                (ref.v_dam_reviewer_authority); plus any dssmp_authority code on it
   dssmp_version_exists                         dssmp_version_id already registered (not by this outbox row)
   version_not_newer / effective_from_not_after_current
-  rejected_stale                               the dam's current approved version is not supersedes_dssmp_version_id
+  stale                                        the dam's approved versions changed while the row was planned (MERGE
+                                               re-check) or the dam has more than one open approved version
 Chain integrity of the approve record (hash, signature, head) is verify_review_chain's job, not repeated here.
 """
 from __future__ import annotations
@@ -36,10 +40,10 @@ from dam_safety.rule_flag_authority import _utc, _who, cdse_dams_at
 DSSMP_COLS = ("dssmp_version_id", "dam_id", "version_no", "effective_from", "effective_to", "status", "change_reason",
               "source_ref", "document_uri", "document_sha256", "approved_by", "approved_at", "approval_record_hash",
               "loaded_from_outbox_id")
-OUTBOX_COLS = ("outbox_id", "dam_id", "dssmp_version_id", "version_no", "effective_from",
-               "supersedes_dssmp_version_id", "change_reason", "source_ref", "document_uri", "document_sha256",
-               "approved_by", "approved_at", "approval_record_hash", "requested_by", "requested_at", "status",
-               "applied_at", "message")
+OUTBOX_COLS = ("outbox_id", "dam_id", "dssmp_version_id", "version_no", "effective_from", "change_reason",
+               "source_ref", "document_uri", "document_sha256", "proposed_by", "approved_by", "approved_at",
+               "approval_record_hash", "status", "reason_code", "message", "processed_at")
+STATUSES = ("pending", "loaded", "rejected", "rejected_invalid")
 REQUIRED = ("outbox_id", "dam_id", "dssmp_version_id", "version_no", "effective_from", "document_sha256",
             "approved_by", "approved_at", "approval_record_hash")
 APPROVAL_WAIT = dt.timedelta(hours=1)
@@ -128,8 +132,8 @@ def plan(pending: Iterable[Mapping], versions: Iterable[Mapping], approvals: Map
          authority: Iterable[Mapping], now, app_roles=None) -> List[dict]:
     """pending: outbox rows (status 'pending'). versions: ref.dssmp_version rows of the dams concerned (all statuses).
     approvals: record_hash -> audit.review_record row. Returns decisions {outbox_id, dam_id, decision, status,
-    message, codes, insert, close} with decision applied | already_applied | rejected_invalid | rejected_stale |
-    deferred."""
+    message, codes, reason_code, insert, close} with decision applied | already_applied | rejected_invalid |
+    rejected_stale | deferred; status loaded | rejected | None (deferred: stays pending)."""
     now = _utc(now)
     authority = list(authority)
     by_id = {v["dssmp_version_id"]: v for v in versions}
@@ -139,20 +143,21 @@ def plan(pending: Iterable[Mapping], versions: Iterable[Mapping], approvals: Map
         msg = "; ".join(msgs) if isinstance(msgs, list) else msgs
         codes = [m.split(":", 1)[0] for m in msg.split("; ")] if decision.startswith("rejected") else []
         out.append({"outbox_id": r.get("outbox_id"), "dam_id": r.get("dam_id"), "decision": decision,
-                    "status": status, "message": msg, "codes": codes, "insert": insert, "close": close})
+                    "status": status, "reason_code": codes[0] if codes else None, "message": msg, "codes": codes,
+                    "insert": insert, "close": close})
 
-    for r in sorted(pending, key=lambda x: (str(x.get("requested_at")), str(x.get("outbox_id")))):
+    for r in sorted(pending, key=lambda x: (str(x.get("approved_at")), str(x.get("outbox_id")))):
         dam, vid = r.get("dam_id"), r.get("dssmp_version_id")
         probs = row_problems(r)
         if probs:
-            decide(r, "rejected_invalid", "rejected_invalid", probs)
+            decide(r, "rejected_invalid", "rejected", probs)
             continue
         have = by_id.get(vid)
         if have is not None:
             if have.get("loaded_from_outbox_id") == r.get("outbox_id"):
-                decide(r, "already_applied", "applied", f"already registered as {vid}")
+                decide(r, "already_applied", "loaded", f"already registered as {vid}")
             else:
-                decide(r, "rejected_invalid", "rejected_invalid",
+                decide(r, "rejected_invalid", "rejected",
                        f"dssmp_version_exists: {vid!r} is already registered (dam {have.get('dam_id')!r}, "
                        f"loaded_from_outbox_id {have.get('loaded_from_outbox_id')!r})")
             continue
@@ -160,21 +165,20 @@ def plan(pending: Iterable[Mapping], versions: Iterable[Mapping], approvals: Map
             decide(r, "deferred", None, "another registration for this dam is in this run")
             continue
         rec = approvals.get(r.get("approval_record_hash"))
-        if rec is None and now - (_ts(r.get("requested_at")) or now) < APPROVAL_WAIT:
+        if rec is None and now - (_ts(r.get("approved_at")) or now) < APPROVAL_WAIT:
             decide(r, "deferred", None, "approve record not yet in audit.review_record (extract lag)")
             continue
         probs = approval_problems(r, rec, authority, app_roles)
         if probs:
-            decide(r, "rejected_invalid", "rejected_invalid", probs)
+            decide(r, "rejected_invalid", "rejected", probs)
             continue
         dam_versions = [v for v in versions if v.get("dam_id") == dam]
         cur = [v for v in dam_versions if v.get("status") == "approved" and v.get("effective_to") is None]
         cur_id = cur[0]["dssmp_version_id"] if len(cur) == 1 else None
-        sup = r.get("supersedes_dssmp_version_id") or None
-        if len(cur) > 1 or cur_id != sup:
-            decide(r, "rejected_stale", "rejected_stale",
-                   f"stale: supersedes {sup!r} but the dam's current approved version is "
-                   f"{[v['dssmp_version_id'] for v in cur] or None}; nothing written")
+        if len(cur) > 1:
+            decide(r, "rejected_stale", "rejected",
+                   f"stale: the dam has {len(cur)} open approved versions {[v['dssmp_version_id'] for v in cur]}; "
+                   "nothing written")
             continue
         eff, vno = _ts(r["effective_from"]), int(r["version_no"])
         msgs = []
@@ -183,7 +187,7 @@ def plan(pending: Iterable[Mapping], versions: Iterable[Mapping], approvals: Map
         if cur and eff <= _ts(cur[0]["effective_from"]):
             msgs.append(f"effective_from_not_after_current: {eff.isoformat()} <= {cur_id}'s effective_from")
         if msgs:
-            decide(r, "rejected_invalid", "rejected_invalid", msgs)
+            decide(r, "rejected_invalid", "rejected", msgs)
             continue
         ins = {"dssmp_version_id": vid, "dam_id": dam, "version_no": vno, "effective_from": eff, "effective_to": None,
                "status": "approved", "change_reason": r.get("change_reason"), "source_ref": r.get("source_ref"),
@@ -191,7 +195,7 @@ def plan(pending: Iterable[Mapping], versions: Iterable[Mapping], approvals: Map
                "approved_by": r["approved_by"], "approved_at": _ts(r["approved_at"]),
                "approval_record_hash": r["approval_record_hash"], "loaded_from_outbox_id": r["outbox_id"]}
         busy.add(dam)
-        decide(r, "applied", "applied", f"registered {vid} (approved)" + (f", superseding {cur_id}" if cur_id else ""),
+        decide(r, "applied", "loaded", f"registered {vid} (approved)" + (f", superseding {cur_id}" if cur_id else ""),
                insert=ins, close=({"dssmp_version_id": cur_id, "effective_to": eff} if cur_id else None))
     return out
 
@@ -232,5 +236,5 @@ def merge_sql(target: str, source: str) -> str:
         f"  THEN INSERT ({cols}) VALUES ({vals})")
 
 
-__all__ = ["DSSMP_COLS", "OUTBOX_COLS", "REQUIRED", "CODES", "APPROVAL_WAIT", "row_problems", "approval_problems",
+__all__ = ["DSSMP_COLS", "OUTBOX_COLS", "STATUSES", "REQUIRED", "CODES", "APPROVAL_WAIT", "row_problems", "approval_problems",
            "plan", "merge_source_rows", "merge_sql"]

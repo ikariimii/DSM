@@ -14,7 +14,7 @@
 -- v1.7 publication outboxes (ref_change_publication, onboarding_publication, dssmp_registration_outbox): not owned
 -- by dam_lakebase_owner, or the app holds anything beyond SELECT / INSERT on them; dam_lakebase_publisher missing,
 -- able to log in / privileged, holding anything beyond USAGE on the schema, SELECT and UPDATE (status, message,
--- applied_at) on those three tables (any other table, column, sequence, INSERT, DELETE, TRUNCATE, TRIGGER,
+-- applied_at; dssmp_registration_outbox: status, reason_code, message, processed_at) on those three tables (any other table, column, sequence, INSERT, DELETE, TRUNCATE, TRIGGER,
 -- REFERENCES), a member of the owner, or named in a default ACL; the app role a member of the publisher role. With
 -- SET dam.extract_role: the extract role holding anything beyond SELECT (plus INSERT / UPDATE on extract_watermark),
 -- or no default ACL giving it SELECT on future tables of dam_lakebase_owner.
@@ -28,6 +28,10 @@ app AS (SELECT r.* FROM cfg JOIN pg_roles r ON r.rolname = cfg.app),
 pub AS (SELECT r.* FROM pg_roles r WHERE r.rolname = 'dam_lakebase_publisher'),
 ext AS (SELECT r.* FROM pg_roles r WHERE r.rolname = nullif(current_setting('dam.extract_role', true), '')),
 outbox(t) AS (VALUES ('ref_change_publication'), ('onboarding_publication'), ('dssmp_registration_outbox')),
+outcome(t, col) AS (SELECT t, c FROM (VALUES ('ref_change_publication'), ('onboarding_publication')) a(t),
+                           (VALUES ('status'), ('message'), ('applied_at')) b(c)
+                    UNION ALL SELECT 'dssmp_registration_outbox', c
+                    FROM (VALUES ('status'), ('reason_code'), ('message'), ('processed_at')) b(c)),
 ot AS (SELECT o.t, c.oid, c.relowner FROM outbox o
        LEFT JOIN pg_class c ON c.relname = o.t AND c.relnamespace = to_regnamespace('dam_app')),
 tabs AS (SELECT c.oid, c.relname FROM pg_class c WHERE c.relnamespace = to_regnamespace('dam_app')
@@ -111,11 +115,10 @@ SELECT * FROM (
       || tabs.relname || '.' || cols.attname
     FROM pub, tabs JOIN cols ON cols.attrelid = tabs.oid, (VALUES ('INSERT'), ('UPDATE'), ('REFERENCES')) cp(p)
     WHERE has_column_privilege(pub.oid, tabs.oid, cols.attname, cp.p)
-     AND NOT (cp.p = 'UPDATE' AND tabs.relname IN (SELECT t FROM outbox)
-              AND cols.attname IN ('status', 'message', 'applied_at'))
-  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher lacks UPDATE (' || c.col || ') on dam_app.' || ot.t
-    FROM pub, ot, (VALUES ('status'), ('message'), ('applied_at')) c(col)
-    WHERE ot.oid IS NOT NULL AND NOT has_column_privilege(pub.oid, ot.oid, c.col, 'UPDATE')
+     AND NOT (cp.p = 'UPDATE' AND (tabs.relname, cols.attname::text) IN (SELECT t, col FROM outcome))
+  UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher lacks UPDATE (' || o.col || ') on dam_app.' || ot.t
+    FROM pub, ot JOIN outcome o ON o.t = ot.t
+    WHERE ot.oid IS NOT NULL AND NOT has_column_privilege(pub.oid, ot.oid, o.col, 'UPDATE')
   UNION ALL SELECT 'publisher_privilege', 'dam_lakebase_publisher has a privilege on sequence ' || c.relname
     FROM pub, pg_class c WHERE c.relnamespace = to_regnamespace('dam_app') AND c.relkind = 'S'
      AND (has_sequence_privilege(pub.oid, c.oid, 'USAGE') OR has_sequence_privilege(pub.oid, c.oid, 'UPDATE'))
