@@ -78,3 +78,41 @@ only: close QA-045b), **af253a8** (QA.md + qa/ only: close QA-045a), **0681292**
 entry tracking qa/test_*.py and a `databricks.yml` sync.exclude of QA.md, both QA-ledger housekeeping). All three are
 on origin. None of App Dev's commits is mis-attributed (they always set App-Developer-agent explicitly; consistent
 with what was checked here). UNCONFIRMED: none.
+
+### 4.1 Follow-up (QA-054, 2026-11-09)
+
+| Hash | Subject | Recorded author | True author | Evidence | Pushed to origin |
+|---|---|---|---|---|---|
+| fe4ed7b | QA-034: redact restricted-derived values; guard derived-scalar check; QA suite tracking | QA-agent (2026-11-02 20:29 -05:00) | QA | paths are QA.md, qa/ (11 files) plus QA-ledger housekeeping in .gitignore, databricks.yml and one docs/VERIFICATION.md line; QA-034 is QA's own finding/suite | yes (origin/main, origin/app/v1.6-port, origin/app/v1.6-integration) |
+| 9ed7b10 | stash@{0} "On feat/v1.7-cdse-ack-hardening: item2 ownership WIP" (stash commit) | QA-engineer-agent (2026-11-09 11:01 -05:00) | Data Architect; stash/WIP, never on a branch | made in DA worktree wt-v17 (branch feat/v1.7-cdse-ack-hardening at 743b8c6) when Genie re-prioritised the DA queue; only lakebase/001_app_schema.sql (dam_lakebase_owner ownership hardening), the precursor of DA commit 0274aeb; DA session record. refs/stash is repo-wide, so it lists in every worktree | no |
+| c3ee790 | "index on feat/v1.7-cdse-ack-hardening: 743b8c6 ..." (stash index parent of 9ed7b10) | QA-engineer-agent | Data Architect; stash/WIP, never on a branch | git-generated index commit of the same stash; no changes vs 743b8c6 | no |
+| 85d1563 | "untracked files on feat/v1.7-cdse-ack-hardening: 743b8c6 ..." (stash untracked parent of 9ed7b10) | QA-engineer-agent | Data Architect; stash/WIP, never on a branch | git-generated untracked-files commit of the same stash: lakebase/validate_append_only.sql and tools/validate_lakebase.py, which landed (revised) in DA commit 0274aeb | no |
+
+None of 9ed7b10 / c3ee790 / 85d1563 is an ancestor of the integration tip (`git merge-base --is-ancestor` false for each).
+
+**23c4a42 vs f0dd9c8.** App Dev's original second-approver commit 23c4a42 (`app/v1.6-port`, worktree wt-v16-port) is
+NOT an ancestor of the integration tip e413293 (`git merge-base --is-ancestor 23c4a42 e413293` exits 1). The commit
+that is included is **f0dd9c8**, App Dev's rebase of 23c4a42 onto 3d398dd (same subject, author App-Developer-agent;
+`git merge-base --is-ancestor f0dd9c8 e413293` exits 0).
+
+**Worktree identities.** There is no repo-level `user.name` (`git config --local --get user.name` is empty) and
+`extensions.worktreeConfig` is on. Every worktree now has its own identity (`git config --worktree user.name/user.email`,
+checked 2026-11-09 11:53 -05:00; `git worktree list` shows no qa043-wt, Genie pruned the stale /tmp/qa043-wt):
+
+| Worktree | Branch / HEAD | user.name | user.email |
+|---|---|---|---|
+| /workspace/dam-safety-app | app/v1.5-audit-chain | Genie (lead) | genie@dam-safety.local |
+| /workspace/dam-safety-app-main | main | Genie (lead) | genie@dam-safety.local |
+| /workspace/qa-wt-853ca80 | detached 853ca80 | QA-engineer-agent | qa-engineer@dam-safety.local |
+| /workspace/qa-wt-bed918c | detached bed918c | QA-engineer-agent | qa-engineer@dam-safety.local |
+| /workspace/wt-713 | feat/7.13-alarm-rule-authority | Databricks-Data-Architect | data-architect@dam-safety.local |
+| /workspace/wt-integ | app/v1.6-integration | Databricks-Data-Architect | data-architect@dam-safety.local |
+| /workspace/wt-integ-app | app/v1.6-integ-appdev | Databricks-App-Developer | app-developer@dam-safety.local |
+| /workspace/wt-qa045a | app/qa-045a-signature | Databricks-App-Developer | app-developer@dam-safety.local |
+| /workspace/wt-qa045b | fix/qa-045b-truncate | Databricks-Data-Architect | data-architect@dam-safety.local |
+| /workspace/wt-qa045c | fix/qa-045c-sig-head | Databricks-Data-Architect | data-architect@dam-safety.local |
+| /workspace/wt-qa045d | fix/qa-045d-chain-head | Databricks-Data-Architect | data-architect@dam-safety.local |
+| /workspace/wt-v16-port | app/v1.6-port | Databricks-App-Developer | app-developer@dam-safety.local |
+| /workspace/wt-v17 | feat/v1.7-cdse-ack-hardening | Databricks-Data-Architect | data-architect@dam-safety.local |
+
+No history is rewritten: these records are corrected here only. UNCONFIRMED: none.
