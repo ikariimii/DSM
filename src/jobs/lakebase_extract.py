@@ -78,13 +78,41 @@ def _utc(ts):
     return t.replace(tzinfo=dt.timezone.utc) if t.tzinfo is None else t.astimezone(dt.timezone.utc)
 
 
-def review_rows_to_records(rows, known_ids=()):
+CDSE_LEVEL = "CDSE"
+LEGACY_FLAG = "review_level_legacy_unverified"
+
+
+def _ts_or_none(v):
+    return None if v in (None, "") else _utc(v)
+
+
+def review_level_legacy_unverified(rec, authority) -> bool:
+    """v1.6 ROLE-LEVEL (Genie-confirmed): a record at review_level 'CDSE' is verified only if its reviewer_id or
+    reviewer_email (case-insensitive) is a ref.v_dam_reviewer_authority principal for that dam at signed_ts: the dam's
+    cdse_id (no history: current value) or a CDSE membership with granted_ts <= signed_ts < revoked_ts. Same rule as
+    gold.v_review_level_check. authority: iterable of dicts with dam_id, principal, granted_ts, revoked_ts. Derived
+    only: the stored record is never changed (audit.review_record is append-only and hash-chained)."""
+    if str(rec.get("review_level") or "").upper() != CDSE_LEVEL:
+        return False
+    who = {str(x).strip().lower() for x in (rec.get("reviewer_id"), rec.get("reviewer_email")) if x and str(x).strip()}
+    at = _utc(rec["signed_ts"])
+    for a in authority:
+        if a.get("dam_id") != rec.get("dam_id") or str(a.get("principal") or "").strip().lower() not in who:
+            continue
+        g, v = _ts_or_none(a.get("granted_ts")), _ts_or_none(a.get("revoked_ts"))
+        if (g is None or g <= at) and (v is None or v > at):
+            return False
+    return True
+
+
+def review_rows_to_records(rows, known_ids=(), authority=None):
     """Lakebase review_signoff rows -> audit.review_record rows (v1.5 QA-039, v1.6 chain columns). Skips review_ids
     already in UC (at-least-once re-extract) and duplicates within the batch. signed_ts text -> UTC TIMESTAMP: the
     canonical form normalises timestamps, so signature_hash and record_hash still verify (tests/test_review_signature.py,
     tests/test_audit_chain.py). A row missing a REVIEW_REQUIRED column raises instead of being dropped silently.
     Output is in chain order (chain_id, chain_seq). No approval rule runs here: corrections.approval_problem is for
-    incl_correction rows only and is applied by the reduction job, never to alarm_event rows."""
+    incl_correction rows only and is applied by the reduction job, never to alarm_event rows. With `authority`
+    (ref.v_dam_reviewer_authority rows) each record also gets the derived key review_level_legacy_unverified."""
     seen, out = set(known_ids), []
     for r in rows:
         missing = [c for c in REVIEW_REQUIRED if r.get(c) in (None, "")]
@@ -97,6 +125,8 @@ def review_rows_to_records(rows, known_ids=()):
         rec["signed_ts"] = _utc(r["signed_ts"])
         rec["chain_seq"] = int(r["chain_seq"])
         rec["source"] = REVIEW_SOURCE
+        if authority is not None:  # derived key, not an audit.review_record column (the write selects schema fields)
+            rec[LEGACY_FLAG] = review_level_legacy_unverified(rec, authority)
         out.append(rec)
     out.sort(key=lambda x: (str(x["chain_id"]), x["chain_seq"]))
     return out
@@ -201,7 +231,13 @@ def main():
             rr = spark.table(f"{a.catalog}.audit.review_record")
             known = {x.review_id for x in rr.where(rr.review_id.isin([r["review_id"] for r in rs]))
                      .select("review_id").collect()}
-            recs = review_rows_to_records(rs, known)
+            auth = [r.asDict() for r in spark.table(f"{a.catalog}.ref.v_dam_reviewer_authority")
+                    .select("dam_id", "principal", "granted_ts", "revoked_ts").collect()]
+            recs = review_rows_to_records(rs, known, authority=auth)
+            legacy = [r["review_id"] for r in recs if r[LEGACY_FLAG]]
+            if legacy:  # kept unchanged (append-only); surfaced here and in gold.v_review_level_check
+                print(f"WARN {len(legacy)} review_signoff record(s) at review_level CDSE by a reviewer who was not the "
+                      f"dam's CDSE at signed_ts ({LEGACY_FLAG}): {legacy[:20]}")
             if recs:
                 spark.createDataFrame([tuple(r[f.name] for f in rr.schema.fields) for r in recs], rr.schema) \
                     .write.mode("append").saveAsTable(f"{a.catalog}.audit.review_record")

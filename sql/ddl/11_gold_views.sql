@@ -139,6 +139,24 @@ FROM silver.incl_survey GROUP BY instrument_id, survey_id, survey_ts, is_baselin
 -- ck_incl_correction_applied_reviewed makes an applied row without reviewer columns impossible, and
 -- 'unreviewed_applied' is the defensive value for an applied row whose review row is missing or does not match.
 -- The review signature is verified by the reduction job (corrections.approval_problem), not by this view.
+-- v1.6 ROLE-LEVEL (Genie-confirmed 2026-11-09): review_level 'CDSE' is valid only for the dam's ref.dam.cdse_id or a
+-- CDSE membership for that dam active at signed_ts (ref.v_dam_reviewer_authority, sql/ddl/10b). Records written
+-- earlier at CDSE level by a dso / dam_admin / admin are KEPT UNCHANGED (audit.review_record is append-only and
+-- hash-chained); this derived flag marks them instead. reviewer_id or reviewer_email may match (case-insensitive).
+-- ref.dam.cdse_id has no history: it is compared as of now (UNVERIFIED for past CDSE changes, VERIFICATION.md).
+CREATE OR REPLACE VIEW gold.v_review_level_check AS
+SELECT r.review_id, r.dam_id, r.subject_type, r.subject_id, r.review_level, r.reviewer_id, r.reviewer_email,
+       r.signed_ts,
+       (upper(r.review_level) = 'CDSE' AND count(a.principal) = 0) AS review_level_legacy_unverified
+FROM audit.review_record r
+LEFT JOIN ref.v_dam_reviewer_authority a
+  ON a.dam_id = r.dam_id
+ AND lower(a.principal) IN (lower(r.reviewer_id), lower(coalesce(r.reviewer_email, '')))
+ AND (a.granted_ts IS NULL OR a.granted_ts <= r.signed_ts)
+ AND (a.revoked_ts IS NULL OR a.revoked_ts > r.signed_ts)
+GROUP BY r.review_id, r.dam_id, r.subject_type, r.subject_id, r.review_level, r.reviewer_id, r.reviewer_email,
+         r.signed_ts;
+
 CREATE OR REPLACE VIEW gold.incl_correction_status AS
 SELECT c.* EXCEPT (superseded_by),
        coalesce(c.superseded_by, nxt.record_id) AS superseded_by,
@@ -146,6 +164,8 @@ SELECT c.* EXCEPT (superseded_by),
        r.signed_ts      AS approved_utc,
        r.comment        AS review_rationale,
        r.signature_hash AS review_signature_hash,
+       r.review_level   AS review_level,
+       coalesce(lc.review_level_legacy_unverified, false) AS review_level_legacy_unverified,
        CASE WHEN c.superseded_by IS NOT NULL OR nxt.record_id IS NOT NULL THEN 'superseded'
             WHEN c.applied AND r.review_id IS NOT NULL THEN 'approved'
             WHEN c.applied THEN 'unreviewed_applied'
@@ -157,4 +177,5 @@ LEFT JOIN (SELECT supersedes, max_by(record_id, timestamp_utc) AS record_id
 LEFT JOIN audit.review_record r
   ON r.review_id = c.review_id AND r.subject_type = 'incl_correction' AND r.decision = 'approve'
  AND r.reviewer_id = c.reviewed_by AND lower(r.reviewer_id) <> lower(c.`user`)
- AND r.subject_id IN (c.record_id, c.supersedes);
+ AND r.subject_id IN (c.record_id, c.supersedes)
+LEFT JOIN gold.v_review_level_check lc ON lc.review_id = r.review_id;
