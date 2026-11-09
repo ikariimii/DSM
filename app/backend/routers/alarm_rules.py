@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import audit_chain as ac
+from ..config import approval_policy
 from ..deps import Ctx, analytics, ctx, require, store
 from ..onboarding import PUBLISH_REQUIRED  # ref.threshold NOT NULL columns carried from version N into N+1
 from . import alarms as alarms_router
@@ -141,6 +142,33 @@ def _apply(c: Ctx, request: Request, an, st, rule: dict, new_flag: bool, rationa
             "cdse_ack_required": new_flag}
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# DECISION POINT - PROVISIONAL approval rule (Genie, v1.6; the user is deciding whether to require a second
+# approver). Setting CDSE_FLAG_REQUIRE_SECOND_APPROVER (config.Settings.cdse_flag_require_second_approver):
+#   false (default, current behaviour): the dam's CDSE may set/clear directly and may approve their own proposal.
+#   true: no direct set/clear (403 second_approver_required); every change is a proposal; the approver must be the
+#         dam's CDSE and NOT the proposer (403 self_approval_forbidden). dam_admin / admin still only propose.
+#         With one CDSE per dam, a CDSE's own proposal can then only be rejected (= withdrawn) by that CDSE; a
+#         CDSE-initiated change needs another principal: a second CDSE grant for the dam, or a dam_admin / admin
+#         proposing it for the CDSE to approve.
+# ---------------------------------------------------------------------------------------------------------------
+def _second_approver(request: Request) -> bool:
+    return bool(request.app.state.settings.cdse_flag_require_second_approver)
+
+
+def _same_person(c: Ctx, who: dict, p: dict) -> bool:
+    """Approver == proposer: same email (case-insensitive) or same stable reviewer id."""
+    if (p.get("proposed_by") or "").strip().lower() == (c.email or "").strip().lower():
+        return True
+    pid, rid = p.get("proposed_by_id"), who.get("reviewer_id")
+    return bool(pid) and bool(rid) and str(pid) == str(rid)
+
+
+def _policy_403(code: str, message: str) -> HTTPException:
+    return HTTPException(403, {"code": code, "message": message, "provisional": True,
+                               "setting": "CDSE_FLAG_REQUIRE_SECOND_APPROVER"})
+
+
 def _guard_cdse(c: Ctx, dam_id: str, an, what: str) -> None:
     require(c, dam_id, "viewer")
     if not sg.is_cdse(c, dam_id, an):
@@ -149,15 +177,21 @@ def _guard_cdse(c: Ctx, dam_id: str, an, what: str) -> None:
 
 
 @router.get("")
-def list_rules(dam_id: str, c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
+def list_rules(dam_id: str, request: Request, c: Ctx = Depends(ctx), an=Depends(analytics), st=Depends(store)):
     require(c, dam_id, "viewer")
     cdse = sg.is_cdse(c, dam_id, an)
     rules = sorted(an.thresholds(dam_id), key=lambda t: (t["instrument_id"], t.get("level") or 0, t["threshold_id"]))
     props = st.flag_proposals(dam_id)
     pending = [p for p in props if p["status"] == "pending"]
+    second = _second_approver(request)
+    who = sg.reviewer_identity(c, request)
     for p in pending:
-        p["can_decide"] = cdse
-    return {"dam_id": dam_id, "is_cdse": cdse, "can_propose": _may_propose(c, dam_id, cdse), "can_apply": cdse,
+        p["can_decide"] = cdse                       # may reject (a CDSE's own proposal: withdraw by rejecting)
+        p["can_reject"] = cdse
+        p["can_approve"] = cdse and not (second and _same_person(c, who, p))
+        p["own"] = _same_person(c, who, p)
+    return {"dam_id": dam_id, "is_cdse": cdse, "can_propose": _may_propose(c, dam_id, cdse),
+            "can_apply": cdse and not second, "approval_policy": approval_policy(request.app.state.settings),
             "rules": [{"threshold_id": t["threshold_id"], "threshold_version": _version(t),
                        "instrument_id": t["instrument_id"], "level": t.get("level"), "rule_label": t.get("rule_label"),
                        "value": t.get("value"), "unit": t.get("unit"), "cdse_ack_required": _flag(t),
@@ -197,6 +231,10 @@ def propose(dam_id: str, threshold_id: str, body: FlagBody, request: Request, c:
 def apply_direct(dam_id: str, threshold_id: str, body: FlagBody, request: Request, c: Ctx = Depends(ctx),
                  an=Depends(analytics), st=Depends(store)):
     _guard_cdse(c, dam_id, an, "set or clear cdse_ack_required")
+    if _second_approver(request):  # PROVISIONAL rule, see DECISION POINT above
+        raise _policy_403("second_approver_required",
+                          f"A second approver is required (CDSE_FLAG_REQUIRE_SECOND_APPROVER): the CDSE of {dam_id} "
+                          "cannot set or clear cdse_ack_required directly; submit a proposal instead")
     rationale = sg.rationale_of(body.rationale)
     rule = _rule(an, dam_id, threshold_id)
     if _flag(rule) == body.cdse_ack_required:
@@ -222,6 +260,10 @@ def approve(dam_id: str, proposal_id: str, body: DecisionBody, request: Request,
     _guard_cdse(c, dam_id, an, "approve a cdse_ack_required change")
     rationale = sg.rationale_of(body.rationale)
     p = _pending(st, dam_id, proposal_id)
+    if _second_approver(request) and _same_person(c, sg.reviewer_identity(c, request), p):  # PROVISIONAL rule
+        raise _policy_403("self_approval_forbidden",
+                          f"A second approver is required (CDSE_FLAG_REQUIRE_SECOND_APPROVER): {c.email} proposed "
+                          f"{proposal_id} and cannot approve it; it can only be rejected (withdrawn)")
     rule = _rule(an, dam_id, p["threshold_id"])
     why = _stale(st, rule, int(p["base_threshold_version"]), bool(p["base_flag"]), proposal_id)
     if why:

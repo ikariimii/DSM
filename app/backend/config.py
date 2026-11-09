@@ -45,6 +45,11 @@ class Settings:
             e.strip().lower() for e in os.getenv("BOOTSTRAP_ADMINS", "").split(",") if e.strip()
         )
     )
+    # PROVISIONAL approval rule for live cdse_ack_required edits (Genie, v1.6; the user is deciding). false (default,
+    # current behaviour): the dam's CDSE may set/clear directly and approve their own proposal. true: every change
+    # goes through a proposal, the approver must be the dam's CDSE AND not the proposer (routers/alarm_rules.py).
+    cdse_flag_require_second_approver: bool = field(
+        default_factory=lambda: _bool("CDSE_FLAG_REQUIRE_SECOND_APPROVER", False))
     static_dir: str = field(
         default_factory=lambda: os.getenv(
             "STATIC_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
@@ -63,3 +68,14 @@ class Settings:
             raise RuntimeError("DEMO_MODE is false but DATABRICKS_WAREHOUSE_ID is not set; refusing to start")
         if not self.demo_mode and not self.sql_on_behalf_of_user:
             raise RuntimeError("SQL_OBO=false is not supported: gold is read only as the signed-in user")
+
+
+def approval_policy(s: "Settings") -> dict:
+    """Approval rule for live cdse_ack_required edits, as exposed to the UI (GET /api/me, GET .../alarm-rules).
+    PROVISIONAL (Genie, v1.6): the user is deciding whether to require a second approver."""
+    on = bool(s.cdse_flag_require_second_approver)
+    return {"cdse_flag_require_second_approver": on, "provisional": True,
+            "cdse_may_apply_directly": not on, "cdse_may_self_approve": not on,
+            "note": ("Approval rule provisional: a second approver is required - the CDSE cannot set/clear directly "
+                     "or approve their own proposal" if on else
+                     "Approval rule provisional: currently the dam CDSE may self-approve")}

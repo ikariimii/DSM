@@ -12,7 +12,10 @@ export function setDemoUser(email: string | null) {
 
 export class ApiError extends Error {
   constructor(public status: number, public detail: unknown) {
-    super(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const d = detail as any;
+    // coded refusals (e.g. {code: "self_approval_forbidden", message}) show "code: message"
+    super(typeof detail === "string" ? detail : d && typeof d.code === "string" && typeof d.message === "string"
+      ? `${d.code}: ${d.message}` : JSON.stringify(detail));
   }
 }
 
@@ -35,6 +38,14 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
 export type DisplayStatus = "VERIFIED" | "UNVERIFIED_FORMULA" | "UNAPPROVED_CALIBRATION" | "UNAPPROVED_INSTALLATION" | "QC_BAD" | "MISSING"
   | "CORRECTION_UNVERIFIED" | "LINEAGE_INCOMPLETE" | "LINEAGE_INCONSISTENT" | "NO_ENGINE_FORMULA";
 
+export interface ApprovalPolicy {
+  cdse_flag_require_second_approver: boolean;
+  provisional: boolean;
+  cdse_may_apply_directly: boolean;
+  cdse_may_self_approve: boolean;
+  note: string;
+}
+
 export interface Me {
   email: string;
   known: boolean;
@@ -43,5 +54,7 @@ export interface Me {
   dams: string[];
   demo_mode: boolean;
   can_onboard: boolean;
+  // PROVISIONAL approval rule for live cdse_ack_required edits (config CDSE_FLAG_REQUIRE_SECOND_APPROVER)
+  approval_policy?: ApprovalPolicy;
   demo_users?: { email: string; display_name: string }[];
 }

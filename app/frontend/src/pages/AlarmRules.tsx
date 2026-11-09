@@ -7,6 +7,9 @@ import { Card, Loading, utc } from "../components/ui";
 // Live-dam edits of an alarm rule's "CDSE ack required" flag. dam_admin / admin may only PROPOSE; the dam's CDSE
 // (ref.v_dam_reviewer_authority) approves, rejects or sets/clears directly. The server enforces all of this; the
 // controls below are only shown to the roles that may use them. Every action needs a rationale and is chained.
+// PROVISIONAL approval rule (data.approval_policy, config CDSE_FLAG_REQUIRE_SECOND_APPROVER): when a second approver
+// is required, direct set/clear is hidden (can_apply false), the CDSE proposes too, and the CDSE's own proposals
+// show only "Withdraw (reject)" (can_approve false).
 export default function AlarmRules() {
   const { damId } = useParams();
   const { data, error, loading, reload } = useApi<any>(`/api/dams/${damId}/alarm-rules`);
@@ -27,11 +30,14 @@ export default function AlarmRules() {
            onChange={(e) => setWhy({ ...why, [k]: e.target.value })} />
   );
   const base = `/api/dams/${damId}/alarm-rules`;
+  const pol = data.approval_policy || {};
+  const second = !!pol.cdse_flag_require_second_approver;
   return (
     <div>
       <h2>Alarm rules — {damId}</h2>
       <div className="row"><Link to={`/dams/${damId}`}>← dam</Link></div>
-      <div className="muted">"CDSE ack required": alarms from the rule need this dam's CDSE to acknowledge them at any level (levels 2 and 3 always do). {data.is_cdse ? "You are this dam's CDSE: you may set or clear the flag and decide proposals." : data.can_propose ? "You may propose a change; the dam's CDSE approves or rejects it." : "Read only."} Clearing a flag never weakens an alarm that is already open. Each change creates a new rule version.</div>
+      <div className="muted">"CDSE ack required": alarms from the rule need this dam's CDSE to acknowledge them at any level (levels 2 and 3 always do). {data.is_cdse ? (second ? "You are this dam's CDSE: you may propose changes and approve or reject other people's proposals; your own proposals can only be withdrawn." : "You are this dam's CDSE: you may set or clear the flag and decide proposals.") : data.can_propose ? "You may propose a change; the dam's CDSE approves or rejects it." : "Read only."} Clearing a flag never weakens an alarm that is already open. Each change creates a new rule version.</div>
+      <div className="muted"><span className="badge warn">provisional</span> {pol.note || "Approval rule provisional: currently the dam CDSE may self-approve"}.</div>
       {err && <div className="error">{err}</div>}
       <Card title="Rules">
         <table><thead><tr><th>Rule</th><th>Version</th><th>Instrument</th><th>Level</th><th>Limit</th><th>CDSE ack required</th><th></th></tr></thead><tbody>
@@ -42,7 +48,7 @@ export default function AlarmRules() {
               <td>{r.cdse_ack_required ? <b>yes</b> : "no"}{r.pending.length > 0 && <span className="badge warn"> {r.pending.length} pending</span>}</td>
               <td>
                 {(data.can_propose || data.can_apply) && box(r.threshold_id)}
-                {data.can_propose && !data.is_cdse && (
+                {data.can_propose && (!data.is_cdse || second) && (
                   <button disabled={!text(r.threshold_id)} onClick={() => run(r.threshold_id, `${base}/${r.threshold_id}/cdse-flag/proposals`, { cdse_ack_required: !r.cdse_ack_required })}>
                     Propose {r.cdse_ack_required ? "clear" : "set"}</button>
                 )}
@@ -65,8 +71,9 @@ export default function AlarmRules() {
                 <td>{p.proposed_by}</td><td>{utc(p.proposed_at)}</td><td>{p.rationale}</td>
                 <td>{p.can_decide && (<>
                   {box(p.proposal_id)}
-                  <button disabled={!text(p.proposal_id)} onClick={() => run(p.proposal_id, `${base}/proposals/${p.proposal_id}/approve`, {})}>Approve</button>
-                  <button className="secondary" disabled={!text(p.proposal_id)} onClick={() => run(p.proposal_id, `${base}/proposals/${p.proposal_id}/reject`, {})}>Reject</button>
+                  {p.can_approve && <button disabled={!text(p.proposal_id)} onClick={() => run(p.proposal_id, `${base}/proposals/${p.proposal_id}/approve`, {})}>Approve</button>}
+                  {p.can_reject && <button className="secondary" disabled={!text(p.proposal_id)} onClick={() => run(p.proposal_id, `${base}/proposals/${p.proposal_id}/reject`, {})}>{p.own && second ? "Withdraw (reject)" : "Reject"}</button>}
+                  {p.own && second && <span className="muted"> your proposal: another CDSE must approve</span>}
                 </>)}</td>
               </tr>
             ))}

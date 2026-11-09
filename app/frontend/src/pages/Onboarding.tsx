@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, type Me } from "../api";
 import { useApi } from "../hooks";
 import { Card, Loading, utc } from "../components/ui";
 
@@ -36,6 +36,7 @@ export default function Onboarding() {
 
 function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit: () => void }) {
   const { data: draft, reload } = useApi<any>(`/api/onboarding/drafts/${draftId}`);
+  const { data: me } = useApi<Me>("/api/me");
   const [step, setStep] = useState(0);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -107,6 +108,7 @@ function Wizard({ meta, draftId, onExit }: { meta: any; draftId: string; onExit:
           { key: "cdse_ack_required", label: "CDSE ack required", type: "checkbox" }]} />}
         {name === "thresholds" && <div className="muted">* Required to go live (ref.threshold NOT NULL; no defaults are filled in): DSSMP version the limit is set under; tier (AL1..ALn, THRESHOLD or DESIGN_BASIS); deadband = hysteresis in the rule's own unit (≥ 0); persistence on / off = consecutive readings to raise / to clear (whole number ≥ 1).</div>}
         {name === "thresholds" && <div className="muted">"CDSE ack required" (default off): acknowledging any alarm from this rule, at any level, needs the dam's named CDSE (ref.dam.cdse_id). Levels 2 and 3 always need the CDSE. Changing it is recorded in the audit log.</div>}
+        {name === "thresholds" && <div className="muted"><span className="badge warn">provisional</span> {me?.approval_policy?.note ?? "Approval rule provisional: currently the dam CDSE may self-approve"}. After go-live, changes to the flag follow this rule on the dam's Alarm rules page.</div>}
         {name === "thresholds" && <div className="muted">Cyclic limits are stored but not evaluated by the alarm machine; abs limits are evaluated as |value| &gt; limit.</div>}
         {name === "data_sources" && <Rows value={data.data_sources || []} onSave={save} disabled={readOnly} cols={[
           { key: "instrument_id", type: "select", options: instIds }, { key: "source_type", type: "select", options: meta.source_types },

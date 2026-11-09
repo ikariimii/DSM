@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 
 from .. import formulas as fx
 from ..common import LEVEL_NAMES, gate_for, merge_ack, site_or_404
+from ..config import approval_policy
 from ..deps import Ctx, analytics, ctx, require, store
 from ..seed import SEED_USERS
 
@@ -24,7 +25,9 @@ def me(request: Request, c: Ctx = Depends(ctx), an=Depends(analytics)):
     s = request.app.state.settings
     dams = c.dams([x["dam_id"] for x in an.sites()])
     out = {"email": c.email, "known": c.known, "is_admin": c.is_admin, "roles": {d: c.role(d) for d in dams},
-           "dams": dams, "demo_mode": s.demo_mode, "can_onboard": c.is_admin or "dam_admin" in c.roles.values()}
+           "dams": dams, "demo_mode": s.demo_mode, "can_onboard": c.is_admin or "dam_admin" in c.roles.values(),
+           # PROVISIONAL approval rule for cdse_ack_required edits (config CDSE_FLAG_REQUIRE_SECOND_APPROVER)
+           "approval_policy": approval_policy(s)}
     if s.demo_mode:
         out["demo_users"] = [{"email": e, "display_name": n} for e, n, _ in SEED_USERS]
     return out

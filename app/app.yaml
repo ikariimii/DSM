@@ -16,6 +16,8 @@ env:
     value: "false"
   - name: SQL_OBO                # SQL warehouse queried on behalf of the user (UC row filters apply)
     value: "true"
+  - name: CDSE_FLAG_REQUIRE_SECOND_APPROVER  # PROVISIONAL approval rule (SCHEMA_CONTRACT §5a): false = the dam CDSE
+    value: "false"                           # may set/clear directly and self-approve; true = second approver required
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
   - name: DAM_CATALOG            # per-target catalog; overridden by the bundle (dam_dev|dam_test|dam_prod)

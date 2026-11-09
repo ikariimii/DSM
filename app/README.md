@@ -56,6 +56,16 @@ cumulative is shown across a gap. See SCHEMA_CONTRACT.md §7 item 11.
   clear. The dam's CDSE approves or rejects it, or sets or clears it directly. Every action needs a rationale and is
   chained. An apply queues a new `ref.threshold` version and never edits the old one. A stale proposal (the rule
   changed since) is refused. Engineers, DSOs and viewers can only look.
+  **The approval rule is PROVISIONAL** (the user is deciding whether to require a second approver). It is switched by
+  one setting, `CDSE_FLAG_REQUIRE_SECOND_APPROVER` (`app.yaml` env, default `false`, exposed as
+  `approval_policy` on `GET /api/me`):
+  - `false` (current behaviour): the dam CDSE may set/clear directly and approve their own proposal.
+  - `true`: no direct set/clear (403 `second_approver_required`). Every change is a proposal, and the approver must
+    be the dam's CDSE and not the proposer (403 `self_approval_forbidden`). With one CDSE per dam, the CDSE's own
+    proposal can then only be rejected (withdrawn). A CDSE-initiated change needs a second CDSE grant for the dam, or
+    a dam_admin/admin to propose it for the CDSE to approve.
+
+  The Alarm rules page and the onboarding wizard show the current rule with a "provisional" note.
 - **First admin outside demo (`BOOTSTRAP_ADMINS`):** set `BOOTSTRAP_ADMINS=<email>[,<email>]` in the bundle
   `config.env` **for the first prod deploy only, then remove it from prod config** and redeploy once the first
   admin has signed in and granted roles in the Admin UI. Rules (`backend/bootstrap.py`):

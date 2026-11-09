@@ -177,6 +177,28 @@ the flagged rules. Demo: `CRD-IN-1-T1` (level 1) is flagged.
 `is_cdse` / `can_propose` / `can_apply`) plus the three POST actions above.
 - Only the dam's CDSE (`signoffs.is_cdse`, live: `ref.v_dam_reviewer_authority`, fail closed) may apply a set or
   clear, either directly or by approving a proposal. The CDSE may also approve their own proposal.
+- **PROVISIONAL approval rule** (Genie, v1.6; the user is deciding whether to require a second approver). It is one
+  setting, `CDSE_FLAG_REQUIRE_SECOND_APPROVER` (env / `app.yaml`, `config.Settings.cdse_flag_require_second_approver`,
+  default `false`). Decision point: `routers/alarm_rules.py` (DECISION POINT comment).
+  - `false` (default, current behaviour): as above. The CDSE sets/clears directly and may self-approve.
+  - `true`:
+    - Direct set/clear is refused with 403 and detail `{code: "second_approver_required", message, provisional:
+      true, setting}`. Every change goes through a proposal (the CDSE may propose too).
+    - `approve` by the proposer returns 403 `{code: "self_approval_forbidden", ...}`. Proposer and approver are
+      matched on email (case-insensitive) or the stable reviewer id. Nothing is written and the proposal stays
+      pending.
+    - The approver must still be that dam's CDSE, and dam_admin / admin still only propose.
+    - **Consequence:** with one CDSE per dam, a CDSE's own proposal can only be rejected (that is the withdrawal;
+      there is no separate withdraw action, which would need a new `decision` value in the DA CHECK), never
+      approved. A CDSE-initiated change therefore needs either a second CDSE grant for the dam
+      (`ref.project_membership` role CDSE, honoured by the authority lookup) or a dam_admin / admin to propose it
+      for the CDSE to approve.
+  - Exposed to the UI as `approval_policy` (`cdse_flag_require_second_approver`, `provisional: true`,
+    `cdse_may_apply_directly`, `cdse_may_self_approve`, `note`) on `GET /api/me` and `GET .../alarm-rules`. The
+    alarm-rules GET also gives `can_apply` (false when the setting is on) and, per pending proposal, `own`,
+    `can_approve` and `can_reject`.
+  - The Alarm rules page hides direct set/clear and self-approve accordingly. It and the wizard's thresholds step
+    show the note (e.g. "Approval rule provisional: currently the dam CDSE may self-approve").
 - Version N+1 copies `dssmp_version_id`, `tier`, `deadband`, `persistence_on` and `persistence_off` (ref.threshold
   NOT NULL) from version N unchanged. If version N lacks any of them, the apply (direct or by approval) is refused
   with 409 before anything is recorded or queued, and the proposal stays pending. No default is ever invented.
@@ -529,3 +551,16 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **DA:** the publish job inserts these columns from the outbox `insert` / `thresholds` rows as given. Does
       `ref.dssmp` need a FK check on `dssmp_version_id`? The app does not validate it against `ref.dssmp` (it does not
       read that table).
+16. **Second approver for cdse_ack_required edits (PROVISIONAL app setting `CDSE_FLAG_REQUIRE_SECOND_APPROVER`,
+    §5a; a note for the DA, no DA change needed now).** If the setting goes on, the engine and the chain verifier
+    could enforce the same rule independently of the app.
+    - Rule: for every `alarm_rule_flag_apply` record whose `corrected_value.proposal_id` references a proposal,
+      applier ≠ proposer. Compare the apply record's `reviewer_id` (and lower-cased `reviewer_email`) with the
+      matching `alarm_rule_flag_propose` record of the same `proposal_id` in the same dam chain.
+    - An apply with no `proposal_id` (a direct set/clear) would then be an error for records signed while the setting
+      was on.
+    - The setting is app config and is not recorded in the chain, so the DA would need its effective period, e.g. a
+      date from which the rule applies, or a `ref.*` policy row. Alternatively, the app can add the setting to the
+      apply record's `corrected_value` if the DA wants it in the hashed content.
+    - Fits the §7.13 authority verifier (`rule_flag_authority_problems`) as a new failure code such as
+      `self_approval`.
