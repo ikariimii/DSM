@@ -214,6 +214,15 @@ CODE_REVERSION_NOT_OWNER_OWNED = "rule_reversion_not_owner_owned"
 CODE_REVERSION_GUARD_DISABLED = "rule_reversion_transition_guard_disabled"
 
 
+def _table_key(table: str) -> str:
+    """Bare, case-folded table name: '"dam_app"."Rule_Reversion_Proposal"', '{s}rule_reversion_proposal' and
+    'DAM_APP.RULE_REVERSION_PROPOSAL' all give 'rule_reversion_proposal' (QA-058 residual: the six-column allowlist
+    must not be bypassed by quoting, casing or a schema prefix)."""
+    name = table.strip().replace("{s}", "")
+    name = re.split(r'\.(?=(?:[^"]*"[^"]*")*[^"]*$)', name)[-1]      # last dot outside double quotes
+    return name.strip().strip('"').strip().casefold()
+
+
 class OwnerSchemaError(RuntimeError):
     """Startup refusal (fail closed): an owner-managed object is not provisioned as the app requires."""
 
@@ -466,10 +475,12 @@ class StateStore:
                              "FOR EACH STATEMENT EXECUTE FUNCTION {s}app_forbid_mutation()")
 
     def _verify_reversion_owner(self) -> None:
-        """QA-058 startup check (Postgres; fail closed, read only): rule_reversion_proposal must exist, be owned by
+        """QA-058 / QA-060 check (Postgres; fail closed, read only): rule_reversion_proposal must exist, be owned by
         dam_lakebase_owner (by name: a superuser or the app role owning it is the pre-v1_7_010 layout), and carry the
-        status-transition trigger enabled - tgenabled 'A' (ENABLE ALWAYS, what lakebase/001 sets) or 'O' (origin;
-        accepted with a warning). 'D' (disabled), 'R' (replica only) or a missing trigger refuse start."""
+        status-transition trigger ENABLE ALWAYS (tgenabled 'A', what lakebase/001 sets). Anything else refuses:
+        'O' (origin) does not fire under session_replication_role = replica, so a frozen row could leave a terminal
+        state (QA-060); 'D' disabled, 'R' replica only, or a missing trigger. Run at startup (init_schema) and again
+        by every chain verification (verify_owner_tables), so a change after startup is reported."""
         s, t = self.schema or "public", REVERSION_TABLE
         own = self.execute("SELECT pg_get_userbyid(c.relowner) AS owner FROM pg_class c JOIN pg_namespace n "
                            "ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s AND c.relkind = 'r'", (s, t))
@@ -483,14 +494,24 @@ class StateStore:
                            "AND tgrelid = (SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
                            "WHERE n.nspname = %s AND c.relname = %s)", (REVERSION_TRIGGER, s, t))
         state = (trg[0] or {}).get("tgenabled") if trg else None
-        if state not in ("A", "O"):
+        if state != "A":
             raise OwnerSchemaError(CODE_REVERSION_GUARD_DISABLED,
                                    f"{s}.{t} status-transition trigger {REVERSION_TRIGGER} is "
-                                   + ({None: "missing", "D": "disabled", "R": "replica-only"}.get(state, f"in state {state!r}"))
+                                   + ({None: "missing", "D": "disabled", "R": "replica-only",
+                                       "O": "origin-only (ENABLE, not ALWAYS)"}.get(state, f"in state {state!r}"))
                                    + "; expected ENABLE ALWAYS (tgenabled 'A'): re-run lakebase/001 (v1_7_009 block)")
-        if state == "O":
-            log.warning("%s.%s trigger %s is enabled (origin) but not ALWAYS; lakebase/001 sets ENABLE ALWAYS",
-                        s, t, REVERSION_TRIGGER)
+
+    def verify_owner_tables(self) -> OwnerSchemaError | None:
+        """QA-058 residual: re-run the startup owner / trigger check on demand (chain verification calls it, as QA-053
+        re-applies the signer guard), so disabling the trigger or changing the owner AFTER startup is reported.
+        Returns the refusal (with .code), or None. sqlite (demo) has no owner model: always None."""
+        if self.kind == "sqlite":
+            return None
+        try:
+            self._verify_reversion_owner()
+        except OwnerSchemaError as e:
+            return e
+        return None
 
     def _legacy_outbox_check(self) -> list[str]:
         """Read-only: report (WARNING + self.legacy_outbox_checks) an outbox whose status CHECK still allows values
@@ -624,7 +645,7 @@ class StateStore:
     @staticmethod
     def decide_pending(q, table: str, key: str, ident: str, fields: dict) -> None:
         """UPDATE one 'pending' workflow row; raises if it was decided concurrently (aborts the chain transaction)."""
-        if table == REVERSION_TABLE and not set(fields) <= set(REVERSION_UPDATE_COLS):
+        if _table_key(table) == REVERSION_TABLE and not set(fields) <= set(REVERSION_UPDATE_COLS):
             # QA-058: the app role may UPDATE only these columns of the owner's table (v1_7_010 column grant)
             raise ValueError(f"{table}: UPDATE of {sorted(set(fields) - set(REVERSION_UPDATE_COLS))} is not allowed "
                              f"(only {', '.join(REVERSION_UPDATE_COLS)})")

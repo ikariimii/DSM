@@ -943,7 +943,10 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
     - **App writes (all of them):** propose = `st.insert_row(q, "rule_reversion_proposal", row)`; approve / reject =
       `st.decide_pending(q, "rule_reversion_proposal", "proposal_id", id, {...})` with only those six columns.
       `state.REVERSION_UPDATE_COLS` lists them and `decide_pending` raises `ValueError` before any SQL for another
-      column on this table. No `UPDATE` / `DELETE` / DDL on it elsewhere in `app/backend`.
+      column on this table. The table name is normalized before that comparison (`state._table_key`: drops a
+      `{s}` / schema prefix and double quotes, then casefolds), so `"dam_app"."Rule_Reversion_Proposal"` or
+      `RULE_REVERSION_PROPOSAL` cannot bypass the allowlist. No `UPDATE` / `DELETE` / DDL on it elsewhere in
+      `app/backend`.
     - **No app DDL on Postgres:** `state.OWNER_MANAGED = ("rule_reversion_proposal",)`. `init_schema` skips its
       `CREATE TABLE` and the `rule_reversion_one_pending` index there (lakebase/001 `v1_7_005` / `v1_7_007` create
       them). The `CREATE TABLE` string stays in `state.DDL` as the sqlite (demo) definition and as the text the DA's
@@ -954,9 +957,15 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
       - `rule_reversion_not_owner_owned`: the table is missing, or its owner is not `dam_lakebase_owner` by name. A
         superuser or app-role owner is the pre-v1_7_010 layout, so `pg_has_role` is not used here.
       - `rule_reversion_transition_guard_disabled`: `t_status_rule_reversion_proposal` is missing, or its
-        `pg_trigger.tgenabled` is not `'A'` (ALWAYS, what lakebase/001 sets) or `'O'` (origin; accepted with a
-        WARNING). `'D'` (disabled) and `'R'` (replica only) are refused.
+        `pg_trigger.tgenabled` is not `'A'` (ENABLE ALWAYS, what lakebase/001 sets). Only `'A'` passes: `'O'`
+        (origin), `'D'` (disabled) and `'R'` (replica only) are all refused. QA-060: an `'O'` trigger does not fire
+        under `session_replication_role = replica`, so a decided row could go applied -> pending.
       Both codes are explained in `frontend/src/codes.ts`. To recover, re-run lakebase/001 or migration v1_7_010.
+    - **Re-checked on every chain verification:** `GET /api/audit/signoffs/verify` (`verify_all`) and
+      `GET /api/dams/{dam}/audit/signoffs/verify` re-run the same check through `StateStore.verify_owner_tables()`,
+      as QA-053 re-applies the signer guard. So disabling the trigger, making it origin-only or changing the owner
+      AFTER startup is reported. Fail closed: no chain is verified; the response is `ok: false` with `reason` = the
+      code (per chain in `verify_all`). sqlite (demo) has no owner model and is not affected.
     - **Tests:**
       - `app/tests/test_rule_reversion_owner.py`:
         - a sqlite trace of the real propose / reject / approve routers: every statement on the table is a
@@ -966,8 +975,13 @@ REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "revi
         - the startup verdicts on a fake pool;
         - live, as the RESTRICTED app role on a lakebase/001 DB: INSERT and the six-column decide work; `DELETE`,
           `UPDATE` of `rationale` / `rules` and `DISABLE TRIGGER` give `InsufficientPrivilege`; applied -> pending,
-          rejected -> applied and editing a decided row give `CheckViolation`; a disabled, replica-only or dropped
-          trigger, or app-role ownership, refuses startup.
+          rejected -> applied and editing a decided row give `CheckViolation`; an origin-only, disabled,
+          replica-only or dropped trigger, or app-role ownership, refuses startup;
+        - live QA-060: with `'A'` a replica-session applied -> pending is refused; with `'O'` the same UPDATE goes
+          through (rolled back), and the app refuses to start;
+        - the table-name normalization (quoted, cased, schema-qualified names still hit the allowlist);
+        - both verify endpoints report a change after startup (offline with a stubbed check; live as the restricted
+          role: origin-only, disabled, owner changed, then recovery).
       - `app/tests/reversion_owner_stub.py` pre-provisions the owner's table and trigger (function text taken from
         lakebase/001) for the live tests that bootstrap the app without lakebase/001.
 

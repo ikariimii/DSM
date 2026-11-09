@@ -2,15 +2,15 @@
 role has SELECT, INSERT and UPDATE(status, decided_by, decided_by_id, decided_at, decision_rationale, pub_ids) only,
 and the status-transition trigger t_status_rule_reversion_proposal is ENABLE ALWAYS. The app runs no DDL on it on
 Postgres and refuses to start (codes rule_reversion_not_owner_owned / rule_reversion_transition_guard_disabled)
-unless it is owner-owned with the trigger enabled. SCHEMA_CONTRACT §7 item 23.
+unless it is owner-owned with the trigger ENABLE ALWAYS (QA-060: only tgenabled 'A'). SCHEMA_CONTRACT §7 item 23.
 
 Always run: every statement the real routers issue against the table (sqlite trace) is a SELECT, an INSERT or an UPDATE
 of only the six granted columns; no DELETE / other write path exists in app/backend; decide_pending refuses another
 column; the startup check's verdicts on a fake pool. Live (DAM_TEST_PG + psql): as the RESTRICTED app role on a
 lakebase/001-provisioned DB, INSERT and the allowed UPDATE work; DELETE, an UPDATE of another column and a bad status
-transition are refused; a disabled / replica-only trigger or a non-owner owner refuses startup."""
+transition are refused; an origin-only / disabled / replica-only trigger or a non-owner owner refuses startup, and a
+change after startup is reported by both chain verify endpoints."""
 import contextlib
-import logging
 import re
 from pathlib import Path
 
@@ -130,21 +130,59 @@ class _Pool:
     (None, "A", CODE_REVERSION_NOT_OWNER_OWNED), ("app_role", "A", CODE_REVERSION_NOT_OWNER_OWNED),
     ("postgres", "A", CODE_REVERSION_NOT_OWNER_OWNED),
     ("dam_lakebase_owner", None, CODE_REVERSION_GUARD_DISABLED), ("dam_lakebase_owner", "D", CODE_REVERSION_GUARD_DISABLED),
-    ("dam_lakebase_owner", "R", CODE_REVERSION_GUARD_DISABLED)])
+    ("dam_lakebase_owner", "R", CODE_REVERSION_GUARD_DISABLED),
+    ("dam_lakebase_owner", "O", CODE_REVERSION_GUARD_DISABLED)])        # QA-060: origin-only is refused too
 def test_startup_fails_closed(owner, tg, code):
     with pytest.raises(OwnerSchemaError) as e:
         StateStore("postgres", schema="dam_app", pg_pool=_Pool(owner, tg))
     assert e.value.code == code and str(e.value).startswith(code + ":")
 
 
-def test_startup_accepts_always_and_origin_and_runs_no_ddl_on_the_table(caplog):
+def test_startup_accepts_only_always_and_runs_no_ddl_on_the_table():
     pool = _Pool("dam_lakebase_owner", "A")
-    StateStore("postgres", schema="dam_app", pg_pool=pool)
+    st = StateStore("postgres", schema="dam_app", pg_pool=pool)
     assert not [s for s in pool.log if T in s and not s.lstrip().startswith("SELECT")]
     assert not any("rule_reversion_one_pending" in s for s in pool.log)
-    caplog.set_level(logging.WARNING, logger=st_mod.log.name)
-    StateStore("postgres", schema="dam_app", pg_pool=_Pool("dam_lakebase_owner", "O"))
-    assert "not ALWAYS" in caplog.text
+    assert st.verify_owner_tables() is None
+    pool.ans["tg"] = "O"                                    # changed after startup: the on-demand re-check reports it
+    assert st.verify_owner_tables().code == CODE_REVERSION_GUARD_DISABLED
+    pool.ans.update(tg="A", owner="someone_else")
+    assert st.verify_owner_tables().code == CODE_REVERSION_NOT_OWNER_OWNED
+
+
+NAMES = ["rule_reversion_proposal", '"rule_reversion_proposal"', "RULE_REVERSION_PROPOSAL", "Rule_Reversion_Proposal",
+         '"Rule_Reversion_Proposal"', "dam_app.rule_reversion_proposal", '"dam_app"."RULE_REVERSION_PROPOSAL"',
+         '"dam.app".rule_reversion_proposal', "{s}rule_reversion_proposal", " rule_reversion_proposal ",
+         'public . "rule_reversion_proposal"']
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_allowlist_holds_however_the_table_name_is_cased_or_quoted(name):
+    """QA-058 residual: quoting, casing or a schema prefix must not bypass the six-column allowlist."""
+    assert st_mod._table_key(name) == T
+    st = StateStore("sqlite")
+    with pytest.raises(ValueError, match="rationale"):
+        with st.transaction() as q:
+            st.decide_pending(q, name, "proposal_id", "P", {"status": "applied", "rationale": "rewritten"})
+
+
+def test_other_tables_are_not_caught_by_the_normalization():
+    assert {st_mod._table_key(x) for x in ("rule_reversion_proposal_x", "dam_cdse_change", '"a"."b"')} == {
+        "rule_reversion_proposal_x", "dam_cdse_change", "b"}
+
+
+def test_verify_endpoints_rerun_the_owner_check(k, monkeypatch):  # noqa: F811
+    """QA-058 residual (as QA-053 for the signer): both chain verifications re-run the check and fail closed."""
+    from conftest import ADMIN
+    assert k.get("/api/audit/signoffs/verify", user=ADMIN).json()["ok"]          # sqlite demo: no owner model
+    err = OwnerSchemaError(CODE_REVERSION_GUARD_DISABLED, "trigger disabled")
+    monkeypatch.setattr(_st(k), "verify_owner_tables", lambda: err)
+    _approved_dssmp(k)                                                           # a chain with records
+    v = k.get("/api/audit/signoffs/verify", user=ADMIN).json()
+    assert v["ok"] is False and v["reason"] == CODE_REVERSION_GUARD_DISABLED
+    assert v["chains"] and all(c["ok"] is False and c["reason"] == CODE_REVERSION_GUARD_DISABLED for c in v["chains"])
+    d = k.get("/api/dams/CRD/audit/signoffs/verify", user=CDSE).json()
+    assert d["ok"] is False and d["reason"] == CODE_REVERSION_GUARD_DISABLED and d["chain_id"] == "CRD"
 
 
 def test_sqlite_demo_still_creates_the_table():
@@ -226,6 +264,7 @@ def test_live_app_role_insert_and_allowed_update_work_everything_else_is_refused
 @pytest.mark.parametrize("change,code", [
     ("DISABLE TRIGGER t_status_rule_reversion_proposal", CODE_REVERSION_GUARD_DISABLED),
     ("ENABLE REPLICA TRIGGER t_status_rule_reversion_proposal", CODE_REVERSION_GUARD_DISABLED),
+    ("ENABLE TRIGGER t_status_rule_reversion_proposal", CODE_REVERSION_GUARD_DISABLED),       # QA-060: origin
     ("OWNER TO {app}", CODE_REVERSION_NOT_OWNER_OWNED),
     (None, CODE_REVERSION_GUARD_DISABLED)])                                        # trigger dropped
 def test_live_startup_fails_closed(lakebase, change, code):  # noqa: F811
@@ -245,17 +284,65 @@ def test_live_startup_fails_closed(lakebase, change, code):  # noqa: F811
 
 
 @live
-def test_live_origin_enabled_trigger_starts_with_a_warning_and_always_is_what_001_sets(lakebase, caplog):  # noqa: F811
-    su, app = lakebase
+def test_live_origin_only_trigger_refuses_startup_qa060(lakebase):  # noqa: F811
+    """QA-060: with tgenabled 'O' the guard does not fire under session_replication_role = replica (a frozen row can
+    go applied -> pending), so the app must refuse to start; with 'A' (lakebase/001) the same move is refused."""
     import psycopg
-    with psycopg.connect(su) as c:
-        assert c.execute("SELECT tgenabled::text FROM pg_trigger WHERE tgname = 't_status_rule_reversion_proposal'"
-                         ).fetchone()[0] == "A"
-    _su(su, f"ALTER TABLE dam_app.{T} ENABLE TRIGGER t_status_rule_reversion_proposal")
-    caplog.set_level(logging.WARNING, logger=st_mod.log.name)
+    su, app = lakebase
     pool = _pool(app)
     try:
-        StateStore("postgres", schema="dam_app", pg_pool=pool, retries=1)
-        assert "not ALWAYS" in caplog.text
+        st = StateStore("postgres", schema="dam_app", pg_pool=pool, retries=1)
+        with st.transaction() as q:
+            st.insert_row(q, T, _row("PO", "DO"))
+        with st.transaction() as q:
+            st.decide_pending(q, T, "proposal_id", "PO", {"status": "applied"})
+    finally:
+        pool.close()
+    replica = f"SET session_replication_role = replica; UPDATE dam_app.{T} SET status = 'pending' WHERE proposal_id = 'PO'"
+    with pytest.raises(psycopg.errors.CheckViolation):                          # 'A': fires under replica too
+        _su(su, replica)
+    _su(su, f"ALTER TABLE dam_app.{T} ENABLE TRIGGER t_status_rule_reversion_proposal")
+    with psycopg.connect(su) as c:
+        assert c.execute("SELECT tgenabled::text FROM pg_trigger WHERE tgname = 't_status_rule_reversion_proposal'"
+                         ).fetchone()[0] == "O"
+        c.execute("BEGIN")
+        c.execute("SET LOCAL session_replication_role = replica")
+        c.execute(f"UPDATE dam_app.{T} SET status = 'pending' WHERE proposal_id = 'PO'")   # the QA-060 hole
+        assert c.execute(f"SELECT status FROM dam_app.{T} WHERE proposal_id = 'PO'").fetchone()[0] == "pending"
+        c.rollback()                                                                       # keep the row applied
+    pool = _pool(app)
+    try:
+        with pytest.raises(OwnerSchemaError) as e:
+            StateStore("postgres", schema="dam_app", pg_pool=pool, retries=1)
+        assert e.value.code == CODE_REVERSION_GUARD_DISABLED and "origin-only" in str(e.value)
+    finally:
+        pool.close()
+
+
+@live
+def test_live_verify_endpoints_report_a_change_after_startup(lakebase, k, monkeypatch):  # noqa: F811
+    """QA-058 residual, live: a StateStore starts on a correct lakebase/001 DB as the restricted role; the trigger is
+    then set to origin-only / disabled or the owner is changed - both verify endpoints report it, and recover after.
+    The endpoints run on the demo app (its users / roles); their owner re-check is the live store's."""
+    from conftest import ADMIN, ENG
+    su, app = lakebase
+    role = app.split("user=")[-1]
+    pool = _pool(app)
+    try:
+        st = StateStore("postgres", schema="dam_app", pg_pool=pool, retries=1)
+        monkeypatch.setattr(_st(k), "verify_owner_tables", st.verify_owner_tables)
+        get_all = lambda: k.get("/api/audit/signoffs/verify", user=ADMIN).json()
+        get_dam = lambda: k.get("/api/dams/CRD/audit/signoffs/verify", user=ENG).json()
+        assert st.verify_owner_tables() is None and get_all()["ok"] is True
+        for change, code in ((f"ENABLE TRIGGER {st_mod.REVERSION_TRIGGER}", CODE_REVERSION_GUARD_DISABLED),
+                             (f"DISABLE TRIGGER {st_mod.REVERSION_TRIGGER}", CODE_REVERSION_GUARD_DISABLED),
+                             (f"OWNER TO {role}", CODE_REVERSION_NOT_OWNER_OWNED)):
+            _su(su, f"ALTER TABLE dam_app.{T} {change}")
+            a, d = get_all(), get_dam()
+            assert a["ok"] is False and a["reason"] == code, a
+            assert d["ok"] is False and d["reason"] == code, d
+            _su(su, f"ALTER TABLE dam_app.{T} OWNER TO dam_lakebase_owner")
+            _su(su, f"ALTER TABLE dam_app.{T} ENABLE ALWAYS TRIGGER {st_mod.REVERSION_TRIGGER}")
+            assert get_all()["ok"] is True and st.verify_owner_tables() is None
     finally:
         pool.close()

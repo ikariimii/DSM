@@ -111,9 +111,22 @@ def _verify(st, request: Request, chain_id: str) -> dict:
     return ac.verify_chain(st.chain_rows(chain_id), st.chain_head(chain_id), signer)
 
 
+def _owner_refusal(st):
+    """QA-058 residual: the owner-table startup check, re-run per verification (None = fine / sqlite demo)."""
+    return st.verify_owner_tables() if hasattr(st, "verify_owner_tables") else None
+
+
 @router.get("/api/audit/signoffs/verify")
 def verify_all(request: Request, c: Ctx = Depends(ctx), st=Depends(store)):
     require_admin(c)
+    # QA-058 residual (as QA-053 re-applies the signer guard): re-run the startup owner / trigger check, so a trigger
+    # disabled or an owner changed AFTER startup is reported. Fail closed: no chain is verified, each reports the code.
+    refused = _owner_refusal(st)
+    if refused is not None:
+        chains = [{"chain_id": cid, "records": None, "ok": False, "first_broken_seq": None, "reason": refused.code,
+                   "detail": str(refused)} for cid in st.chain_ids()]
+        return {"ok": False, "reason": refused.code, "detail": str(refused), "chains": chains, "genesis": ac.GENESIS,
+                "scope": "per-dam", "verified_utc": now_utc()}
     chains = [_verify(st, request, cid) for cid in st.chain_ids()]
     return {"ok": all(x["ok"] for x in chains), "chains": chains, "genesis": ac.GENESIS, "scope": "per-dam",
             "verified_utc": now_utc()}
@@ -122,6 +135,10 @@ def verify_all(request: Request, c: Ctx = Depends(ctx), st=Depends(store)):
 @router.get("/api/dams/{dam_id}/audit/signoffs/verify")
 def verify_dam(dam_id: str, request: Request, c: Ctx = Depends(ctx), st=Depends(store)):
     require(c, dam_id, VERIFY_MIN_ROLE)
+    refused = _owner_refusal(st)
+    if refused is not None:            # QA-058 residual: same fail-closed re-check as verify_all
+        return {"chain_id": dam_id, "records": None, "ok": False, "first_broken_seq": None, "reason": refused.code,
+                "detail": str(refused), "genesis": ac.GENESIS, "scope": "per-dam", "verified_utc": now_utc()}
     res = _verify(st, request, dam_id)
     res["chain_id"] = dam_id
     return {**res, "genesis": ac.GENESIS, "scope": "per-dam", "verified_utc": now_utc()}
