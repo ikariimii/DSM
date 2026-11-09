@@ -463,3 +463,18 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   still fires; the app has no UPDATE on the outboxes; down twice keeps rows, validator lists the 3 triggers; re-apply
   twice -> 0 rows; 001@d6d3c9c + migration -> guard active, v1_7_004 / v1_7_008 re-run OK. The upgrade tests now bring
   the database fully up to date (tests/lbmig.py) before the current validator. UNVERIFIED: on Lakebase.
+
+## QA057-MISSING-PARAM (residual 3, 2026-11-09: down guard with a missing parameter / session default dam_prod)
+
+- Checked every sql/migrations/*_down.sql (7) on PostgreSQL with each down's OWN first three statements
+  (tests/test_qa057_prod_guard.py::test_every_downs_own_guard_refuses_a_missing_parameter_and_a_prod_session_default,
+  17 cases each). Findings on the 7f349d0 guard: no case reached the body on dam_prod. A parameter not submitted at
+  all fails the statement (UNBOUND_SQL_PARAMETER, emulated; Databricks behaviour UNVERIFIED). A session default
+  catalog of dam_prod was already refused for any :catalog value without break_glass (fail closed, incl. a missing
+  break_glass). Gap found: a :catalog bound to NULL / '' / only whitespace or format characters (e.g. a blank
+  SQL-editor widget) on a non-prod session passed the first statement and was stopped only by USE CATALOG failing on
+  the empty name (not a QA-057 refusal, and dependent on that USE behaviour). Fix: the first statement now refuses
+  that case itself (`QA-057: down script refused: the catalog parameter is missing or empty`), whatever the session
+  catalog and even with break_glass; same text in all 7 downs and tools/verify/qa057_guard_probe.sql. Layer 1
+  (tools/run_migration.py) already refuses a missing / blank catalog (exit 2) and always binds both parameters
+  (tested). UNVERIFIED on Databricks: unbound-marker failure, CASE branch order with raise_error, the \p{Cf} class.

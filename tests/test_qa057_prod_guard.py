@@ -193,7 +193,8 @@ def test_runbook_probe_is_exactly_the_downs_first_statement_and_touches_nothing(
 
 @live
 @pytest.mark.parametrize("case", [("dam_prod", "", False), ("dam\u200b_prod", "", False),
-                                  ("dam_prod", "BREAK_GLASS_PROD", True), ("dam_dev", "", True)])
+                                  ("dam_prod", "BREAK_GLASS_PROD", True), ("dam_dev", "", True),
+                                  ("", "", False), ("", "BREAK_GLASS_PROD", False)])
 def test_runbook_probe_on_postgres(case, tmp_path):
     cat, bg, ok = case
     p = tmp_path / "p.sql"
@@ -204,3 +205,72 @@ def test_runbook_probe_on_postgres(case, tmp_path):
         assert r.returncode == 0 and "reached-the-body" in r.stdout, r.stderr
     else:
         assert r.returncode != 0 and "ERROR:  QA-057" in r.stderr and "reached-the-body" not in r.stdout, r.stderr
+
+
+# ---------------------------------------------------------------- residual 3: missing parameter / session default prod
+UNBOUND = "<unbound>"          # the parameter is not submitted at all
+
+
+def _bind_with_unbound(code, catalog, session, resolved, bg):
+    """Databricks fails a statement that references an unbound named parameter marker (UNBOUND_SQL_PARAMETER) before
+    evaluating anything (UNVERIFIED on a warehouse); emulated by replacing such a statement with that error."""
+    out = []
+    for st in [s for s in code.split(";") if s.strip()]:
+        names = [n for n, v in (("catalog", catalog), ("break_glass", bg)) if v is UNBOUND and f":{n}" in st]
+        out.append(f"\nSELECT raise_error('UNBOUND_SQL_PARAMETER: {names[0]}')" if names else st)
+    code = ";".join(out) + ";"
+    return tmd._bind_guard(code, None if catalog is UNBOUND else catalog, session, resolved,
+                           None if bg is UNBOUND else bg)
+
+
+# (catalog, session default catalog, after USE (None = USE fails), break_glass, expected error or None)
+MISSING_CASES = [
+    (UNBOUND, "dam_prod", None, "", "UNBOUND_SQL_PARAMETER"),
+    (UNBOUND, "dam_dev", None, "", "UNBOUND_SQL_PARAMETER"),
+    ("dam_prod", "dam_dev", "dam_prod", UNBOUND, "UNBOUND_SQL_PARAMETER"),
+    ("dam_dev", "dam_prod", "dam_dev", UNBOUND, "UNBOUND_SQL_PARAMETER"),
+    (None, "dam_prod", None, "", "QA-057: down script refused: the catalog parameter is missing"),
+    (None, "dam_dev", None, "", "QA-057: down script refused: the catalog parameter is missing"),
+    (None, "dam_dev", None, "BREAK_GLASS_PROD", "QA-057: down script refused: the catalog parameter is missing"),
+    ("", "dam_prod", None, "", "QA-057: down script refused: the catalog parameter is missing"),
+    ("", "dam_dev", None, "", "QA-057: down script refused: the catalog parameter is missing"),
+    (" \u200b\ufeff", "dam_dev", None, "", "QA-057: down script refused: the catalog parameter is missing"),
+    ("dam_dev", "dam_prod", "dam_dev", "", "QA-057: down script refused on dam_prod"),
+    ("dam_dev", "dam_prod", "dam_dev", None, "QA-057: down script refused on dam_prod"),
+    ("dam_test", "dam_prod", "dam_test", "nope", "QA-057: down script refused on dam_prod"),
+    ("dam_prod", "dam_prod", "dam_prod", "", "QA-057: down script refused on dam_prod"),
+    ("dam_dev", "dam_dev", "dam_prod", "", "QA-057: down script refused on dam_prod"),   # resolves to prod
+    ("dam_prod", "dam_prod", "dam_prod", "BREAK_GLASS_PROD", None),
+    ("dam_dev", "dam_dev", "dam_dev", "", None),
+]
+
+
+@live
+@pytest.mark.parametrize("f", DOWNS)
+def test_every_downs_own_guard_refuses_a_missing_parameter_and_a_prod_session_default(f, tmp_path):
+    """Each down's OWN first three statements (not a copy) for every case, before any statement of its body."""
+    sql = open(os.path.join(MIG, f)).read()
+    guard = tmd._strip_comments(sql[:sql.index("AS qa057_guard_resolved;") + len("AS qa057_guard_resolved;")])
+    assert _statements(guard) == _statements(sql)[:3]
+    for i, (cat, session, resolved, bg, expect) in enumerate(MISSING_CASES):
+        p = tmp_path / f"g{i}.sql"
+        p.write_text(tmd.PG_RAISE_ERROR + _bind_with_unbound(guard, cat, session, resolved, bg)
+                     + "\nSELECT 'reached-the-body';")
+        r = tmd._psql(PG, f=str(p))
+        if expect is None:
+            assert r.returncode == 0 and "reached-the-body" in r.stdout, (f, i, r.stderr)
+        else:
+            assert r.returncode != 0 and f"ERROR:  {expect}" in r.stderr and "reached-the-body" not in r.stdout, \
+                (f, i, r.stderr)
+
+
+@pytest.mark.parametrize("cat", ["", "  ", "\u200b", None])
+def test_runner_refuses_a_missing_or_blank_catalog(cat):
+    with pytest.raises(rm.Refused):
+        rm.decide(cat, DOWN)
+
+
+def test_runner_always_binds_both_parameters():
+    for cat in ("dam_dev", "dam_test"):
+        assert set(rm.decide(cat, DOWN)["parameters"]) == {"catalog", "break_glass"}
+    assert set(rm.decide("dam_prod", DOWN, REASON)["parameters"]) == {"catalog", "break_glass"}
