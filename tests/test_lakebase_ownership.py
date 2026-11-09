@@ -238,3 +238,20 @@ def test_001_refuses_a_superuser_or_replication_app_role(env):
             assert r.returncode != 0 and f"must not be {attr}" in r.stderr, r.stderr
         finally:
             _psql(env["conn"], "-c", f"ALTER ROLE {app} {undo}")
+
+
+@live
+@pytest.mark.parametrize("canon,role,ok", [(None, None, True), (2, "cdse", True), (2, "admin,cdse", True),
+                                           (2, None, False), (2, "  ", False), (3, "admin", False)])
+def test_canon_v2_columns_and_check_exist_for_the_app_role(env, canon, role, ok):
+    """canon v2 (App Dev c797151): 001 adds actor_app_role / canon_version and ck_review_signoff_canon to the
+    owner-owned review_signoff, so the app (which may not ALTER it) can append canon-2 records."""
+    _apply(env["conn"], env["app"])        # re-provision: earlier bad-setup tests undo their break, not every grant
+    n = uuid.uuid4().hex[:8]
+    lit = lambda v: "NULL" if v is None else (str(v) if isinstance(v, int) else f"'{v}'")
+    stmt = (ROW.format(n=n).replace("signature_hash) VALUES", "signature_hash, canon_version, actor_app_role) VALUES")
+            [:-1] + f", {lit(canon)}, {lit(role)})")
+    r = _psql(env["as_app"], "-c", stmt)
+    assert (r.returncode == 0) is ok, r.stderr
+    if not ok:
+        assert "ck_review_signoff_canon" in r.stderr

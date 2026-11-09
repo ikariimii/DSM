@@ -90,7 +90,7 @@ def test_records_of_another_chain_are_a_caller_bug():
 
 def test_verify_job_checks_every_chain_with_records_or_heads():
     res = vj.verify_all(copy.deepcopy(ROWS), [H(len(ROWS)), H(2, chain="GONE", dam="GONE",
-                                                               hh="c" * 64)])
+                                                               hh="c" * 64)], catalog="dam_dev")
     by = {v["dam_id"]: v for v in res}
     assert by[DAM]["ok"] and not by["GONE"]["ok"] and by["GONE"]["reason"] == "head_mismatch"
 

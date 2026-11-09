@@ -3,7 +3,7 @@
 * manual_reading -> CSV file in the landing volume (/Volumes/<cat>/raw/landing/<dam>/readings/),
   so manual readings take exactly the same Auto Loader -> LDP -> reduce path as ADAS data
   (one validation path; KB rec 'single ingestion path').
-* review_signoff (insert-only, column-compatible) -> audit.review_record (v1.5, QA-039; v1.6 all 24 columns incl. the
+* review_signoff (insert-only, column-compatible) -> audit.review_record (v1.5, QA-039; v1.6 all 24 columns, v1.7 26 incl. the
   per-dam hash chain, in chain_id, chain_seq order): one UC row per sign-off,
   deduplicated on review_id, signature_hash copied unchanged (the reduction job re-verifies it), source
   'APP:lakebase:review_signoff'. This is the approval the reduction job requires for an applied correction.
@@ -60,8 +60,12 @@ def manual_rows_to_csv(rows):
 
 # v1.6 (QA-039 v2, app SCHEMA_CONTRACT §7 10b): the 12 per-dam hash-chain columns, so the UC copy can be re-verified
 # (dam_safety.audit_chain.verify_records). 12 -> 24 columns, same order as sql/ddl/08_audit.sql.
+# v1.7 canon v2 (App Dev c797151, app SCHEMA_CONTRACT §7 item 14; migration v1_7_002_canon_v2): actor_app_role and
+# canon_version appended after key_id, 24 -> 26. Passed through unchanged (canon_version as int, NULL on canon-1 rows);
+# both are hashed on canon-2 rows, so dropping them would make every such row hash_mismatch in UC. Not REVIEW_REQUIRED.
 CHAIN_COLS = ("action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id",
-              "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id")
+              "chain_seq", "prev_hash", "record_hash", "signature", "sig_alg", "key_id", "actor_app_role",
+              "canon_version")
 REVIEW_RECORD_COLS = ("review_id", "dam_id", "subject_type", "subject_id", "review_level", "decision", "comment",
                       "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "source", *CHAIN_COLS)
 # NOT NULL on extract (mirrors the DDL NOT NULLs and ck_review_record_chain). Nullable: comment (the CHECKs require it
@@ -125,6 +129,8 @@ def review_rows_to_records(rows, known_ids=(), authority=None):
         rec = {c: r.get(c) for c in REVIEW_RECORD_COLS}
         rec["signed_ts"] = _utc(r["signed_ts"])
         rec["chain_seq"] = int(r["chain_seq"])
+        cv = r.get("canon_version")
+        rec["canon_version"] = None if cv in (None, "") else int(cv)
         rec["source"] = REVIEW_SOURCE
         if authority is not None:  # derived key, not an audit.review_record column (the write selects schema fields)
             rec[LEGACY_FLAG] = review_level_legacy_unverified(rec, authority)

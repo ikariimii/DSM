@@ -38,7 +38,7 @@ def test_rows_map_to_review_record_columns_and_signature_still_verifies():
     ddl = open(os.path.join(ROOT, "sql", "ddl", "08_audit.sql")).read()
     body = ddl.split("CREATE TABLE IF NOT EXISTS audit.review_record (")[1].split("CONSTRAINT pk_review")[0]
     cols = tuple(re.match(r"\s*(\w+)", l).group(1) for l in body.strip().splitlines() if not l.strip().startswith("--"))
-    assert cols == lx.REVIEW_RECORD_COLS and len(cols) == 24                               # v1.6: 12 -> 24
+    assert cols == lx.REVIEW_RECORD_COLS and len(cols) == 26            # v1.6: 12 -> 24; v1.7 canon v2: 26
     assert lx.REVIEW_RECORD_COLS[12:] == lx.CHAIN_COLS
     [rec] = lx.review_rows_to_records([_row()])
     assert rec["source"] == lx.REVIEW_SOURCE and rec["signed_ts"].tzinfo is not None

@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS audit.review_record (
   signature           STRING COMMENT 'reserved (future key-based signature), NULL',
   sig_alg             STRING,
   key_id              STRING,
+  -- v1.7 canon v2 (App Dev c797151, app SCHEMA_CONTRACT §7 item 14; names are the app's): hashed on canon-2 records.
+  actor_app_role      STRING COMMENT 'canon 2: raw app roles of the actor on the dam at signed_ts, sorted comma-joined from viewer|engineer|dso|dam_admin|admin|cdse (server-derived); NULL on canon-1 rows',
+  canon_version       INT COMMENT 'canonical record form: NULL = canon 1 (CHAIN_FIELDS), 2 = + actor_app_role, canon_version',
   CONSTRAINT pk_review PRIMARY KEY (review_id)
 ) TBLPROPERTIES (delta.appendOnly = true);
 
@@ -71,6 +74,12 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
          OR (action_type = 'alarm_rule_flag_propose' AND subject_type = 'alarm_rule' AND decision = 'propose')
          OR (action_type = 'alarm_rule_flag_apply' AND subject_type = 'alarm_rule' AND decision = 'apply')
          OR (action_type = 'alarm_rule_flag_reject' AND subject_type = 'alarm_rule' AND decision = 'reject')))));
+
+-- v1.7 canon v2 (migration v1_7_002_canon_v2): a canon-2 record names its actor's app role. Shape only; the token
+-- vocabulary and ordering are checked by the verifier (dam_safety.audit_chain.actor_role_problem: actor_role_invalid).
+ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_canon;
+ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_canon CHECK (
+  canon_version IS NULL OR (canon_version = 2 AND actor_app_role IS NOT NULL AND length(trim(actor_app_role)) > 0));
 
 -- QA-045d: append-only chain heads. dam_lakebase_extract appends the app's Lakebase review_chain_head per chain
 -- (read in the same REPEATABLE READ snapshot as the review_signoff rows it copies) whenever it changed; the verifier

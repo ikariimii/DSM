@@ -99,6 +99,17 @@ ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS action_type TEXT, ADD COLUMN
   ADD COLUMN IF NOT EXISTS chain_seq BIGINT, ADD COLUMN IF NOT EXISTS prev_hash TEXT,
   ADD COLUMN IF NOT EXISTS record_hash TEXT, ADD COLUMN IF NOT EXISTS signature TEXT,
   ADD COLUMN IF NOT EXISTS sig_alg TEXT, ADD COLUMN IF NOT EXISTS key_id TEXT;
+-- canon v2 (App Dev c797151): same names/types/CHECK as state.py (actor_app_role TEXT, canon_version INTEGER,
+-- ck_review_signoff_canon), added here because the app role cannot ALTER the owner-owned table.
+ALTER TABLE review_signoff ADD COLUMN IF NOT EXISTS actor_app_role TEXT,
+  ADD COLUMN IF NOT EXISTS canon_version INTEGER;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_review_signoff_canon'
+                 AND conrelid = 'review_signoff'::regclass) THEN
+    ALTER TABLE review_signoff ADD CONSTRAINT ck_review_signoff_canon CHECK (
+      canon_version IS NULL OR (canon_version = 2 AND actor_app_role IS NOT NULL AND length(trim(actor_app_role)) > 0));
+  END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS review_signoff_chain_seq ON review_signoff (chain_id, chain_seq);
 CREATE TABLE IF NOT EXISTS review_chain_head (
   chain_id TEXT PRIMARY KEY, chain_seq INTEGER NOT NULL, head_hash TEXT NOT NULL, updated_ts TEXT NOT NULL);

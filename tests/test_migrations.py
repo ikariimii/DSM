@@ -9,8 +9,10 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MIG_DIR = os.path.join(ROOT, "sql", "migrations")
-FILES = sorted(f for f in os.listdir(MIG_DIR) if f.endswith(".sql"))
+FILES = sorted(f for f in os.listdir(MIG_DIR) if f.endswith(".sql") and not f.endswith("_down.sql"))
+DOWN_FILES = sorted(f for f in os.listdir(MIG_DIR) if f.endswith("_down.sql"))
 MIGS = {f: open(os.path.join(MIG_DIR, f)).read() for f in FILES}
+DOWNS = {f: open(os.path.join(MIG_DIR, f)).read() for f in DOWN_FILES}
 DDL = {f: open(os.path.join(ROOT, "sql", "ddl", f)).read() for f in os.listdir(os.path.join(ROOT, "sql", "ddl"))}
 
 
@@ -38,6 +40,7 @@ EXPECTED_COLS = {
     "v1_6_002_chain_head.sql": [],
     "v1_6_003_alarm_rule_flag.sql": [],
     "v1_7_001_cdse_ack.sql": [("ref.threshold", "cdse_ack_required"), ("ops.alarm_transition", "cdse_ack_required_at_open")],
+    "v1_7_002_canon_v2.sql": [("audit.review_record", "actor_app_role"), ("audit.review_record", "canon_version")],
 }
 EXPECTED_CKS = {
     "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
@@ -46,6 +49,7 @@ EXPECTED_CKS = {
     "v1_6_002_chain_head.sql": {"ck_chain_head"},
     "v1_6_003_alarm_rule_flag.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
     "v1_7_001_cdse_ack.sql": set(),
+    "v1_7_002_canon_v2.sql": {"ck_review_record_canon"},
 }
 # The only data change any migration may make: backfilling a column the same file just added, marked by a
 # '-- backfill-new-column: <table>.<col>' line right above an UPDATE ... SET <col> = <literal> WHERE <col> IS NULL.
@@ -130,3 +134,22 @@ def test_v1_7_threshold_flag_is_backfilled_then_not_null_with_default():
     h = MIGS["v1_7_001_cdse_ack.sql"]
     for s in ("v1_6_001", "dam_uc_setup", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK", "irreversible"):
         assert s in h, s
+
+
+def test_v1_7_002_canon_v2_matches_the_app_contract_and_has_a_safe_down():
+    """canon v2 (App Dev c797151, app SCHEMA_CONTRACT §7 item 14): exact CHECK body from the contract, header documents
+    order / idempotence / UNVERIFIED; the down script drops only the CHECK (columns hold hashed audit data)."""
+    ck = ("canon_version IS NULL OR (canon_version = 2 AND actor_app_role IS NOT NULL "
+          "AND length(trim(actor_app_role)) > 0)")
+    body = re.search(r"ADD CONSTRAINT ck_review_record_canon CHECK \((.*?)\);", _code(MIGS["v1_7_002_canon_v2.sql"]),
+                     re.S).group(1)
+    assert norm(body).strip() == ck
+    app = open(os.path.join(ROOT, "app", "SCHEMA_CONTRACT.md")).read()
+    assert f"`{ck}`" in norm(app)
+    h = MIGS["v1_7_002_canon_v2.sql"]
+    for s in ("v1_7_001", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK", "v1_7_002_canon_v2_down.sql"):
+        assert s in h, s
+    down = _code(DOWNS["v1_7_002_canon_v2_down.sql"])
+    assert re.findall(r"ALTER TABLE [\w.]+ [^;]*;", down) == [
+        "ALTER TABLE audit.review_record DROP CONSTRAINT IF EXISTS ck_review_record_canon;"]
+    assert "RESTORE" in DOWNS["v1_7_002_canon_v2_down.sql"] and "time travel" in DOWNS["v1_7_002_canon_v2_down.sql"]

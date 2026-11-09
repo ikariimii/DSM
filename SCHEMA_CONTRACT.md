@@ -455,7 +455,7 @@ effective_from, effective_to`; bridge `ref.pfm_instrument`.
   - `exceedance_status` → `ops.exceedance_status_log`
   - `review_signoff` → `audit.review_record` (v1.5: appended directly, deduplicated on `review_id`, `signed_ts` text →
     UTC TIMESTAMP, `source='APP:lakebase:review_signoff'`; it is **not** copied to `audit.app_extract`)
-    (v1.6: all 24 columns, `REVIEW_RECORD_COLS` = 12 + `CHAIN_COLS`; a missing `action_type`, `original_value`,
+    (v1.6: all 24 columns, v1.7: 26 with `actor_app_role`, `canon_version`; `REVIEW_RECORD_COLS` = 12 + `CHAIN_COLS`; a missing `action_type`, `original_value`,
     `corrected_value`, `chain_id`, `chain_seq`, `prev_hash` or `record_hash` raises; `signature`, `sig_alg`,
     `key_id`, `reviewer_email`, `reviewer_sub` may be NULL; query and append `ORDER BY chain_id, chain_seq`, watermark
     still `signed_ts`; no approval rule is applied, so `alarm_event` rows pass through. The Lakebase
@@ -519,8 +519,26 @@ name and fail loudly if it does not resolve.
   their own proposal. Codes: apply_not_cdse, apply_by_admin, apply_cdse_of_other_dam, reject_not_cdse,
   reject_by_admin, reject_cdse_of_other_dam, propose_no_authority, propose_role_unverified (warn),
   apply_proposal_missing, reject_proposal_missing, cdse_level_without_authority, rationale_missing,
-  decision_action_mismatch. App roles are not in UC (the app records review_level 'engineer' for admins), so admin
-  vs engineer is only distinguishable when an app-role source is passed; the job passes none yet.
+  decision_action_mismatch. App roles: canon-2 records (v1.7, below) carry the hashed `actor_app_role`, so an admin
+  apply is `apply_by_admin` and a non-CDSE proposer without dam_admin/admin is `propose_no_authority` (error) from the
+  record alone; a `cdse` token grants nothing (CDSE authority comes from `ref.v_dam_reviewer_authority` only). Canon-1
+  records have no role and stay `propose_role_unverified` (warn). The role is app-recorded (not an independent source).
+  - **TODO (not implemented, Genie 2026-11-09):** App Dev's 23c4a42 / f0dd9c8 adds a PROVISIONAL app setting
+    `CDSE_FLAG_REQUIRE_SECOND_APPROVER` (default false). Four-eyes is NOT required by Genie's rule and the setting is not
+    recorded in the chain, so the engine has no proposer != applier check. If Genie adopts it, the setting (or its
+    effect) must first be recorded in the chained record; only then add an engine code for it.
+- **Upgrade (v1.7 canon v2, QA-050 / QA-051; App Dev c797151, app §7 item 14):** after v1_7_001 run
+  `sql/migrations/v1_7_002_canon_v2.sql` (idempotent): `audit.review_record` gains `actor_app_role STRING` and
+  `canon_version INT` after `key_id` (app's names) and `ck_review_record_canon` (`canon_version IS NULL OR
+  (canon_version = 2 AND actor_app_role IS NOT NULL AND length(trim(actor_app_role)) > 0)`). Run it **before** the next
+  extract (26 columns: `CHAIN_COLS` + the two, `canon_version` as int) and before `verify_review_chain` (SELECTs both).
+  `record_hash`: canon 1 (`canon_version` NULL) = the §5.5.2 field set, bytes unchanged; canon 2 adds `actor_app_role`
+  and `canon_version` (int) to the hashed object. Verifier reason codes added, as the app: `canon_unknown` (before the
+  hash check), `actor_role_missing` / `actor_role_invalid` (vocabulary viewer|engineer|dso|dam_admin|admin|cdse,
+  sorted, unique, comma-joined; after the hash check), `canon_downgrade` (canon-1 after canon-2). Lakebase
+  `review_signoff` gets the same columns and `ck_review_signoff_canon` from `lakebase/001_app_schema.sql`. Vector:
+  `app/tests/fixtures/review_chain_canon2_vector.json` (`tests/test_canon_v2.py`). Down:
+  `v1_7_002_canon_v2_down.sql` drops the CHECK only. UNVERIFIED (CANON-V2).
 - **Upgrade (v1.7):** after v1_6_003, run `sql/migrations/v1_7_001_cdse_ack.sql` (idempotent) **before** `dam_uc_setup`
   (`sql/ddl/11` selects `cdse_ack_required_at_open` / `cdse_ack_required`). It enables the irreversible Delta feature
   `allowColumnDefaults` on `ref.threshold` and backfills the new column to false. UNVERIFIED (MIGRATION-3).

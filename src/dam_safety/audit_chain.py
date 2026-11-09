@@ -36,11 +36,54 @@ CHAIN_FIELDS = ("review_id", "dam_id", "subject_type", "subject_id", "review_lev
                 "reviewer_id", "reviewer_pe_license", "signed_ts", "signature_hash", "action_type",
                 "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
                 "prev_hash")
+# Canon v2 (App Dev c797151, app SCHEMA_CONTRACT §7 item 14; app/backend/audit_chain.py read only). canon_version
+# NULL = canon 1 = exactly CHAIN_FIELDS (all existing records and the DA fixtures). canon 2 also hashes actor_app_role
+# and canon_version (as an int). Reasons as in the app: actor_role_missing, actor_role_invalid, canon_downgrade,
+# canon_unknown. Vector: app/tests/fixtures/review_chain_canon2_vector.json (tests/test_canon_v2.py).
+CANON_VERSION = 2
+ACTOR_ROLE_FIELD = "actor_app_role"
+CANON_FIELD = "canon_version"
+CHAIN_FIELDS_V2 = CHAIN_FIELDS + (ACTOR_ROLE_FIELD, CANON_FIELD)
+CANON_FIELDS = {1: CHAIN_FIELDS, 2: CHAIN_FIELDS_V2}
+# raw app roles of the actor on the dam at action time, sorted unique comma-joined; "cdse" = the dam's named CDSE
+ACTOR_ROLES = ("viewer", "engineer", "dso", "dam_admin", "admin", "cdse")
+
+
+def canon_of(row: dict) -> int | None:
+    """1 when canon_version is NULL/absent/blank, else its int value; None when it is not an integer (app rule)."""
+    v = row.get(CANON_FIELD)
+    if v is None or (isinstance(v, str) and v.strip() == ""):
+        return 1
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def actor_roles(value) -> tuple:
+    """The role tokens of an actor_app_role value (empty tuple for NULL/blank)."""
+    if value is None or not str(value).strip():
+        return ()
+    return tuple(str(value).split(","))
+
+
+def actor_role_problem(value) -> str | None:
+    """None when value is a valid actor_app_role, else 'actor_role_missing' / 'actor_role_invalid' (app rule)."""
+    if value is None or not str(value).strip():
+        return "actor_role_missing"
+    parts = str(value).split(",")
+    if any(p not in ACTOR_ROLES for p in parts) or parts != sorted(set(parts)):
+        return "actor_role_invalid"
+    return None
 
 
 def record_hash(row: dict) -> str:
-    payload = {k: canonical_value(row.get(k)) for k in CHAIN_FIELDS}
+    canon = canon_of(row)
+    fields = CANON_FIELDS.get(canon, CHAIN_FIELDS_V2)   # unknown canon: hashed as v2; verify reports canon_unknown
+    payload = {k: canonical_value(row.get(k)) for k in fields}
     payload["chain_seq"] = None if row.get("chain_seq") is None else int(row["chain_seq"])
+    if CANON_FIELD in fields:
+        payload[CANON_FIELD] = canon
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str, ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -91,13 +134,48 @@ def is_real_signer(signer) -> bool:
             and bool(kid and str(kid).strip()) and not str(alg).lower().endswith("-test"))
 
 
+# QA-052: a fixed probe payload (sha256 hex like a record_hash; not a record) for the load-time key round trip.
+PROBE_PAYLOAD = hashlib.sha256(b"dam-safety signer probe v1").hexdigest()
+
+
+def signer_probe_problem(signer) -> str | None:
+    """QA-052 load-time key probe: sign PROBE_PAYLOAD with the signer, then verify it with the SAME signer.
+    Returns None when the round trip works, else why not: sign()/verify() missing or raising (key material that did
+    not load), an empty signature, the signer's own signature not verifying (wrong / mismatched key), or verify()
+    also accepting a tampered payload or signature (a verify that vouches for anything)."""
+    sign, verify = getattr(signer, "sign", None), getattr(signer, "verify", None)
+    if not callable(sign) or not callable(verify):
+        return "signer has no callable sign()/verify()"
+    try:
+        sig = sign(PROBE_PAYLOAD)
+    except Exception as e:  # noqa: BLE001 - any failure means the key is unusable
+        return f"sign() raised {type(e).__name__}: {e}"
+    if sig is None or not str(sig).strip():
+        return "sign() returned no signature"
+    tampered = hashlib.sha256(PROBE_PAYLOAD.encode()).hexdigest()
+    try:
+        if verify(PROBE_PAYLOAD, sig, signer.key_id) is not True:
+            return "its own signature does not verify (wrong or mismatched key)"
+        if verify(tampered, sig, signer.key_id) is not False:
+            return "verify() accepted the signature for a different payload"
+    except Exception as e:  # noqa: BLE001
+        return f"verify() raised {type(e).__name__}: {e}"
+    return None
+
+
 def require_signer_for_catalog(catalog: str, signer) -> None:
     """Fail closed: a job that verifies chains must not run against a production catalog without a real signer,
-    because a fully stripped chain verifies under the no-op signer (QA-045c). Call at job start, before any read."""
+    because a fully stripped chain verifies under the no-op signer (QA-045c). Call at job start, before any read.
+    QA-052: a real-looking signer must also pass the load-time round trip (signer_probe_problem)."""
     if catalog in PROD_CATALOGS and not is_real_signer(signer):
         raise SignerConfigError(
             f"refusing to verify reviewer chains in {catalog}: no real (non-no-op) signer is configured "
             f"(got {type(signer).__name__}, alg={getattr(signer, 'alg', None)!r}); configure --chain_signer first")
+    if catalog in PROD_CATALOGS:
+        why = signer_probe_problem(signer)
+        if why:
+            raise SignerConfigError(f"refusing to verify reviewer chains in {catalog}: signer key probe failed "
+                                    f"(alg={signer.alg!r}, key_id={signer.key_id!r}): {why}")
 
 
 def _present(v) -> bool:
@@ -115,7 +193,8 @@ def verify_records(rows, signer=None, head: dict | None = None) -> dict:
 
     Returns {chain_id, records, ok, first_broken_seq, reason, detail, signed_records, signatures_required} (+ head_seq,
     head_hash when ok). reason, as in the app: gap | prev_mismatch | hash_mismatch | signature_missing |
-    signature_downgrade | signature_invalid | head_missing | head_mismatch. Reordered/replayed records surface as gap
+    signature_downgrade | signature_invalid | head_missing | head_mismatch | canon_unknown | actor_role_missing |
+    actor_role_invalid | canon_downgrade. Reordered/replayed records surface as gap
     (duplicate or out-of-place chain_seq) or prev_mismatch/hash_mismatch (a record moved to another seq)."""
     signer = signer or NoopSigner()
     rows = sorted(rows, key=lambda r: (int(r["chain_seq"]), str(r["review_id"])))
@@ -128,7 +207,7 @@ def verify_records(rows, signer=None, head: dict | None = None) -> dict:
         out.update(first_broken_seq=seq, reason=reason, detail=detail)
         return out
 
-    expected, prev, signed_seen = 1, GENESIS, 0
+    expected, prev, signed_seen, v2_seen = 1, GENESIS, 0, 0
     for r in rows:
         seq = int(r["chain_seq"])
         if seq != expected:
@@ -136,8 +215,19 @@ def verify_records(rows, signer=None, head: dict | None = None) -> dict:
         if r.get("prev_hash") != prev:
             return broken(seq, "prev_mismatch", "prev_hash does not match the previous record_hash"
                           if seq > 1 else "first record does not start at GENESIS")
+        canon = canon_of(r)
+        if canon not in CANON_FIELDS:
+            return broken(seq, "canon_unknown", f"unknown canon_version {r.get(CANON_FIELD)!r}")
         if record_hash(r) != r.get("record_hash"):
             return broken(seq, "hash_mismatch", "recomputed record_hash differs from the stored one")
+        if canon >= 2:
+            bad = actor_role_problem(r.get(ACTOR_ROLE_FIELD))
+            if bad:
+                return broken(seq, bad, f"canon-{canon} record has {ACTOR_ROLE_FIELD} {r.get(ACTOR_ROLE_FIELD)!r}")
+            v2_seen = v2_seen or seq
+        elif v2_seen:
+            return broken(seq, "canon_downgrade", f"canon-1 record (no {ACTOR_ROLE_FIELD}) after canon-2 record(s) "
+                          f"(first at seq {v2_seen})")
         if enforce:
             missing = [f for f in SIGNATURE_FIELDS if not _present(r.get(f))]
             if missing:

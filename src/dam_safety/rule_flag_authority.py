@@ -13,16 +13,25 @@ Rules
 * An apply that names a proposal by someone else, or a reject, must reference a proposal recorded in the chain.
 * review_level 'CDSE' on any alarm_rule record requires the same CDSE authority.
 
-App roles (dam_admin / admin) are NOT in UC: they live in the app's Lakebase dam_role / app_user, without history,
-and the app records review_level 'engineer' for them (ROLE_LEVEL). So `app_roles(dam_id, principal, at)` is optional;
-without it a non-CDSE proposal is `propose_role_unverified` (severity 'warn': cannot be proven either way) and a
-non-CDSE apply/reject is `apply_not_cdse` / `reject_not_cdse` (still an error: CDSE authority alone decides).
+App roles (v1.7, canon v2; App Dev c797151, app SCHEMA_CONTRACT §7 item 14): a canon-2 record carries
+`actor_app_role`, the actor's raw app roles on the dam at signed_ts (sorted comma-joined viewer|engineer|dso|dam_admin|
+admin|cdse), derived server-side and covered by record_hash. For canon-2 records that value is the role evidence:
+a non-CDSE proposer without dam_admin/admin is `propose_no_authority` (error), and an apply/reject by an actor holding
+dam_admin/admin without CDSE authority is `apply_by_admin` / `reject_by_admin`. A 'cdse' token in actor_app_role never
+grants anything here: CDSE authority comes from ref.v_dam_reviewer_authority only. An actor who is both the dam's CDSE
+(per UC) and admin may apply/reject (CDSE authority decides; same as the app's is_cdse gate).
+Canon-1 records (canon_version NULL, before c797151) have no role: the optional `app_roles(dam_id, principal, at)`
+callable is used, and without it a non-CDSE proposal stays `propose_role_unverified` (warn) and a non-CDSE
+apply/reject is `apply_not_cdse` / `reject_not_cdse` (still an error: CDSE authority alone decides).
+Independence caveat: actor_app_role is recorded by the app (DA decision recorded in docs/VERIFICATION.md).
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
 from typing import Callable, Iterable, List, Mapping, Optional
+
+from dam_safety.audit_chain import ACTOR_ROLE_FIELD, actor_role_problem, actor_roles, canon_of
 
 ADMIN_ROLES = ("dam_admin", "admin")
 
@@ -92,9 +101,16 @@ def rule_flag_authority_problems(records: Iterable[Mapping], authority: Iterable
                     "action_type": r.get("action_type"), "code": code, "severity": CODES[code], "detail": detail})
 
     def role_of(r):
-        if app_roles is None:
+        """'admin' | 'dam_admin' | another role | None (unknown). canon 2: from the hashed actor_app_role ('cdse' is
+        ignored: UC authority decides CDSE); canon 1: from app_roles, if given."""
+        if canon_of(r) == 2 and actor_role_problem(r.get(ACTOR_ROLE_FIELD)) is None:
+            roles = set(actor_roles(r.get(ACTOR_ROLE_FIELD))) - {"cdse"}
+            if not roles:
+                return "cdse_claim_only"     # app saw only a CDSE grant; UC did not confirm it
+        elif app_roles is None:
             return None
-        roles = {app_roles(r["dam_id"], p, _utc(r["signed_ts"])) for p in _who(r)} - {None}
+        else:
+            roles = {app_roles(r["dam_id"], p, _utc(r["signed_ts"])) for p in _who(r)} - {None}
         return "admin" if "admin" in roles else ("dam_admin" if "dam_admin" in roles else (min(roles) if roles else None))
 
     for r in recs:

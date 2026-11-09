@@ -29,7 +29,8 @@ def test_engine_hash_matches_app_vector():
 
 def test_chain_fields_and_columns_agree():
     assert set(ac.CHAIN_FIELDS) | {"record_hash", "signature", "sig_alg", "key_id"} == set(VEC["rows"][0])
-    assert set(ac.CHAIN_FIELDS) | {"record_hash", "signature", "sig_alg", "key_id", "source"} == set(lx.REVIEW_RECORD_COLS)
+    # v1.7 canon v2: UC/extract carry the canon-2 field set (actor_app_role, canon_version; tests/test_canon_v2.py)
+    assert set(ac.CHAIN_FIELDS_V2) | {"record_hash", "signature", "sig_alg", "key_id", "source"} == set(lx.REVIEW_RECORD_COLS)
     assert ac.ACTION_TYPES == ("bias_review", "data_correction_review", "alarm_ack", "alarm_close",
                                "alarm_rule_flag_propose", "alarm_rule_flag_apply", "alarm_rule_flag_reject")
 

@@ -1,8 +1,8 @@
 diff --git a/app/backend/repos/state.py b/app/backend/repos/state.py
-index 2ff04d8..533f61e 100644
+index 5b82c9f..76a5b54 100644
 --- a/app/backend/repos/state.py
 +++ b/app/backend/repos/state.py
-@@ -182,9 +182,46 @@ class StateStore:
+@@ -187,9 +187,46 @@ class StateStore:
                              attempt + 1, self.retries - 1)
                  time.sleep(min(0.25 * (2 ** attempt), 4.0))
  
@@ -50,10 +50,10 @@ index 2ff04d8..533f61e 100644
              self.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
          for ddl in DDL:
              self.execute(ddl.replace("{serial}", serial))
-@@ -201,6 +238,12 @@ class StateStore:
+@@ -206,6 +243,12 @@ class StateStore:
              for col in SIGNOFF_V2_COLS:
                  if col not in have:  # pragma: no cover - only a pre-v2 local sqlite file
-                     self.execute(f"ALTER TABLE review_signoff ADD COLUMN {col} {'INTEGER' if col == 'chain_seq' else 'TEXT'}")
+                     self.execute(f"ALTER TABLE review_signoff ADD COLUMN {col} {'INTEGER' if col in _INT_SIGNOFF_COLS else 'TEXT'}")
 +        elif self._pg_not_owned("review_signoff"):
 +            # v1.7: review_signoff belongs to dam_lakebase_owner (DA lakebase/001 adds the v2 columns, the chain index
 +            # and ALWAYS-enabled guards); the app verifies it and never runs DDL on it.
