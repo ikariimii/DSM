@@ -27,6 +27,7 @@ import csv
 import datetime as dt
 import io
 import json
+import re
 
 try:
     from . import _common  # noqa: F401
@@ -154,6 +155,29 @@ def next_watermark(rows, col, current):
     return max(vals) if vals else current
 
 
+# QA-045d: the app's Lakebase review_chain_head -> append-only audit.chain_head (one row per chain whose head changed).
+CHAIN_HEAD_SOURCE = "APP:lakebase:review_chain_head"
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def chain_head_rows(lb_heads, uc_latest, computed_utc, job_run_id):
+    """lb_heads: Lakebase review_chain_head rows {chain_id, chain_seq, head_hash}, read in the SAME REPEATABLE READ
+    snapshot as the review_signoff rows of this run. uc_latest: {chain_id: (chain_seq, head_hash)} of the latest
+    audit.chain_head rows. Returns the audit.chain_head rows to append: new chains and changed heads only (an
+    unchanged head is not re-written). A head that moved BACKWARDS is still written (it is evidence; the verifier
+    reports it as a rewound head). A malformed head raises (never stored)."""
+    out = []
+    for h in sorted(lb_heads, key=lambda h: h["chain_id"]):
+        seq, hh = int(h["chain_seq"]), str(h["head_hash"])
+        if seq < 0 or not _HEX64.match(hh):
+            raise ValueError(f"malformed Lakebase chain head for {h['chain_id']}: seq={seq} hash={hh[:16]}...")
+        if uc_latest.get(h["chain_id"]) == (seq, hh):
+            continue
+        out.append({"dam_id": h["chain_id"], "chain_id": h["chain_id"], "chain_seq": seq, "head_hash": hh,
+                    "computed_utc": computed_utc, "job_run_id": job_run_id, "source": CHAIN_HEAD_SOURCE})
+    return out
+
+
 def _connect(project, branch, endpoint):
     import psycopg
     from databricks.sdk import WorkspaceClient
@@ -162,11 +186,17 @@ def _connect(project, branch, endpoint):
     token = w.postgres.generate_database_credential(endpoint=name).token
     host = w.postgres.get_endpoint(name=name).status.hosts.host    # UNVERIFIED attribute path
     user = w.current_user.me().user_name
-    return psycopg.connect(host=host, dbname="databricks_postgres", user=user, password=token, sslmode="require")
+    conn = psycopg.connect(host=host, dbname="databricks_postgres", user=user, password=token, sslmode="require")
+    # QA-045d: one snapshot for the whole run, so review_chain_head and review_signoff are read consistently (the app
+    # advances the head in the same transaction as the INSERT).
+    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    return conn
 
 
 def main():
-    a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"))
+    a = _common.args(("lb_project", "dam-safety"), ("lb_branch", "production"), ("lb_endpoint", "primary"),
+                     ("job_run_id", None))
+    a.job_run_id = a.job_run_id or "manual-" + dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     spark = _common.spark()
     now = dt.datetime.now(dt.timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
@@ -206,6 +236,24 @@ def main():
                 spark.createDataFrame([tuple(r[f.name] for f in rr.schema.fields) for r in recs], rr.schema) \
                     .write.mode("append").saveAsTable(f"{a.catalog}.audit.review_record")
         save("review_signoff", last_ts=next_watermark(rs, "signed_ts", wr["last_ts"]))
+        # QA-045d: chain heads, appended AFTER the records (a failure in between leaves the head behind, which the
+        # verifier reports until the next run; it never lets a head get ahead of its records)
+        cur.execute("SELECT chain_id, chain_seq, head_hash FROM review_chain_head ORDER BY chain_id")
+        ch_tbl = f"{a.catalog}.audit.chain_head"
+        latest = {}
+        for x in spark.sql(f"SELECT chain_id, chain_seq, head_hash FROM (SELECT *, row_number() OVER (PARTITION BY "
+                           f"dam_id, chain_id ORDER BY computed_utc DESC, chain_seq DESC, head_hash DESC) AS rn "
+                           f"FROM {ch_tbl}) WHERE rn = 1").collect():
+            latest[x.chain_id] = (int(x.chain_seq), x.head_hash)
+        heads = chain_head_rows(cur.fetchall(), latest, now, a.job_run_id)
+        for h in heads:
+            if h["chain_id"] in latest and h["chain_seq"] < latest[h["chain_id"]][0]:
+                print(f"WARN chain head of {h['chain_id']} moved backwards in Lakebase "
+                      f"({latest[h['chain_id']][0]} -> {h['chain_seq']}); recorded for the verifier")
+        if heads:
+            sch = spark.table(ch_tbl).schema
+            spark.createDataFrame([tuple(h[f.name] for f in sch.fields) for h in heads], sch) \
+                .write.mode("append").saveAsTable(ch_tbl)
 
         out = []
         for table, pk, order in IMMUTABLE:

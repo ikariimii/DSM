@@ -23,7 +23,7 @@ SVEC = json.load(open(os.path.join(ROOT, "tests", "fixtures", "review_chain_sign
 def test_engine_hash_matches_app_vector():
     for r in VEC["rows"]:
         assert ac.record_hash(r) == r["record_hash"], r["review_id"]
-    assert ac.verify_records(VEC["rows"])["ok"]
+    assert ac.verify_records(VEC["rows"], head=VEC["head"])["ok"]
     assert VEC["rows"][-1]["record_hash"] == VEC["head"]["head_hash"]
 
 
@@ -37,10 +37,10 @@ def test_uc_copy_reverifies_after_extract():
     recs = lx.review_rows_to_records(list(reversed(copy.deepcopy(VEC["rows"]))))
     assert all(r["signed_ts"].tzinfo is not None for r in recs)            # TIMESTAMP, not text
     assert [r["chain_seq"] for r in recs] == [1, 2, 3]                     # chain order
-    res = ac.verify_records(recs)
+    res = ac.verify_records(recs, head=VEC["head"])
     assert {k: res[k] for k in ("chain_id", "records", "ok", "first_broken_seq", "reason")} == {
         "chain_id": "DAM-TEST-1", "records": 3, "ok": True, "first_broken_seq": None, "reason": None}
-    assert ac.verify_records(recs, expected_head=VEC["head"])["ok"]       # head check on the UC copy
+    assert ac.verify_records(recs, head=VEC["head"])["ok"]                # head check on the UC copy
 
 
 def test_tamper_gap_and_relink_are_detected():
@@ -79,7 +79,7 @@ def test_signed_vector_rows_hash_and_sign_like_the_app():
     for r in SVEC["rows"]:
         assert ac.record_hash(r) == r["record_hash"]
         assert SIGNER.sign(r["record_hash"]) == r["signature"] and r["sig_alg"] == SIGNER.alg
-    v = ac.verify_records(SVEC["rows"], signer=SIGNER, expected_head=SVEC["head"])
+    v = ac.verify_records(SVEC["rows"], signer=SIGNER, head=SVEC["head"])
     assert v["ok"] and v["signed_records"] == 3 and v["signatures_required"] and v["head_seq"] == 3
 
 
@@ -104,20 +104,29 @@ def test_engine_verdict_equals_app_verdict_without_signer(case):
     ("wrong_key_id", "signature_invalid", 2), ("truncated_tail", "head_mismatch", 3),
     ("truncated_tail_and_head_rewound_wrong_hash", "head_mismatch", 2), ("head_altered_hash", "head_mismatch", 3),
     ("reordered_seq_swap", "prev_mismatch", 2), ("replayed_duplicate_seq2", "gap", 3),
-    ("replayed_seq1_as_seq4", "hash_mismatch", 4)])
+    ("replayed_seq1_as_seq4", "hash_mismatch", 4),
+    # QA-045d head cases (app verdicts in the vector agree, asserted above)
+    ("no_head", "head_missing", 4), ("truncated_tail_several", "head_mismatch", 2),
+    ("truncated_all_records", "head_mismatch", 1), ("head_rewound_consistent", "head_mismatch", 2),
+    ("head_forged_hash_and_seq", "head_mismatch", 4), ("head_of_other_chain", "head_mismatch", 3)])
 def test_adversarial_signed_chain_is_rejected(case, reason, seq):
     c = SVEC["cases"][case]
     v = ac.verify_records(copy.deepcopy(c["rows"]), SIGNER, c["head"])
     assert (v["ok"], v["reason"], v["first_broken_seq"]) == (False, reason, seq)
 
 
-def test_truncated_unsigned_tail_needs_the_expected_head():
-    rows = copy.deepcopy(VEC["rows"])[:2]
-    assert ac.verify_records(rows)["ok"]                                    # documented limit: no head, no detection
-    v = ac.verify_records(rows, expected_head=VEC["head"])
+def test_no_head_is_head_missing_never_ok_like_the_app():
+    """QA-045d: verify_records matches the app's verify_chain: records without a head row = head_missing."""
+    rows = copy.deepcopy(VEC["rows"])
+    v = ac.verify_records(rows)
+    assert (v["ok"], v["reason"], v["first_broken_seq"]) == (False, "head_missing", len(rows) + 1)
+    assert ac.verify_records([])["ok"]                                       # empty chain, no head: ok (app)
+    v = ac.verify_records(rows[:2], head=VEC["head"])                        # 1-record tail truncation
     assert (v["reason"], v["first_broken_seq"]) == ("head_mismatch", 3)
     alias = {"chain_seq": VEC["head"]["chain_seq"], "record_hash": VEC["head"]["head_hash"]}
-    assert ac.verify_records(VEC["rows"], expected_head=alias)["ok"]       # record_hash accepted for head_hash
+    assert ac.verify_records(VEC["rows"], head=alias)["ok"]                 # record_hash accepted for head_hash
+    with pytest.raises(TypeError):
+        ac.verify_records(rows, expected_head=VEC["head"])                  # callers no longer pass a head by hand
 
 
 def test_stripping_every_signature_passes_only_when_no_signer_is_configured():

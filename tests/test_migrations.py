@@ -35,11 +35,13 @@ EXPECTED_COLS = {
     "v1_6_001_audit_chain.sql": [("audit.review_record", c) for c in (
         "action_type", "reviewer_email", "reviewer_sub", "original_value", "corrected_value", "chain_id", "chain_seq",
         "prev_hash", "record_hash", "signature", "sig_alg", "key_id")] + [("ops.alarm_transition", "installation_version")],
+    "v1_6_002_chain_head.sql": [],
 }
 EXPECTED_CKS = {
     "v1_5_001_contract.sql": {"ck_alarm_transition_value", "ck_incl_correction_applied_reviewed",
                               "ck_review_record_subject_decision"},
     "v1_6_001_audit_chain.sql": {"ck_review_record_subject_decision", "ck_review_record_chain"},
+    "v1_6_002_chain_head.sql": {"ck_chain_head"},
 }
 _ADD_CK = r"ALTER TABLE ([\w.]+) ADD CONSTRAINT (\w+)\s+CHECK"
 norm = lambda s: re.sub(r"\s+", " ", s)
@@ -93,3 +95,15 @@ def test_v1_6_header_documents_order_and_unverified():
     h = MIGS["v1_6_001_audit_chain.sql"]
     for s in ("v1_5_001_contract.sql", "dam_uc_setup", "Do NOT re-run v1_5_001", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK"):
         assert s in h, s
+
+
+def test_v1_6_002_creates_chain_head_exactly_as_the_ddl_and_append_only():
+    """QA-045d: the migration's CREATE TABLE is byte-for-byte the sql/ddl/08 one (modulo whitespace), keeps
+    delta.appendOnly (no UPDATE/DELETE), and the header documents order, idempotence and UNVERIFIED."""
+    pat = r"CREATE TABLE IF NOT EXISTS audit\.chain_head \(.*?\n\) TBLPROPERTIES \(delta\.appendOnly = true\)"
+    m = re.search(pat, MIGS["v1_6_002_chain_head.sql"], re.S)
+    d = re.search(pat, DDL["08_audit.sql"], re.S)
+    assert m and d and norm(m.group(0)) == norm(d.group(0))
+    assert "SET TBLPROPERTIES ('delta.appendOnly' = 'true')" in _code(MIGS["v1_6_002_chain_head.sql"])
+    for s in ("v1_6_001_audit_chain.sql", "dam_uc_setup", "IDEMPOTENT", "UNVERIFIED", "PRE-CHECK"):
+        assert s in MIGS["v1_6_002_chain_head.sql"], s

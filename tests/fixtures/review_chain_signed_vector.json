@@ -1591,6 +1591,523 @@
     "reason": "signature_invalid",
     "first_broken_seq": 1
    }
+  },
+  "no_head": {
+   "rows": [
+    {
+     "review_id": "rs-0001",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-1",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 1",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:01:00.000000+00:00",
+     "signature_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 1,
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "signature": "61d0cc53078d4d0c627bb14daccc19c51632b35b96a467c87e8ac4e213a013ae",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0002",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-2",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 2",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:02:00.000000+00:00",
+     "signature_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 2,
+     "prev_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "record_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "signature": "9b785b6ec1453b6478b38e212d77ad9d32a9d9cde4449d9473765b9fc379dd3e",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0003",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-3",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 3",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:03:00.000000+00:00",
+     "signature_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 3,
+     "prev_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "record_hash": "1c6fb038727a346458db47ddddf0e7a80c3554b23460c9cec69f4ce9e26321d0",
+     "signature": "fec915e89421f620a4cae239132e03f016490b616028e91b0daf7a108e84b990",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    }
+   ],
+   "head": null,
+   "expected": {
+    "ok": false,
+    "reason": "head_missing",
+    "first_broken_seq": 4
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "signature_invalid",
+    "first_broken_seq": 1
+   }
+  },
+  "no_head_empty_chain": {
+   "rows": [],
+   "head": null,
+   "expected": {
+    "ok": true,
+    "reason": null,
+    "first_broken_seq": null
+   },
+   "expected_noop_signer": {
+    "ok": true,
+    "reason": null,
+    "first_broken_seq": null
+   }
+  },
+  "truncated_tail_several": {
+   "rows": [
+    {
+     "review_id": "rs-0001",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-1",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 1",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:01:00.000000+00:00",
+     "signature_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 1,
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "signature": "61d0cc53078d4d0c627bb14daccc19c51632b35b96a467c87e8ac4e213a013ae",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    }
+   ],
+   "head": {
+    "chain_id": "DAM-TEST-2",
+    "chain_seq": 3,
+    "head_hash": "1c6fb038727a346458db47ddddf0e7a80c3554b23460c9cec69f4ce9e26321d0"
+   },
+   "expected": {
+    "ok": false,
+    "reason": "head_mismatch",
+    "first_broken_seq": 2
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "signature_invalid",
+    "first_broken_seq": 1
+   }
+  },
+  "truncated_all_records": {
+   "rows": [],
+   "head": {
+    "chain_id": "DAM-TEST-2",
+    "chain_seq": 3,
+    "head_hash": "1c6fb038727a346458db47ddddf0e7a80c3554b23460c9cec69f4ce9e26321d0"
+   },
+   "expected": {
+    "ok": false,
+    "reason": "head_mismatch",
+    "first_broken_seq": 1
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "head_mismatch",
+    "first_broken_seq": 1
+   }
+  },
+  "head_rewound_consistent": {
+   "rows": [
+    {
+     "review_id": "rs-0001",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-1",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 1",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:01:00.000000+00:00",
+     "signature_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 1,
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "signature": "61d0cc53078d4d0c627bb14daccc19c51632b35b96a467c87e8ac4e213a013ae",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0002",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-2",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 2",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:02:00.000000+00:00",
+     "signature_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 2,
+     "prev_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "record_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "signature": "9b785b6ec1453b6478b38e212d77ad9d32a9d9cde4449d9473765b9fc379dd3e",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0003",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-3",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 3",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:03:00.000000+00:00",
+     "signature_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 3,
+     "prev_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "record_hash": "1c6fb038727a346458db47ddddf0e7a80c3554b23460c9cec69f4ce9e26321d0",
+     "signature": "fec915e89421f620a4cae239132e03f016490b616028e91b0daf7a108e84b990",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    }
+   ],
+   "head": {
+    "chain_id": "DAM-TEST-2",
+    "chain_seq": 2,
+    "head_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a"
+   },
+   "expected": {
+    "ok": false,
+    "reason": "head_mismatch",
+    "first_broken_seq": 2
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "signature_invalid",
+    "first_broken_seq": 1
+   }
+  },
+  "head_rewound_and_tail_deleted": {
+   "rows": [
+    {
+     "review_id": "rs-0001",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-1",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 1",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:01:00.000000+00:00",
+     "signature_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 1,
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "signature": "61d0cc53078d4d0c627bb14daccc19c51632b35b96a467c87e8ac4e213a013ae",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0002",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-2",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 2",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:02:00.000000+00:00",
+     "signature_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 2,
+     "prev_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "record_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "signature": "9b785b6ec1453b6478b38e212d77ad9d32a9d9cde4449d9473765b9fc379dd3e",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    }
+   ],
+   "head": {
+    "chain_id": "DAM-TEST-2",
+    "chain_seq": 2,
+    "head_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a"
+   },
+   "expected": {
+    "ok": true,
+    "reason": null,
+    "first_broken_seq": null
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "signature_invalid",
+    "first_broken_seq": 1
+   }
+  },
+  "head_forged_hash_and_seq": {
+   "rows": [
+    {
+     "review_id": "rs-0001",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-1",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 1",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:01:00.000000+00:00",
+     "signature_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 1,
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "signature": "61d0cc53078d4d0c627bb14daccc19c51632b35b96a467c87e8ac4e213a013ae",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0002",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-2",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 2",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:02:00.000000+00:00",
+     "signature_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 2,
+     "prev_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "record_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "signature": "9b785b6ec1453b6478b38e212d77ad9d32a9d9cde4449d9473765b9fc379dd3e",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0003",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-3",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 3",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:03:00.000000+00:00",
+     "signature_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 3,
+     "prev_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "record_hash": "1c6fb038727a346458db47ddddf0e7a80c3554b23460c9cec69f4ce9e26321d0",
+     "signature": "fec915e89421f620a4cae239132e03f016490b616028e91b0daf7a108e84b990",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    }
+   ],
+   "head": {
+    "chain_id": "DAM-TEST-2",
+    "chain_seq": 5,
+    "head_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "expected": {
+    "ok": false,
+    "reason": "head_mismatch",
+    "first_broken_seq": 4
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "signature_invalid",
+    "first_broken_seq": 1
+   }
+  },
+  "head_of_other_chain": {
+   "rows": [
+    {
+     "review_id": "rs-0001",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-1",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 1",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:01:00.000000+00:00",
+     "signature_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 1,
+     "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+     "record_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "signature": "61d0cc53078d4d0c627bb14daccc19c51632b35b96a467c87e8ac4e213a013ae",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0002",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-2",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 2",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:02:00.000000+00:00",
+     "signature_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 2,
+     "prev_hash": "d0bc00dfd8547e9eb73538974e5b5f30717fcf2ed515cf0d25cfeb7485114131",
+     "record_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "signature": "9b785b6ec1453b6478b38e212d77ad9d32a9d9cde4449d9473765b9fc379dd3e",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    },
+    {
+     "review_id": "rs-0003",
+     "dam_id": "DAM-TEST-2",
+     "subject_type": "alarm_event",
+     "subject_id": "ep-3",
+     "review_level": "engineer",
+     "decision": "acknowledge",
+     "comment": "synthetic ack 3",
+     "reviewer_id": "eng.s@example.org",
+     "reviewer_pe_license": null,
+     "signed_ts": "2026-11-09T15:03:00.000000+00:00",
+     "signature_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+     "action_type": "alarm_ack",
+     "reviewer_email": "eng.s@example.org",
+     "reviewer_sub": "sub-s",
+     "original_value": "{}",
+     "corrected_value": "{}",
+     "chain_id": "DAM-TEST-2",
+     "chain_seq": 3,
+     "prev_hash": "0ef4a3f6e6d8ff7697fbd7f7f471b669532b9da8d950cdf53aed0f1b7469284a",
+     "record_hash": "1c6fb038727a346458db47ddddf0e7a80c3554b23460c9cec69f4ce9e26321d0",
+     "signature": "fec915e89421f620a4cae239132e03f016490b616028e91b0daf7a108e84b990",
+     "sig_alg": "HMAC-SHA256-test",
+     "key_id": "k1"
+    }
+   ],
+   "head": {
+    "chain_id": "DAM-TEST-3",
+    "chain_seq": 3,
+    "head_hash": "4b2912dc80435050662be8e3bc1b6d040f634fbf82a7106874f0278b2ae1bd24"
+   },
+   "expected": {
+    "ok": false,
+    "reason": "head_mismatch",
+    "first_broken_seq": 3
+   },
+   "expected_noop_signer": {
+    "ok": false,
+    "reason": "signature_invalid",
+    "first_broken_seq": 1
+   }
   }
  }
 }

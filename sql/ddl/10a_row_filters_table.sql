@@ -21,6 +21,7 @@ ALTER TABLE ops.exceedance             SET ROW FILTER ref.dam_row_filter ON (dam
 ALTER TABLE ops.safety_incident        SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE ops.rule_finding           SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE audit.review_record        SET ROW FILTER ref.dam_row_filter ON (dam_id);
+ALTER TABLE audit.chain_head           SET ROW FILTER ref.dam_row_filter ON (dam_id);
 -- audit.app_extract is created in 08; rows with NULL dam_id (global audit_log entries) are visible only to dam-portfolio-all (concat with NULL is NULL).
 ALTER TABLE audit.app_extract          SET ROW FILTER ref.dam_row_filter ON (dam_id);
 ALTER TABLE rpt.dssmr                  SET ROW FILTER ref.dam_row_filter ON (dam_id);

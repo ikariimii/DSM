@@ -28,6 +28,7 @@ ALTER TABLE ops.exceedance             DROP ROW FILTER;
 ALTER TABLE ops.safety_incident        DROP ROW FILTER;
 ALTER TABLE ops.rule_finding           DROP ROW FILTER;
 ALTER TABLE audit.review_record        DROP ROW FILTER;
+ALTER TABLE audit.chain_head           DROP ROW FILTER;
 ALTER TABLE audit.app_extract          DROP ROW FILTER;
 ALTER TABLE rpt.dssmr                  DROP ROW FILTER;
 ALTER TABLE rpt.dssmr_draft            DROP ROW FILTER;
