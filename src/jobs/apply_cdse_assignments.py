@@ -3,7 +3,8 @@ registration in the same run already has authority). App SCHEMA_CONTRACT §7 ite
 
 Per run: read the pending rows of the app outbox dam_app.dam_cdse_outbox (Lakebase; publisher role); read every
 subject_type 'dam' record of audit.review_record (the app's chained dam_cdse_assign / dam_cdse_change_* records),
-ref.dam_cdse_assignment, ref.dam (cdse_id, status), the go-live time (first ref.threshold.effective_from), platform
+ref.dam_cdse_assignment, ref.dam (cdse_id, status), the go-live evidence (the app's onboarding_golive record in
+audit.app_extract, else the first ref.threshold.effective_from; dam_safety.cdse_assignment.is_live), platform
 admins and CDSE memberships (ref.project_membership); plan with dam_safety.cdse_load.plan (engine
 dam_safety.cdse_assignment re-checks each record; refusals cdse_exists / cdse_stale / approval_*); ONE conditional
 MERGE adds the new assignment rows and closes the replaced ones (stale re-check inside the statement); a second MERGE
@@ -21,7 +22,8 @@ try:
     from . import _common  # noqa: F401
 except ImportError:        # executed as a script by spark_python_task
     import _common         # noqa: F401
-from dam_safety.cdse_assignment import ASSIGNMENT_COLS, dam_sync_sql, merge_source_rows, merge_sql
+from dam_safety.cdse_assignment import (ASSIGNMENT_COLS, GO_LIVE_ACTION, GO_LIVE_SOURCE, dam_sync_sql, go_live_markers,
+                                       merge_source_rows, merge_sql)
 from dam_safety.cdse_load import (EVENT_COLS, OUTBOX_COLS, audit_insert_sql, audit_rows, mark_merge_skipped,
                                   outbox_updates, plan)
 from dam_safety.rule_flag_authority import second_approver_required
@@ -49,7 +51,18 @@ def load_context(spark, catalog):
                      f"FROM {catalog}.ref.dam d LEFT JOIN {catalog}.ref.threshold t ON t.dam_id = d.dam_id "
                      f"GROUP BY d.dam_id, d.cdse_id, d.status").collect()
     legacy = {r.dam_id: r.cdse_id for r in dams if r.cdse_id and r.dam_id not in assigned}
-    dam_state = {r.dam_id: {"status": r.status, "live_since": r.live_since} for r in dams}
+    # durable go-live marker (residual 5): the app's onboarding_golive audit_log rows, copied to audit.app_extract.
+    # The LIKE is a superset filter; go_live_markers parses (unreadable -> ambiguous -> live, fail closed).
+    # TODO(residual 5): freshness - a go-live not yet extracted is not seen; the proposed contract
+    # (docs/VERIFICATION.md GO-LIVE-MARKER) adds ref.dam.go_live_at loaded from the go-live record.
+    ax = spark.table(f"{catalog}.audit.app_extract")
+    markers = go_live_markers(r.asDict() for r in ax.where(
+        (ax.table_name == GO_LIVE_SOURCE) & ax.payload.contains(GO_LIVE_ACTION)).select(
+        "table_name", "pk", "dam_id", "payload").collect())
+    dam_state = {r.dam_id: {"status": r.status, "live_since": r.live_since, "go_live_at": markers.get(r.dam_id)}
+                 for r in dams}
+    for d, when in markers.items():           # went live, ref.dam not loaded yet: live from the record
+        dam_state.setdefault(d, {"status": None, "live_since": None, "go_live_at": when, "has_ref_dam": False})
     dam_cdse = {r.dam_id: r.cdse_id for r in dams}
     pm = [r.asDict() for r in spark.sql(
         f"SELECT principal, dam_id, upper(role) AS role, CAST(granted_ts AS STRING) AS granted_ts, "

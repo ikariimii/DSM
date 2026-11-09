@@ -494,3 +494,25 @@ Starlette TestClient/httpx deprecation warning. Workspace validation/deployment 
   `ref.dam`, bare `dam`, a schema-only JOIN / MERGE / saveAsTable.
 - Note (not changed, outside the residual's scope): src/pipelines qualify with `CATALOG = spark.conf.get("dam.catalog")`,
   which is not passed through normalize_catalog (the bundle sets it from the catalog variable).
+
+## GO-LIVE-MARKER (residual 5, 2026-11-09: durable go-live marker for the not-live check)
+
+- What the app records at go-live (app/backend/routers/onboarding.py `golive`): an `onboarding_publication` outbox
+  row (not extracted to UC) and ONE Lakebase `audit_log` row `action = 'onboarding_golive'` (dam_id, ts, detail
+  {publication_id, status, ...}). There is no chain action (audit.review_record) and no column. dam_lakebase_extract
+  copies audit_log to the append-only `audit.app_extract` (table_name 'audit_log', payload JSON), so a durable record
+  exists and is used; no new contract was needed.
+- Engine: `dam_safety.cdse_assignment.go_live_markers` (earliest record per dam; a record mentioning the action whose
+  JSON, ts or dam_id cannot be read = GO_LIVE_AMBIGUOUS) and `is_live`: live at t iff the earliest of {go-live record,
+  first ref.threshold effective_from} <= t; ambiguous = live at any t; with no time, a ref.dam row is live unless its
+  status is pre-live (status can only make a dam live); no ref.dam row and no record = not live. `load_context`
+  (apply_cdse_assignments, also used by verify_review_chain) reads audit.app_extract and adds dams that went live
+  before the publisher loaded ref.dam.
+- Tests: tests/test_go_live_marker.py (a dam that went live without thresholds while ref.dam still says onboarding is
+  live; no ref.dam row yet; ambiguous records; earliest evidence; load_context wiring with a fake Spark).
+- Residual TODO / proposal (freshness): a go-live not yet extracted is not seen (window = the extract schedule). The app's
+  go-live gate already needs a CDSE in ref.v_dam_go_live_readiness, so a bootstrap assign after go-live is refused
+  as cdse_exists anyway. Proposed contract if that is not enough: `ref.dam.go_live_at TIMESTAMP`, set once by the
+  onboarding_publication load job from the publication's go-live record, used first by is_live.
+- Preconditions UNVERIFIED: the dam_ref_publish run_as identity sees every audit.app_extract row through the dam row
+  filter (the same as audit.review_record today); the audit_log payload `ts` is the app's ISO-8601 UTC text.

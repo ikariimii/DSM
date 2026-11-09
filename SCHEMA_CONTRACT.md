@@ -531,8 +531,10 @@ columns, the chain index, `review_chain_head` and `app_user.user_id` so the app 
   (08 + v1_7_003). Engine `dam_safety.cdse_assignment` (app field names `new_cdse_id`, `change_reason_code`,
   `proposal_id`, `previous_cdse_id`; reason codes `initial_appointment, resignation, retirement, reassignment,
   incapacity, regulatory_direction, correction`): assign only by a platform admin (ADMIN on `'*'`), only while the dam
-  has no CDSE (assignment, legacy ref.dam.cdse_id or CDSE membership) and is not live (no ref.dam row = not live; else
-  live from the first threshold effective_from, or by status when unknown); a change is proposed by a platform admin
+  has no CDSE (assignment, legacy ref.dam.cdse_id or CDSE membership) and is not live (durable marker: live from the
+  app's go-live record, audit_log action `onboarding_golive` copied to audit.app_extract, else from the first threshold
+  effective_from; an unreadable go-live record = live; with neither, a ref.dam row is live unless its status is
+  pre-live; no ref.dam row and no go-live record = not live); a change is proposed by a platform admin
   and approved or rejected by a current CDSE; self-approval refused only with CDSE_FLAG_REQUIRE_SECOND_APPROVER.
 - **History** `ref.dam_cdse_assignment` (01 + v1_7_003; `ck_dam_cdse_assignment`), assignment_id = approval
   record_hash; a dam's pre-existing ref.dam.cdse_id is closed by a `dam_cdse_legacy` row at its first change.

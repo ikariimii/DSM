@@ -23,9 +23,15 @@ Authority inputs (all at the record's signed_ts; actor_app_role is never authori
                   effective_to, or open; a dam with no assignment row falls back to its legacy ref.dam.cdse_id), or a
                   ref.project_membership CDSE grant for the dam in force at t (as the app's is_cdse; an assignment
                   that starts AT t is the record's own and never counts)
-  live            app §7 item 20: a dam with no ref.dam row is not live. With a row: live iff live_since (first
-                  ref.threshold effective_from) <= t when known, else live unless its status is pre-live
-                  (NULL | onboarding | draft | pending | planned).
+  live            durable go-live marker (residual 5): the app's go-live writes Lakebase audit_log action
+                  `onboarding_golive` (dam_id, ts), copied by dam_lakebase_extract to the append-only
+                  audit.app_extract (table_name 'audit_log'); go_live_markers() reads it. A dam is live at t iff the
+                  earliest evidence of go-live is <= t: its go-live record, else its first ref.threshold
+                  effective_from (legacy dams). Fail closed: a go-live record whose time / dam cannot be read makes
+                  the dam live at any t; a dam with a ref.dam row but no time at all is live unless its status is
+                  pre-live (NULL | onboarding | draft | pending | planned), so status can only make a dam live, never
+                  not live; no ref.dam row and no go-live record = not live (app §7 item 20). A dam that went live
+                  WITHOUT thresholds (or before the publisher loaded ref.dam) is live from its go-live record.
 Self-approval (proposer approving) is refused only when CDSE_FLAG_REQUIRE_SECOND_APPROVER is on (PROVISIONAL, same
 switch as the app and the alarm-rule rules).
 Codes (CODES; all errors):
@@ -105,13 +111,71 @@ def current_cdse(dam_id, at, assignments: Iterable[Mapping], legacy: Mapping) ->
     return None
 
 
+GO_LIVE_ACTION = "onboarding_golive"     # app routers/onboarding.py golive(): st.audit(..., "onboarding_golive", dam_id, ...)
+GO_LIVE_SOURCE = "audit_log"              # audit.app_extract.table_name of the Lakebase audit_log copy
+GO_LIVE_AMBIGUOUS = "ambiguous"           # a go-live record whose time cannot be read: live at ANY t (fail closed)
+
+
+def go_live_markers(rows: Iterable[Mapping]) -> dict:
+    """audit.app_extract rows (table_name, pk, dam_id, payload) -> {dam_id: earliest go-live time (UTC datetime) or
+    GO_LIVE_AMBIGUOUS}. Only `audit_log` rows whose payload action is onboarding_golive count; a payload that is not
+    readable JSON but mentions the action, an unreadable ts, or an envelope dam_id that differs from the payload's
+    makes the dam(s) ambiguous (= live). At-least-once copies are fine (earliest wins)."""
+    out: dict = {}
+
+    def put(dam, when):
+        if not dam:
+            return
+        cur = out.get(dam)
+        if when is None or cur == GO_LIVE_AMBIGUOUS:
+            out[dam] = GO_LIVE_AMBIGUOUS
+        elif cur is None or when < cur:
+            out[dam] = when
+
+    for r in rows:
+        if str(r.get("table_name") or "") != GO_LIVE_SOURCE or GO_LIVE_ACTION not in str(r.get("payload") or ""):
+            continue
+        env_dam = r.get("dam_id")
+        try:
+            p = json.loads(r.get("payload"))
+            if not isinstance(p, dict):
+                raise ValueError("payload is not an object")
+        except (TypeError, ValueError):
+            put(env_dam, None)                # mentions the action but unreadable: fail closed
+            continue
+        if p.get("action") != GO_LIVE_ACTION:
+            continue
+        dams = {d for d in (p.get("dam_id"), env_dam) if d}
+        try:
+            when = _t(p.get("ts"))
+        except (TypeError, ValueError):
+            when = None
+        for d in dams:
+            put(d, None if (when is None or len(dams) > 1) else when)
+    return out
+
+
 def is_live(dam_id, at, dam_state: Mapping) -> bool:
+    """dam_state[dam_id] = {status, live_since (first ref.threshold effective_from), go_live_at (go_live_markers),
+    has_ref_dam (default True)}; see the module docstring (live)."""
     st = dam_state.get(dam_id)
-    if st is None:                            # no ref.dam row: not live (app §7 item 20)
+    if st is None:                            # no ref.dam row and no go-live record: not live (app §7 item 20)
         return False
-    since = _t(st.get("live_since"))
-    if since is not None:                     # a known go-live time decides (no retroactive refusal)
-        return since <= at
+    go = st.get("go_live_at")
+    if go == GO_LIVE_AMBIGUOUS:
+        return True
+    times = []
+    for v in (go, st.get("live_since")):
+        try:
+            t = v if isinstance(v, dt.datetime) else _t(v)
+        except (TypeError, ValueError):
+            return True                       # an unreadable time: fail closed
+        if t is not None:
+            times.append(t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc))
+    if times:                                 # the earliest known go-live time decides (no retroactive refusal)
+        return min(times) <= at
+    if not st.get("has_ref_dam", True):
+        return False
     return _norm(st.get("status")) not in PRE_LIVE
 
 
@@ -283,4 +347,5 @@ def dam_sync_sql(dam_table: str, assignment_table: str) -> str:
 
 
 __all__ = ["SUBJECT", "ACTIONS", "REASON_CODES", "CODES", "membership_cdse_at", "ASSIGNMENT_COLS", "LEGACY_ACTION", "evaluate", "current_cdse", "is_live",
+           "go_live_markers", "GO_LIVE_ACTION", "GO_LIVE_AMBIGUOUS",
            "is_platform_admin", "merge_source_rows", "merge_sql", "dam_sync_sql"]
