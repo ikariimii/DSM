@@ -99,7 +99,14 @@ resources:
           spark_python_task:
             python_file: ../src/jobs/lakebase_extract.py
             parameters: [ "--catalog", "${var.catalog}", "--lb_project", "dam-safety-${bundle.target}",
-                          "--lb_branch", "production", "--lb_endpoint", "primary" ]
+                          "--lb_branch", "production", "--lb_endpoint", "primary", "--job_run_id", "{{job.run_id}}" ]
+        # QA-045d: re-verify every reviewer chain in UC against audit.chain_head (fails the run on any break)
+        - task_key: verify_review_chain
+          depends_on: [ { task_key: extract } ]
+          environment_key: pg
+          spark_python_task:
+            python_file: ../src/jobs/verify_review_chain.py
+            parameters: [ "--catalog", "${var.catalog}" ]
       environments:
         - environment_key: pg
           spec:

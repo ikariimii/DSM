@@ -85,7 +85,7 @@ SUSPECT is a review ranking, not a rejection: show both PROPOSED and SUSPECT_CRO
 | `GET /api/dams/{dam_id}/audit/signoffs/verify` | engineer+ on that dam (dam ACL) | – | `chain` + `genesis`, `scope`, `verified_utc` |
 
 `chain` = `{chain_id, records, ok, first_broken_seq, reason, detail, signed_records}` plus `head_seq`, `head_hash` when
-`ok`; `reason` ∈ `gap | prev_mismatch | hash_mismatch | signature_invalid | head_missing | head_mismatch`.
+`ok`; `reason` ∈ `gap | prev_mismatch | hash_mismatch | signature_missing | signature_downgrade | signature_invalid | head_missing | head_mismatch` (the engine's `verify_records` returns the same codes; QA-045d).
 Discrepancies (flagged to the App Developer): app §7 10e lists `POST /api/instruments/{id}/incl/corrections/{record_id}/review`
 and the lead's request named `/api/dams/{dam_id}/incl/corrections/{record_id}/review`; neither exists in the router,
 which has the `…/incl/surveys/{survey_id}/corrections/{record_id}/review` path above. §7 10e names the record count `n`;

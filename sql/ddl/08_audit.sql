@@ -63,6 +63,25 @@ ALTER TABLE audit.review_record ADD CONSTRAINT ck_review_record_chain CHECK (
          OR (action_type = 'alarm_ack' AND subject_type = 'alarm_event' AND decision = 'acknowledge')
          OR (action_type = 'alarm_close' AND subject_type = 'alarm_event' AND decision = 'close')))));
 
+-- QA-045d: append-only chain heads. dam_lakebase_extract appends the app's Lakebase review_chain_head per chain
+-- (read in the same REPEATABLE READ snapshot as the review_signoff rows it copies) whenever it changed; the verifier
+-- (dam_safety.audit_chain.verify_with_chain_heads) reads the LATEST row per (dam_id, chain_id) and checks every earlier
+-- row as a checkpoint. delta.appendOnly refuses UPDATE and DELETE (Delta docs, "append-only tables"); like the other
+-- audit tables, grant INSERT/SELECT only. Existing deployments: sql/migrations/v1_6_002_chain_head.sql.
+CREATE TABLE IF NOT EXISTS audit.chain_head (
+  dam_id       STRING    NOT NULL,
+  chain_id     STRING    NOT NULL COMMENT 'per-dam reviewer chain (= dam_id)',
+  chain_seq    BIGINT    NOT NULL COMMENT 'seq of the last record when observed; 0 = empty chain',
+  head_hash    STRING    NOT NULL COMMENT 'record_hash of that record (GENESIS for seq 0)',
+  computed_utc TIMESTAMP NOT NULL COMMENT 'when the job read the head (same REPEATABLE READ snapshot as the records)',
+  job_run_id   STRING    NOT NULL COMMENT 'Databricks job run id (or manual-<utc>) that wrote the row',
+  source       STRING    COMMENT 'APP:lakebase:review_chain_head'
+) TBLPROPERTIES (delta.appendOnly = true)
+  COMMENT 'QA-045d: append-only history of the app chain head per dam/chain. Verifiers read the latest row (never a caller-supplied head); every row is also a checkpoint.';
+ALTER TABLE audit.chain_head DROP CONSTRAINT IF EXISTS ck_chain_head;
+ALTER TABLE audit.chain_head ADD CONSTRAINT ck_chain_head CHECK (
+  chain_id = dam_id AND chain_seq >= 0 AND head_hash RLIKE '^[0-9a-f]{64}$');
+
 -- Generic event log: alarm transitions, acks, threshold/calibration changes, logins of note.
 CREATE TABLE IF NOT EXISTS audit.event_log (
   event_id     STRING NOT NULL,

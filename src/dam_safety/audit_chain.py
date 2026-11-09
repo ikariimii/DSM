@@ -8,9 +8,12 @@
   signature, sig_alg, key_id (and the UC-only `source`). canonical_value is corrections.canonical_value (timestamps
   -> UTC ISO-8601 with microseconds and '+00:00', so a Lakebase ISO text and the UC TIMESTAMP hash identically).
 
-The chain HEAD (Lakebase review_chain_head) is not extracted, so a deleted tail is detectable from the UC copy only
-when the caller passes an `expected_head` (chain_seq + head_hash/record_hash, e.g. read from Lakebase or recorded at
-an earlier verification); without it, tail truncation is detectable only in the app (GET /api/audit/signoffs/verify).
+QA-045d: the chain HEAD is mandatory, as in the app. `dam_lakebase_extract` copies the app's Lakebase
+review_chain_head into the append-only UC table audit.chain_head (same REPEATABLE READ snapshot as the records), and
+`verify_with_chain_heads` reads the head from those rows; callers never supply an expected head. A chain with records
+and no head row is head_missing, never ok (app verify_chain semantics). Every stored head is also a checkpoint: a
+later deletion of records at or below any stored head's seq, a head row rewound below an earlier one, a forged
+head_hash or a head row for another chain/dam is reported. Truncation is detectable from the first head row on.
 
 QA-045c: signature rules mirror the app's backend/audit_chain.py verify_chain after QA-045a (App Dev 113060c,
 read only), with the same reason codes. signature / sig_alg / key_id are outside record_hash, so with a real signer
@@ -64,21 +67,23 @@ def _present(v) -> bool:
     return v is not None and str(v).strip() != ""
 
 
-def verify_records(rows, signer=None, expected_head: dict | None = None) -> dict:
-    """Recompute one chain from its records (any order).
+def verify_records(rows, signer=None, head: dict | None = None) -> dict:
+    """Recompute one chain from its records (any order) against its head. Mirrors the app's
+    backend/audit_chain.py verify_chain(rows, head, signer) (App Dev, read only), reason for reason.
 
     signer: object with .alg, .key_id and .verify(record_hash, signature, key_id) (the app's Signer protocol);
-    None / NoopSigner = signatures not required. expected_head: optional {chain_seq, head_hash} (record_hash is
-    accepted for head_hash); None = no head check (the UC copy has no head; see module doc).
+    None / NoopSigner = signatures not required. head: {chain_seq, head_hash} (record_hash accepted for head_hash) or
+    None. None with records => head_missing (QA-045d: never ok); None with no records => ok (empty chain). A head
+    that names another chain_id is head_mismatch (the app looks its head up by chain_id, so it cannot get one).
 
     Returns {chain_id, records, ok, first_broken_seq, reason, detail, signed_records, signatures_required} (+ head_seq,
     head_hash when ok). reason, as in the app: gap | prev_mismatch | hash_mismatch | signature_missing |
-    signature_downgrade | signature_invalid | head_mismatch. Reordered/replayed records surface as gap (duplicate or
-    out-of-place chain_seq) or prev_mismatch/hash_mismatch (a record moved to another seq)."""
+    signature_downgrade | signature_invalid | head_missing | head_mismatch. Reordered/replayed records surface as gap
+    (duplicate or out-of-place chain_seq) or prev_mismatch/hash_mismatch (a record moved to another seq)."""
     signer = signer or NoopSigner()
     rows = sorted(rows, key=lambda r: (int(r["chain_seq"]), str(r["review_id"])))
     enforce = is_enforcing(signer)
-    out = {"chain_id": rows[0]["chain_id"] if rows else (expected_head or {}).get("chain_id"), "records": len(rows),
+    out = {"chain_id": rows[0]["chain_id"] if rows else (head or {}).get("chain_id"), "records": len(rows),
            "ok": False, "first_broken_seq": None, "reason": None, "detail": None, "signed_records": 0,
            "signatures_required": enforce}
 
@@ -116,9 +121,16 @@ def verify_records(rows, signer=None, expected_head: dict | None = None) -> dict
             out["signed_records"] += 1
         prev, expected = r["record_hash"], seq + 1
     last = expected - 1
-    if expected_head is not None:
-        h_seq = int(expected_head["chain_seq"])
-        h_hash = expected_head.get("head_hash", expected_head.get("record_hash"))
+    if head is None:
+        if rows:   # app: records exist but the chain head row is missing
+            return broken(last + 1, "head_missing", "records exist but the chain head row is missing")
+    else:
+        h_seq = int(head["chain_seq"])
+        h_hash = head.get("head_hash", head.get("record_hash"))
+        if rows and head.get("chain_id") not in (None, out["chain_id"]):
+            return broken(last + 1 if h_seq > last else h_seq, "head_mismatch",
+                          f"head row is for chain {head.get('chain_id')!r}, "
+                          f"not {out['chain_id']!r}")
         if h_seq != last or h_hash != prev:
             return broken(last + 1 if h_seq > last else h_seq, "head_mismatch",
                           f"chain head at seq {h_seq} but the last verifiable record is seq {last} "
@@ -127,3 +139,54 @@ def verify_records(rows, signer=None, expected_head: dict | None = None) -> dict
     out["head_seq"] = last
     out["head_hash"] = prev
     return out
+
+
+# ---------------------------------------------------------------- QA-045d: heads from audit.chain_head
+CHAIN_HEAD_COLS = ("dam_id", "chain_id", "chain_seq", "head_hash", "computed_utc", "job_run_id", "source")
+
+
+def latest_chain_head(head_rows, dam_id: str, chain_id: str) -> dict | None:
+    """The latest audit.chain_head row of (dam_id, chain_id): max computed_utc, ties broken by chain_seq then
+    head_hash (deterministic). Rows of other chains/dams are ignored (they are never this chain's head)."""
+    mine = [h for h in head_rows if h.get("dam_id") == dam_id and h.get("chain_id") == chain_id]
+    if not mine:
+        return None
+    return max(mine, key=lambda h: (str(h["computed_utc"]), int(h["chain_seq"]), str(h["head_hash"])))
+
+
+def verify_with_chain_heads(rows, head_rows, dam_id: str, chain_id: str | None = None, signer=None) -> dict:
+    """Verify one chain against the heads the job stored in audit.chain_head (no caller-supplied head).
+
+    1. records of another chain or dam in `rows` are a caller bug (the job filters by dam), so ValueError.
+    2. latest head (latest_chain_head) -> verify_records(rows, signer, head). No head row => head_missing.
+    3. checkpoints: every stored head of this chain must still match the record at its seq (a head above the
+       current last record = tail truncated after it was recorded; a different hash = forged head or rewritten
+       record), and the latest head must not be below an earlier one (rewound head) => head_mismatch."""
+    chain_id = chain_id or dam_id
+    rows = list(rows)
+    stray = {(r.get("dam_id"), r.get("chain_id")) for r in rows} - {(dam_id, chain_id)}
+    if stray:
+        raise ValueError(f"verify_with_chain_heads({dam_id}/{chain_id}) got records of {sorted(stray, key=str)}")
+    heads = [h for h in head_rows if h.get("dam_id") == dam_id and h.get("chain_id") == chain_id]
+    head = latest_chain_head(heads, dam_id, chain_id)
+    res = verify_records(rows, signer, head)
+    res["heads_checked"] = len(heads)
+    if not res["ok"]:
+        return res
+    by_seq = {int(r["chain_seq"]): r["record_hash"] for r in rows}
+    top = max(int(h["chain_seq"]) for h in heads) if heads else 0
+    if head is not None and int(head["chain_seq"]) < top:
+        res.update(ok=False, first_broken_seq=int(head["chain_seq"]) + 1, reason="head_mismatch",
+                   detail=f"latest head (seq {head['chain_seq']}) is below an earlier head (seq {top}): "
+                          "head rewound, records after it may have been deleted")
+        return res
+    for h in sorted(heads, key=lambda h: (int(h["chain_seq"]), str(h["computed_utc"]))):
+        s = int(h["chain_seq"])
+        if s == 0:
+            continue
+        if by_seq.get(s) != h["head_hash"]:
+            res.update(ok=False, first_broken_seq=s, reason="head_mismatch",
+                       detail=f"stored head seq {s} @ {h['computed_utc']} ({h.get('job_run_id')}) does not match the "
+                              "record at that seq (forged head, or the record was rewritten)")
+            return res
+    return res

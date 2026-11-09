@@ -123,6 +123,7 @@ App OLTP state lives in **Lakebase Autoscaling** in Postgres schema `dam_app` (s
 | `ops.calibration_event` | `ops.calibration_event` | table | 07 |
 | `ops.surveillance_inspection` | `ops.surveillance_inspection` | table (from Lakebase `inspection_note`) | 07 |
 | `audit.review_record` | `audit.review_record` | insert-only table | 08 |
+| `audit.chain_head` | `audit.chain_head` | insert-only table (QA-045d): app chain head per dam/chain, appended by `dam_lakebase_extract`; read by `verify_review_chain` | 08 |
 | `rpt.dssmr` | `rpt.dssmr` (artifacts in volume `rpt.artifacts`) | table | 09 |
 | `rpt.part12d_inspection` | `rpt.part12d_inspection` | table | 09 |
 | `rpt.ic_recommendation` | `rpt.ic_recommendation` | table | 09 |
@@ -459,6 +460,12 @@ name and fail loudly if it does not resolve.
   **before** `dam_uc_setup` (`sql/ddl/08` names the chain columns, `sql/ddl/11` selects
   `ops.alarm_transition.installation_version`). Do not re-run v1_5_001 afterwards (its older CHECK rejects
   `alarm_event`); if it was, re-run v1_6_001. UNVERIFIED (MIGRATION-2).
+- **Upgrade (QA-045d):** then run `sql/migrations/v1_6_002_chain_head.sql` (idempotent, creates the append-only
+  `audit.chain_head`) **before** `dam_uc_setup` (its row filter names the table) and before the next extract run.
+  UNVERIFIED (MIGRATION-2b). Chain verification (§5.5.2): the verifier reads the latest `audit.chain_head` row per
+  (`dam_id`, `chain_id`), never a caller-supplied head; records without any head row are `head_missing` (never ok,
+  as in the app); every stored head is a checkpoint, so tail truncation, a rewound head, a forged `head_hash` and a
+  head for another chain are `head_mismatch` from the first stored head on.
 
 ## 9. Sign-off
 | Party | Agent | Status |
