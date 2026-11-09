@@ -49,8 +49,11 @@ resources:
         - task_key: ddl_10a_row_filters      # security_mode switch: table (default) | abac, mutually exclusive
           depends_on: [ { task_key: ddl_10_security } ]
           sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: "../sql/ddl/10a_row_filters_${var.security_mode}.sql" }, parameters: { catalog: "${var.catalog}" } }
-        - task_key: ddl_11_gold_views
+        - task_key: ddl_10b_reviewer_authority   # v1.6: least-privilege CDSE authority view + per-dam grants
           depends_on: [ { task_key: ddl_10a_row_filters } ]
+          sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/10b_reviewer_authority.sql }, parameters: { catalog: "${var.catalog}" } }
+        - task_key: ddl_11_gold_views
+          depends_on: [ { task_key: ddl_10b_reviewer_authority } ]
           sql_task: { warehouse_id: "${var.warehouse_id}", file: { path: ../sql/ddl/11_gold_views.sql }, parameters: { catalog: "${var.catalog}" } }
         - task_key: ddl_12_gold_interpretation
           depends_on: [ { task_key: ddl_11_gold_views } ]
