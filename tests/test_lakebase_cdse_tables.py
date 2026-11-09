@@ -12,6 +12,8 @@ import uuid
 
 import pytest
 
+from gitrev import git_show_or_skip  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DDL_PATH = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 VALIDATOR = os.path.join(ROOT, "lakebase", "validate_append_only.sql")
@@ -53,13 +55,13 @@ def _psql(conninfo, *args, env_extra=None):
 
 @pytest.fixture()
 def env(tmp_path):
+    old_sql = git_show_or_skip(ROOT, "dfc08bb", "lakebase/001_app_schema.sql")   # before any database is created
     tag = uuid.uuid4().hex[:8]
     db, app, pub = f"lbcd_{tag}", f"lbcd_app_{tag}", f"lbcd_pub_{tag}"
     assert _psql(PG, "-c", f"CREATE DATABASE {db}", "-c", f"CREATE ROLE {app} LOGIN",
                  "-c", f"CREATE ROLE {pub} LOGIN").returncode == 0
     old = tmp_path / "001_dfc08bb.sql"
-    old.write_text(subprocess.run(["git", "-C", ROOT, "show", "dfc08bb:lakebase/001_app_schema.sql"],
-                                  capture_output=True, text=True, check=True).stdout)
+    old.write_text(old_sql)
     yield {"conn": f"{PG} dbname={db}", "app": app, "pub": pub, "old": str(old),
            "opts": {"PGOPTIONS": f"-c dam.app_role={app} -c dam.publisher_login={pub}"}}
     _psql(PG, "-c", f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")

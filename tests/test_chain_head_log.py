@@ -14,6 +14,8 @@ import re
 
 import pytest
 
+from gitrev import git_show_or_skip, require_git  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "src", "jobs"))
@@ -127,6 +129,7 @@ def test_even_the_owner_cannot_update_without_dropping_the_guard(env):
 def test_patched_app_appends_heads_and_reads_the_latest(env):
     """Apply the patch to an export of HEAD's app/ and drive the real StateStore as the app role."""
     dst = env["tmp"] / "app_export"
+    require_git(ROOT, "`git archive HEAD app` (the patch is applied to HEAD's committed app/)")
     tar = subprocess.run(["git", "-C", ROOT, "archive", "HEAD", "app"], capture_output=True, check=True).stdout
     tarfile.open(fileobj=io.BytesIO(tar)).extractall(dst, filter="data")
     r = subprocess.run(["git", "apply", PATCH], cwd=dst, capture_output=True, text=True)
@@ -172,14 +175,14 @@ def test_migration_block_is_identical_to_001_and_down_drops_nothing():
 
 @live
 def test_upgrade_by_migration_rollback_keeps_rows_and_reapply(tmp_path):
+    old_sql = git_show_or_skip(ROOT, "ea66581", "lakebase/001_app_schema.sql")
     tag = uuid.uuid4().hex[:8]
     db, app = f"lbh6_{tag}", f"lbh6_app_{tag}"
     assert _psql(PG, "-c", f"CREATE DATABASE {db}", "-c", f"CREATE ROLE {app} LOGIN").returncode == 0
     conn, opts = f"{PG} dbname={db}", {"PGOPTIONS": f"-c dam.app_role={app}"}
     try:
         old = tmp_path / "001_ea66581.sql"                       # the last 001 without the head log
-        old.write_text(subprocess.run(["git", "-C", ROOT, "show", "ea66581:lakebase/001_app_schema.sql"],
-                                      capture_output=True, text=True, check=True).stdout)
+        old.write_text(old_sql)
         assert _psql(conn, "-f", str(old), env_extra=opts).returncode == 0
         assert _psql(conn, "-c", f"INSERT INTO dam_app.review_chain_head VALUES ('OLD', 4, '{H('4')}', 't')"
                      ).returncode == 0

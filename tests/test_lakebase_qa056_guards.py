@@ -9,6 +9,8 @@ import uuid
 
 import pytest
 
+from gitrev import git_show_or_skip  # noqa: E402
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DDL = os.path.join(ROOT, "lakebase", "001_app_schema.sql")
 MIG = os.path.join(ROOT, "lakebase", "migrations", "v1_7_007_qa056_unique_guards.sql")
@@ -85,14 +87,14 @@ def test_fresh_001_has_the_guards_and_the_app_role_cannot_insert_a_second_pendin
 
 @live
 def test_upgrade_from_the_previous_001_by_migration_passes_the_validator(tmp_path):
+    old_sql = git_show_or_skip(ROOT, "d150288", "lakebase/001_app_schema.sql")
     tag = uuid.uuid4().hex[:8]
     db, app = f"lbq56u_{tag}", f"lbq56u_app_{tag}"
     assert _psql(PG, "-c", f"CREATE DATABASE {db}", "-c", f"CREATE ROLE {app} LOGIN").returncode == 0
     su, opts = f"{PG} dbname={db}", {"PGOPTIONS": f"-c dam.app_role={app}"}
     try:
         old = tmp_path / "001_d150288.sql"                        # the last 001 without the v1_7_007 block
-        old.write_text(subprocess.run(["git", "-C", ROOT, "show", "d150288:lakebase/001_app_schema.sql"],
-                                      capture_output=True, text=True, check=True).stdout)
+        old.write_text(old_sql)
         assert _psql(su, "-f", str(old), env_extra=opts).returncode == 0
         for _ in range(2):
             r = _psql(su, "-f", MIG, env_extra=opts)
